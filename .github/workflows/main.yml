@@ -21,7 +21,7 @@ jobs:
 
       - name: 安裝必要套件
         run: |
-          pip install yfinance pandas requests pytz
+          pip install yfinance pandas requests pytz mplfinance
 
       - name: 執行監控程式
         env:
