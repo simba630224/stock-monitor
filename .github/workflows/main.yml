@@ -1,10 +1,10 @@
-name: 每日股票監控
+name: 每日全方位監控 (技術+資產)
 
 on:
   schedule:
-    # 設定每天 UTC 09:00 執行 (即台灣時間下午 17:00)
-    - cron: '0 9 * * *'
-  workflow_dispatch: # 允許手動測試
+    # 每天 UTC 10:00 = 台灣時間 18:00
+    - cron: '0 10 * * *'
+  workflow_dispatch: # 允許手動執行
 
 jobs:
   build:
@@ -19,11 +19,25 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 安裝必要套件
+      - name: 安裝所有必要套件
         run: |
-          pip install yfinance pandas requests pytz mplfinance
+          # 這裡同時安裝兩支程式需要的套件
+          # mplfinance 是畫 K 線圖用的
+          pip install yfinance pandas requests numpy mplfinance
 
-      - name: 執行監控程式
+      - name: 1. 執行個股技術監控 (K線圖)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # 如果有 daily_stock.py 才會執行
+          if [ -f daily_stock.py ]; then
+            python daily_stock.py
+          else
+            echo "找不到 daily_stock.py，跳過執行。"
+          fi
+
+      - name: 2. 執行投資組合報告 (總市值)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
