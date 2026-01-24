@@ -22,12 +22,14 @@ WATCH_LIST = [
     {'symbol': '00646.TW',  'name': '元大S&P500'},
     {'symbol': '00757.TW',  'name': '統一FANG+'},
     {'symbol': '00662.TW',  'name': '富邦NASDAQ'},
-    {'symbol': '00981.TW',  'name': '富邦公用'},
+    {'symbol': '009812.TW',  'name': '日本'},
     
     # --- 美股 ---
     {'symbol': 'NVDA',      'name': '輝達'},
     {'symbol': 'META',      'name': 'Meta'},
     {'symbol': 'QQQ',       'name': '那斯達克ETF'},
+    {'symbol': 'VOO',       'name': 'S&P500 ETF'},
+    {'symbol': 'VT',       'name': 'World ETF'},
 ]
 
 # --- 2. Telegram 通知功能 (文字) ---
