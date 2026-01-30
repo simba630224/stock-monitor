@@ -18,10 +18,10 @@ jobs:
         run: pip install yfinance pandas requests
       - name: 執行資產報告
         env:
+          # --- 關鍵修復：這裡的名稱必須與你的 Secrets 一致 ---
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # 這裡執行你其他的資訊腳本，例如 daily_portfolio_report.py
           if [ -f daily_portfolio_report.py ]; then
             python daily_portfolio_report.py
           else
