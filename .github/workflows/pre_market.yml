@@ -11,18 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: 設定 Python 環境
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v4
         with:
-          python-version: '3.12' # 升級到 3.12 以符合套件要求
-
-      - name: 安裝所有必要套件
-        run: |
-          python -m pip install --upgrade pip
-          pip install yfinance pandas pandas-ta mplfinance requests
-          
+          python-version: '3.12'
+      - name: 安裝套件
+        run: pip install -r requirements.txt
       - name: 執行分析
-        env:
+        env:  # <--- 這行必須對齊 run:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+        run: python main.py  # <--- run 和 env 必須在同一個「橫線 -」清單項下
