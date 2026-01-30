@@ -27,6 +27,8 @@ WATCH_LIST = [
     # --- 美股 ---
     {'symbol': 'NVDA',      'name': '輝達'},
     {'symbol': 'META',      'name': 'Meta'},
+    {'symbol': 'MSFT',      'name': 'MSFT'},
+    {'symbol': 'GOOGL',      'name': 'GOOGLE'},
     {'symbol': 'QQQ',       'name': '那斯達克ETF'},
     {'symbol': 'VOO',       'name': 'S&P500 ETF'},
     {'symbol': 'VT',       'name': 'World ETF'},
