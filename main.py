@@ -1,14 +1,13 @@
+import os
 import yfinance as yf
-import pandas as pd
 import pandas_ta as ta
 import mplfinance as mpf
 import requests
-import os
-from datetime import datetime
 
-# --- 配置設定 ---
-TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+# 這裡的變數名稱一定要和你在 GitHub Settings 設的一模一樣
+TG_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN') 
+TG_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
 
 # 1. 簡化測試清單 (建議先用這幾檔測試成功後再擴充)
 STOCKS = ['2330.TW', '2317.TW', '2454.TW', '2303.TW', '2603.TW']
@@ -30,6 +29,9 @@ def get_weekly_status(df):
         return "計算錯誤", 0, 0
 
 def send_telegram(text, img_path):
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print("錯誤：找不到 Telegram Token 或 Chat ID，請檢查 Secrets 設定")
+        return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     with open(img_path, 'rb') as f:
         requests.post(url, data={'chat_id': TG_CHAT_ID, 'caption': text, 'parse_mode': 'Markdown'}, files={'photo': f})
