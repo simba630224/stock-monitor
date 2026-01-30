@@ -11,9 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
       - name: 設定 Python 環境
         uses: actions/setup-python@v4
         with:
