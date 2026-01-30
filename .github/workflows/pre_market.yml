@@ -14,10 +14,16 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12' # 升級到 3.12 以符合套件要求
+
       - name: 安裝所有必要套件
         run: |
-          # 確保所有繪圖與指標套件都裝好
-          pip install yfinance pandas requests numpy mplfinance pandas_ta
+          python -m pip install --upgrade pip
+          pip install yfinance pandas pandas-ta mplfinance requests
+          
       - name: 執行分析
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
