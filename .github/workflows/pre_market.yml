@@ -1,0 +1,23 @@
+name: 1. 台北盤前技術分析 (08:30)
+
+on:
+  schedule:
+    # 台北 08:30 = UTC 00:30
+    - cron: '30 0 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  technical_analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+      - name: 執行分析
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
