@@ -14,8 +14,10 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      - name: 安裝套件
-        run: pip install -r requirements.txt
+      - name: 安裝所有必要套件
+        run: |
+          # 確保所有繪圖與指標套件都裝好
+          pip install yfinance pandas requests numpy mplfinance pandas_ta
       - name: 執行分析
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
