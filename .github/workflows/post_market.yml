@@ -4,7 +4,7 @@ on:
   schedule:
     # 每天 UTC 10:00 = 台灣時間 18:00
     - cron: '0 10 * * *'
-  workflow_dispatch: # 允許手動執行
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,24 +17,25 @@ jobs:
       - name: 設定 Python 環境
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # 使用較新版本避免 yfinance 問題
+          python-version: '3.12'
 
       - name: 安裝套件
         run: |
+          python -m pip install --upgrade pip
           pip install yfinance pandas requests numpy
 
-     - name: 執行報告程式
+      - name: 執行報告程式
         env:
-          # 這裡同時提供兩種名稱，確保程式一定抓得到
+          # 同時提供兩種變數名，確保程式一定能讀到
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           echo "=== 系統診斷開始 ==="
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "❌ 診斷結果：GitHub Shell 抓不到變數，請檢查 Secrets 設定"
+            echo "❌ 診斷結果：GitHub Secrets 未正確載入"
           else
-            echo "✅ 診斷結果：變數已成功載入"
+            echo "✅ 診斷結果：Secrets 載入成功"
           fi
           echo "===================="
           python daily_portfolio_report.py
