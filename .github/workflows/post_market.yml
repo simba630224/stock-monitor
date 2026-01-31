@@ -36,5 +36,5 @@ jobs:
             echo "✅ 診斷結果：GitHub Shell 已成功接收 TOKEN 變數"
           fi
           echo "===================="
-        run: |
+        
           python daily_portfolio_report.py
