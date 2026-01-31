@@ -23,18 +23,18 @@ jobs:
         run: |
           pip install yfinance pandas requests numpy
 
-      - name: 執行報告程式
+     - name: 執行報告程式
         env:
-          # 重點：這裡的左邊是程式讀取的名字，右邊是 GitHub 的 Secret 名字
+          # 這裡同時提供兩種名稱，確保程式一定抓得到
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           echo "=== 系統診斷開始 ==="
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "❌ 診斷結果：GitHub Shell 完全抓不到 TOKEN 變數"
+            echo "❌ 診斷結果：GitHub Shell 抓不到變數，請檢查 Secrets 設定"
           else
-            echo "✅ 診斷結果：GitHub Shell 已成功接收 TOKEN 變數"
+            echo "✅ 診斷結果：變數已成功載入"
           fi
           echo "===================="
-        
           python daily_portfolio_report.py
