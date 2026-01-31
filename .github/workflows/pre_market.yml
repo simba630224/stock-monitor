@@ -2,7 +2,7 @@ name: 1. 台北盤前全方位掃描 (08:30)
 
 on:
   schedule:
-    - cron: '30 0 * * 1-5' # 台北時間 08:30
+    - cron: '30 0 * * 1-5' # 台北 08:30
   workflow_dispatch:
 
 jobs:
@@ -10,14 +10,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      
+      - name: 設定 Python 3.10
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-      - name: 安裝套件
-        run: pip install yfinance pandas pandas_ta mplfinance requests
+          python-version: '3.10'
+          
+      - name: 更新 pip 並安裝核心套件
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas requests mplfinance numpy==1.26.4
+          
+      - name: 安裝技術指標套件
+        run: pip install pandas_ta
+          
       - name: 執行分析
         env:
-          # --- 關鍵對齊點 ---
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py
