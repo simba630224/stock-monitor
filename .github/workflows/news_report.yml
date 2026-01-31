@@ -1,0 +1,23 @@
+name: 1.5 盤前新聞彙整 (08:45)
+
+on:
+  schedule:
+    - cron: '45 0 * * 1-5' # 台北 08:45，在分析報告後執行
+  workflow_dispatch:
+
+jobs:
+  news_report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: 設定 Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: 安裝基本套件
+        run: pip install yfinance requests
+      - name: 執行新聞抓取
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python stock_news_report.py
