@@ -1,29 +1,31 @@
-name: 2. 台北盤後資產報告 (17:00)
+name: 每日投資組合報告
 
 on:
   schedule:
-    # 台北 17:00 = UTC 09:00
-    - cron: '0 9 * * 1-5'
-  workflow_dispatch:
+    # 每天 UTC 10:00 = 台灣時間 18:00
+    - cron: '0 10 * * *'
+  workflow_dispatch: # 允許手動執行
 
 jobs:
-  portfolio_report:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - name: 下載程式碼
+        uses: actions/checkout@v3
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.11' # 使用較新版本避免 yfinance 問題
+
       - name: 安裝套件
-        run: pip install yfinance pandas requests
-      - name: 執行資產報告
+        run: |
+          pip install yfinance pandas requests numpy
+
+      - name: 執行報告程式
         env:
-          # --- 關鍵修復：這裡的名稱必須與你的 Secrets 一致 ---
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          if [ -f daily_portfolio_report.py ]; then
-            python daily_portfolio_report.py
-          else
-            echo "找不到資產報告檔案"
-          fi
+          python daily_portfolio_report.py
