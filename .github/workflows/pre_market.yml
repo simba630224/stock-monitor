@@ -1,32 +1,23 @@
-name: 1. 台北盤前技術分析 (診斷模式)
+name: 1. 台北盤前全方位掃描 (08:30)
 
 on:
   schedule:
-    - cron: '30 0 * * 1-5'
+    - cron: '30 0 * * 1-5' # 台北時間 08:30
   workflow_dispatch:
 
 jobs:
-  technical_analysis:
+  analyze:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: '3.11'
       - name: 安裝套件
-        run: pip install -r requirements.txt
-        
-      - name: 執行分析 (含環境診斷)
+        run: pip install yfinance pandas pandas_ta mplfinance requests
+      - name: 執行分析
         env:
-          # 重點：這裡的左邊是程式讀取的名字，右邊是 GitHub 的 Secret 名字
+          # --- 關鍵對齊點 ---
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          echo "=== 系統診斷開始 ==="
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "❌ 診斷結果：GitHub Shell 完全抓不到 TOKEN 變數"
-          else
-            echo "✅ 診斷結果：GitHub Shell 已成功接收 TOKEN 變數"
-          fi
-          echo "===================="
-          python main.py
+        run: python main.py
