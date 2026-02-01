@@ -1,14 +1,4 @@
-name: 1. 台北盤前全方位掃描 (08:30)
-
-on:
-  schedule:
-    - cron: '30 0 * * 1-5'
-  workflow_dispatch:
-
-jobs:
-  analyze:
-    runs-on: ubuntu-latest
-    steps:
+steps:
       - uses: actions/checkout@v3
       - name: 設定 Python
         uses: actions/setup-python@v4
@@ -18,8 +8,10 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install yfinance pandas requests mplfinance
-      - name: 執行分析
+      - name: 執行分析與新聞
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+        run: |
+          python main.py
+          python stock_news_report.py
