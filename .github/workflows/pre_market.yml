@@ -1,17 +1,36 @@
-steps:
-      - uses: actions/checkout@v3
-      - name: 設定 Python
+name: 1. 台北盤前全方位分析 (08:30)
+
+on:
+  schedule:
+    # 台北時間週一至週五 08:30 (UTC 00:30)
+    - cron: '30 0 * * 1-5'
+  workflow_dispatch: # 允許手動執行測試
+
+jobs:
+  analyze_and_news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下載程式碼
+        uses: actions/checkout@v3
+
+      - name: 設定 Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+
       - name: 安裝基本套件
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install yfinance pandas requests mplfinance
-      - name: 執行分析與新聞
+
+      - name: 執行分析報告 (main.py)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python main.py
-          python stock_news_report.py
+        run: python main.py
+
+      - name: 執行新聞抓取 (stock_news_report.py)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python stock_news_report.py
