@@ -4,83 +4,43 @@ import os
 import time
 from datetime import datetime, timedelta
 
-# --- 1. 配置與環境變數 ---
 TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-WATCH_LIST = [
-    {'symbol': '2330.TW',   'name': '台積電'},
-    {'symbol': '2454.TW',   'name': '聯發科'},
-    {'symbol': '0050.TW',   'name': '台灣50'},
-    {'symbol': '00878.TW',  'name': '國泰永續高股息'},
-    {'symbol': '009812.TW', 'name': 'Japan'},
-    {'symbol': '00830.TW',  'name': '費城半導體'},
-    {'symbol': 'NVDA',      'name': '輝達'},
-    {'symbol': 'GOOGL',     'name': 'GOOGLE'},
-    {'symbol': 'META',      'name': 'Meta'},
-    {'symbol': 'MSFT',      'name': 'MSFT'},
-    {'symbol': 'QQQ',       'name': '那斯達克'},
-    {'symbol': 'VOO',       'name': 'S&P500'},
-    {'symbol': 'VT',        'name': 'World Stock'}
-]
+# 標的名單
+WATCH_LIST = ['2330.TW', '2454.TW', '0050.TW', '00878.TW', 'NVDA', 'GOOGL', 'META', 'MSFT', 'QQQ', 'VOO']
 
-def send_tg_msg(text):
+def send_news(text):
     if not TG_TOKEN or not TG_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': 'Markdown', 'disable_web_page_preview': False})
-    except Exception as e:
-        print(f"TG發送異常: {e}")
+    requests.post(url, data={'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': 'Markdown', 'disable_web_page_preview': False})
 
 def main():
-    date_now = datetime.now()
-    three_days_ago = date_now - timedelta(days=3)
+    limit_time = datetime.now() - timedelta(days=3)
+    print("--- 開始新聞抓取 ---")
     
-    print(f"=== 啟動新聞抓取任務: {date_now.strftime('%Y/%m/%d')} ===")
-    
-    overall_news_count = 0
-    
-    for item in WATCH_LIST:
-        sym, name = item['symbol'], item['name']
-        print(f"正在搜尋: {name} ({sym})")
-        
+    for sym in WATCH_LIST:
         try:
             ticker = yf.Ticker(sym)
-            news_list = ticker.news
+            news_data = ticker.news
+            if not news_data: continue
             
-            # 建立該標的的新聞訊息
-            stock_report = f"📰 *【{name} 新聞快報】*\n"
-            valid_news_found = False
-            count = 0
+            report = f"📰 *【{sym} 相關新聞】*\n"
+            found = False
+            for n in news_data[:3]: # 取前 3 則
+                p_time = datetime.fromtimestamp(n.get('providerPublishTime', 0))
+                if p_time > limit_time:
+                    title = n.get('title', '無標題')
+                    link = n.get('link', '#')
+                    source = n.get('publisher', '未知來源')
+                    report += f"🔹 {title}\n   _({source})_ [點此閱讀]({link})\n\n"
+                    found = True
             
-            for news in news_list:
-                # 轉換新聞發布時間 (Unix timestamp)
-                pub_time = datetime.fromtimestamp(news['providerPublishTime'])
-                
-                # 只取 3 天內的訊息，且單一標最多 3 則
-                if pub_time > three_days_ago and count < 3:
-                    title = news['title']
-                    link = news['link']
-                    publisher = news['publisher']
-                    
-                    stock_report += f"🔹 {title}\n   _({publisher})_ [閱讀原文]({link})\n\n"
-                    valid_news_found = True
-                    count += 1
-                    overall_news_count += 1
-            
-            if valid_news_found:
-                send_tg_msg(stock_report)
-                time.sleep(1) # 稍微停頓避免 TG API 頻率限制
-            else:
-                print(f"   (近 3 日無相關新聞)")
-
+            if found:
+                send_news(report)
+                time.sleep(1) # 防 API 限制
         except Exception as e:
-            print(f"抓取 {sym} 新聞出錯: {e}")
-
-    if overall_news_count == 0:
-        send_tg_msg("📅 今日觀察標的名單近 3 日暫無重大新聞更新。")
-    
-    print(f"=== 任務完成，共發送 {overall_news_count} 則新聞 ===")
+            print(f"新聞抓取錯誤 {sym}: {e}")
 
 if __name__ == "__main__":
     main()
