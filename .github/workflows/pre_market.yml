@@ -2,9 +2,8 @@ name: 1. 台北盤前全方位分析 (08:30)
 
 on:
   schedule:
-    # 台北時間週一至週五 08:30 (UTC 00:30)
     - cron: '30 0 * * 1-5'
-  workflow_dispatch: # 允許手動執行測試
+  workflow_dispatch:
 
 jobs:
   analyze_and_news:
