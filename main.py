@@ -23,8 +23,8 @@ TW_CORE = [
 ]
 
 US_WATCH = {
-    '^GSPC': 'S&P 500 指數', # 加入「指數」二字增加精確度
-    '^IXIC': 'Nasdaq 納斯達克', 
+    '^GSPC': '標普500 S&P500 指數', # 使用複合名稱避開 S 字干擾
+    '^IXIC': '納斯達克 Nasdaq', 
     '^SOX': '費城半導體 SOX',
     'NVDA': '輝達 Nvidia',
     'AAPL': '蘋果 Apple',
@@ -32,32 +32,46 @@ US_WATCH = {
 }
 
 def get_filtered_news(name):
-    """加強過濾：排除娛樂、社會新聞，鎖定財經報系"""
-    # 排除大S、明星等干擾字眼
-    exclude_query = "-娛樂 -明星 -大S -汪小菲 -具俊曄 -電影 -戲劇"
-    # 鎖定報系與財經領域
-    source_query = f"{name} (經濟日報 OR 工商日報 OR 華爾街日報) {exclude_query}"
+    """
+    深度財經過濾邏輯：
+    1. 強制搜尋標題包含財經關鍵字 (股市/股價/財經/ETF/債券)
+    2. 強制排除娛樂圈所有相關關鍵字
+    """
+    # 核心財經主題限定
+    topic_limit = "(intitle:股市 OR intitle:股價 OR intitle:財經 OR intitle:ETF OR intitle:債券 OR intitle:美股)"
+    # 娛樂圈排除清單 (包含大S、小S及其親友相關)
+    exclude_list = "-娛樂 -明星 -藝人 -影視 -大S -小S -汪小菲 -具俊曄 -許雅鈞 -綜藝 -緋聞 -穿搭 -八卦"
+    # 指定報系
+    media_limit = "(經濟日報 OR 工商日報 OR 華爾街日報)"
     
-    url = f"https://news.google.com/rss/search?q={source_query}+when:48h&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    # 組合最終搜尋字串
+    query = f"{name} {topic_limit} {media_limit} {exclude_list}"
+    
+    url = f"https://news.google.com/rss/search?q={query}+when:48h&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    
     try:
         r = requests.get(url, timeout=10)
         root = ET.fromstring(r.text)
         items = []
         for item in root.findall('.//item')[:2]:
             title = item.find('title').text
-            # 再次檢查標題中是否含有大S等字眼 (雙重防線)
-            if any(bad in title for bad in ["大S", "具俊曄", "汪小菲"]):
+            link = item.find('link').text
+            
+            # 最終人工校驗：若標題仍含極高風險詞則跳過
+            if any(bad in title for bad in ["大S", "小S", "汪小菲", "婚姻", "婆婆"]):
                 continue
-            items.append(f"🔹 {title}\n   [閱讀原文]({item.find('link').text})")
-        return "\n".join(items) if items else "近期暫無核心報系之財經新聞。"
-    except: return "新聞抓取失敗。"
+                
+            items.append(f"🔹 {title}\n   [閱讀原文]({link})")
+            
+        return "\n".join(items) if items else "近期暫無指定權威報系之重大財經報導。"
+    except: return "新聞載入暫時失敗。"
 
 def analyze_ma_relation(price, ma20, ma60):
-    if price > ma20 and price > ma60: return "🟢 站穩 MA20 與 MA60 之上 (強勢)"
-    if price < ma20 and price < ma60: return "🔴 位於 MA20 與 MA60 之下 (弱勢)"
-    if price > ma60 and price < ma20: return "🟡 守住 MA60 季線，但受阻於 MA20 (整理)"
-    if price > ma20 and price < ma60: return "🔵 突破 MA20 月線，但面臨 MA60 壓力 (反彈)"
-    return "均線糾結中"
+    if price > ma20 and price > ma60: return "🟢 站穩 MA20 與 MA60 (強勢排列)"
+    if price < ma20 and price < ma60: return "🔴 位於 MA20 與 MA60 之下 (偏空格局)"
+    if price > ma60 and price < ma20: return "🟡 守住 MA60 季線，但上方受 MA20 壓制 (築底中)"
+    if price > ma20 and price < ma60: return "🔵 突破 MA20 月線，但面臨 MA60 季線挑戰 (反彈中)"
+    return "均線交纏整理中"
 
 def calculate_indicators(df):
     df['MA20'] = df['Close'].rolling(20).mean()
@@ -88,24 +102,26 @@ def process_target(sym, name):
         df, df_w = calculate_indicators(df_raw.astype(float).dropna())
         
         last_p = df['Close'].iloc[-1]
-        ma20, ma60 = df['MA20'].iloc[-1], df['MA60'].iloc[-1]
-        ma_status = analyze_ma_relation(last_p, ma20, ma60)
+        ma_status = analyze_ma_relation(last_p, df['MA20'].iloc[-1], df['MA60'].iloc[-1])
         
         k, d, pk, pd_v = df_w['K'].iloc[-1], df_w['D'].iloc[-1], df_w['K'].iloc[-2], df_w['D'].iloc[-2]
-        kd_text = "金叉轉強" if k > d and pk <= pd_v else "死亡交叉" if k < d and pk >= pd_v else "趨勢中"
+        kd_text = "金叉轉強" if k > d and pk <= pd_v else "死亡交叉" if k < d and pk >= pd_v else "趨勢延續"
         
+        # 繪圖 (MA20藍, MA60橘)
         fn = f"chart_{sym.replace('^','').replace('.','_')}.png"
         pdf = df.tail(60)
-        ap = [mpf.make_addplot(pdf['MA20'], color='blue', width=1), 
-              mpf.make_addplot(pdf['MA60'], color='orange', width=1)]
+        ap = [mpf.make_addplot(pdf['MA20'], color='blue', width=1.2), 
+              mpf.make_addplot(pdf['MA60'], color='orange', width=1.2)]
         mpf.plot(pdf, type='candle', style='charles', addplot=ap, title=f"{name}", savefig=fn)
         
+        # 抓取過濾後新聞
         news = get_filtered_news(name)
-        msg = (f"📈 *標的報告：{name}*\n"
-               f"現價: `{last_p:.2f}`\n"
-               f"均線狀態: {ma_status}\n"
-               f"週 KD: `{k:.1f}/{d:.1f}` ({kd_text})\n\n"
-               f"📰 *核心財經頭條 (三大報系)：*\n{news}")
+        
+        msg = (f"📊 *報告標的：{name}*\n"
+               f"目前價位: `{last_p:.2f}`\n"
+               f"均線位置: {ma_status}\n"
+               f"週線 KD: `{k:.1f}/{d:.1f}` ({kd_text})\n\n"
+               f"📰 *核心財經頭條：*\n{news}")
         
         send_tg(msg, fn)
         if os.path.exists(fn): os.remove(fn)
@@ -113,16 +129,17 @@ def process_target(sym, name):
     except Exception as e: print(f"Error {sym}: {e}")
 
 def main():
-    date_str = datetime.now().strftime('%Y/%m/%d')
-    send_tg(f"🏆 *旗艦級全方位財經掃描 ({date_str})*")
+    now_str = datetime.now().strftime('%Y/%m/%d')
+    send_tg(f"🏛️ *全球財經深度掃描報告 ({now_str})*")
     
-    # 執行監測
+    # 台股標的
     for item in TW_CORE:
         process_target(item['symbol'], item['name'])
+    # 美股標的
     for sym, name in US_WATCH.items():
         process_target(sym, name)
 
-    send_tg(f"🏁 *{date_str} 盤前報告掃描完成。*")
+    send_tg(f"🏁 *報告傳輸完成。*")
 
 if __name__ == "__main__":
     main()
