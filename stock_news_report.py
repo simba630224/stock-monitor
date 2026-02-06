@@ -8,26 +8,23 @@ from datetime import datetime, timedelta
 TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+# 標的名單 (針對新聞抓取進行了 Ticker 優化)
+# 註：台股 .TW 標的在 Yahoo 國際版新聞較少，建議同時觀察美股 ADR
 WATCH_LIST = [
-    {'symbol': '2330.TW',   'name': '台積電'},
+    {'symbol': 'TSM',       'name': '台積電(ADR)'}, # 改用 ADR 確保 100% 有國際新聞
+    {'symbol': 'NVDA',      'name': '輝達'},
     {'symbol': '2454.TW',   'name': '聯發科'},
     {'symbol': '0050.TW',   'name': '台灣50'},
-    {'symbol': '00878.TW',  'name': '國泰永續高股息'},
-    {'symbol': '009812.TW', 'name': 'Japan'},
+    {'symbol': '00878.TW',  'name': '國泰高股息'},
+    {'symbol': '009812.TW', 'name': '日本指數'},
     {'symbol': '00830.TW',  'name': '費城半導體'},
-    {'symbol': 'NVDA',      'name': '輝達'},
     {'symbol': 'GOOGL',     'name': 'GOOGLE'},
     {'symbol': 'META',      'name': 'Meta'},
-    {'symbol': 'MSFT',      'name': 'MSFT'},
+    {'symbol': 'MSFT',      'name': '微軟'},
     {'symbol': 'QQQ',       'name': '那斯達克'},
     {'symbol': 'VOO',       'name': 'S&P500'},
-    {'symbol': 'VT',        'name': 'World Stock'}
+    {'symbol': 'VT',        'name': '世界股市'}
 ]
-
-def clean_markdown(text):
-    """清理標題中的特殊字元，避免 Telegram Markdown 解析錯誤"""
-    if not text: return ""
-    return text.replace('_', ' ').replace('*', ' ').replace('[', '(').replace(']', ')')
 
 def send_tg_msg(text):
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -38,7 +35,7 @@ def send_tg_msg(text):
         'chat_id': TG_CHAT_ID,
         'text': text,
         'parse_mode': 'Markdown',
-        'disable_web_page_preview': False
+        'disable_web_page_preview': True
     }
     try:
         r = requests.post(url, data=payload)
@@ -48,57 +45,58 @@ def send_tg_msg(text):
         print(f"❌ Telegram 連線異常: {e}")
 
 def main():
-    now = datetime.now()
-    # --- 修改點：擴大至 7 天 (168 小時) ---
-    one_week_ago = now - timedelta(days=7)
+    # 取得當前 Unix 時間戳記 (秒)
+    current_ts = time.time()
+    # 定義 7 天的秒數 (7天 * 24小時 * 3600秒)
+    seven_days_seconds = 7 * 24 * 3600
     
-    print(f"=== 🔍 啟動一週新聞監測: {now.strftime('%Y/%m/%d %H:%M')} ===")
+    print(f"=== 🔍 啟動一週新聞監測 (強制抓取版) ===")
     
-    # 發送啟動訊號
-    send_tg_msg(f"📡 *一週新聞情報系統啟動*\n正在掃描 {len(WATCH_LIST)} 檔標的近 **7 天** 重大新聞...")
-
-    news_count = 0
+    overall_sent_count = 0
 
     for item in WATCH_LIST:
         sym, name = item['symbol'], item['name']
-        print(f"正在搜尋: {name} ({sym}) ...")
+        print(f"正在搜尋: {name} ({sym})...")
         
         try:
             ticker = yf.Ticker(sym)
             raw_news = ticker.news
             
             if not raw_news:
-                print(f"   ⚠️ {sym} 無新聞數據")
+                print(f"   ⚠️ {sym} Yahoo API 未回傳任何新聞數據")
                 continue
             
-            valid_stock_news = []
+            print(f"   找到 {len(raw_news)} 則原始數據，開始過濾時間...")
+            
+            valid_news = []
             for n in raw_news:
-                p_time = datetime.fromtimestamp(n.get('providerPublishTime', 0))
+                # 取得新聞時間戳記，若無則設為 0
+                news_ts = n.get('providerPublishTime', 0)
                 
-                # 過濾一週內的新聞
-                if p_time > one_week_ago:
-                    title = clean_markdown(n.get('title', '無標題'))
+                # --- 核心邏輯：直接比較時間戳記數值，避免時區轉換錯誤 ---
+                if (current_ts - news_ts) < seven_days_seconds:
+                    title = n.get('title', '無標題')
                     link = n.get('link', '#')
                     source = n.get('publisher', '來源未知')
                     
-                    valid_stock_news.append(f"🔹 {title}\n   _({source})_ [閱讀原文]({link})")
-            
-            if valid_stock_news:
-                # 每一檔標的一則訊息，最多取最新 3 則以免洗版
-                report = f"📰 *【{name} 近一週焦點】*\n\n" + "\n\n".join(valid_stock_news[:3])
+                    # 簡單清理標題避免 Markdown 錯誤
+                    clean_title = title.replace('*','').replace('_','').replace('[','(').replace(']',')')
+                    valid_news.append(f"🔹 {clean_title}\n   _({source})_ [閱讀原文]({link})")
+
+            if valid_news:
+                report = f"📰 *【{name} 一週焦點】*\n\n" + "\n\n".join(valid_news[:3])
                 send_tg_msg(report)
-                news_count += 1
-                print(f"   ✅ 找到 {len(valid_stock_news)} 則新聞，已發送訊息")
+                overall_sent_count += 1
+                print(f"   ✅ 成功發送 {len(valid_news[:3])} 則新聞")
                 time.sleep(1) # 防頻率限制
             else:
-                print(f"   ℹ️ {sym} 7天內暫無新消息")
+                print(f"   ℹ️ {sym} 的所有新聞均超過 7 天")
 
         except Exception as e:
-            print(f"❌ 處理 {sym} 時發生錯誤: {e}")
+            print(f"❌ 處理 {sym} 出錯: {e}")
 
-    print(f"=== ✅ 任務完成，共處理 {news_count} 個標的新聞 ===")
-    if news_count == 0:
-        send_tg_msg("📅 *新聞結報*：觀察清單近 7 日暫無重大新聞更新。")
+    if overall_sent_count == 0:
+        send_tg_msg("📅 *新聞匯報*：清單標的近 7 日暫無國際重大新聞更新。")
 
 if __name__ == "__main__":
     main()
