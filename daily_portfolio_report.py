@@ -5,10 +5,15 @@ import pandas as pd
 import numpy as np
 import re
 import time
-from datetime import datetime, date
+import io
+import matplotlib
+# 設定 matplotlib 為背景繪圖模式，避免 GitHub Actions 報錯
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt
+from datetime import datetime
 
 # =======================================================
-# 每日定時投資組合報告 (GitHub Actions + Telegram)
+# 每日定時投資組合報告 + 匯率分析走勢圖 (GitHub Actions + Telegram)
 # =======================================================
 
 # --- 1. 寫死在程式碼中的投資組合資料 ---
@@ -99,21 +104,14 @@ def get_data(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d")
-        if hist.empty: return 0, 0
-        
-        # --- 修正 yfinance MultiIndex 問題 ---
-        if isinstance(hist.columns, pd.MultiIndex):
-            hist.columns = hist.columns.get_level_values(0)
-        
-        price = hist['Close'].iloc[-1]
+        price = 0 if hist.empty else hist['Close'].iloc[-1]
         div_2026 = 0.0
         try:
             dividends = stock.dividends
             if not dividends.empty:
                 divs_2026 = dividends[dividends.index.year == 2026]
                 div_2026 = divs_2026.sum()
-        except:
-            div_2026 = 0.0
+        except: pass
         return price, div_2026
     except Exception as e:
         print(f"Error fetching {ticker}: {e}")
@@ -122,65 +120,143 @@ def get_data(ticker):
 def get_usdtwd():
     try:
         hist = yf.Ticker("TWD=X").history(period="5d")
-        if isinstance(hist.columns, pd.MultiIndex):
-            hist.columns = hist.columns.get_level_values(0)
         return hist['Close'].iloc[-1]
-    except:
-        return 32.5
+    except: return 32.5
+
+# --- 3. Telegram 傳送函式 ---
 
 def send_telegram_notify(msg):
-    # --- 修正變數名稱以符合 YAML 設定 ---
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
+    token = os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    
-    if not token or not chat_id:
-        print("❌ 錯誤：找不到 TELEGRAM 設定")
-        return
-
+    if not token or not chat_id: return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
-    r = requests.post(url, data=payload)
-    if r.status_code != 200:
-        print(f"❌ 發送失敗: {r.text}")
+    requests.post(url, data=payload)
+
+def send_telegram_photo(caption, photo_buffer):
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id: return
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    photo_buffer.seek(0)
+    files = {'photo': ('fx_chart.png', photo_buffer, 'image/png')}
+    payload = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    requests.post(url, data=payload, files=files)
+
+# --- 4. 匯率分析與繪圖功能 ---
+
+def analyze_and_plot_fx(fx_ticker="TWD=X"):
+    print("📈 開始繪製匯率走勢圖...")
+    try:
+        # 抓取近一年資料
+        data = yf.Ticker(fx_ticker).history(period="1y")
+        if data.empty: return None, "無法取得匯率資料"
+        
+        # 計算均線
+        data['MA20'] = data['Close'].rolling(window=20).mean()
+        data['MA60'] = data['Close'].rolling(window=60).mean()
+        
+        curr_price = data['Close'].iloc[-1]
+        ma20_val = data['MA20'].iloc[-1]
+        ma60_val = data['MA60'].iloc[-1]
+        
+        # 繪圖設定
+        plt.figure(figsize=(10, 5))
+        plt.plot(data.index, data['Close'], label='USD/TWD', color='black', linewidth=1.5)
+        plt.plot(data.index, data['MA20'], label='MA20 (月線)', color='blue', linestyle='--')
+        plt.plot(data.index, data['MA60'], label='MA60 (季線)', color='red', linestyle='-.')
+        
+        plt.title('USD/TWD Exchange Rate (1 Year)', fontsize=14)
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.legend(loc='upper left')
+        plt.tight_layout()
+        
+        # 存入記憶體緩衝區
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=100)
+        plt.close()
+        
+        # 產生分析文字
+        status = []
+        if curr_price > ma20_val: status.append("站上月線")
+        else: status.append("跌破月線")
+        if curr_price > ma60_val: status.append("站上季線")
+        else: status.append("跌破季線")
+            
+        msg = f"💱 <b>USD/TWD 匯率分析</b>\n"
+        msg += f"現價: <b>{curr_price:.3f}</b>\n"
+        msg += f"MA20: {ma20_val:.3f}\n"
+        msg += f"MA60: {ma60_val:.3f}\n"
+        msg += f"⚠️ 狀態: {' / '.join(status)}"
+        
+        return buf, msg
+    except Exception as e:
+        print(f"匯率繪圖失敗: {e}")
+        return None, f"匯率分析失敗: {e}"
+
+# --- 5. 主程式邏輯 ---
 
 def main():
     print("🚀 開始執行投資組合計算...")
     usdtwd = get_usdtwd()
+    
     total_market_value = 0
     total_dividends_2026 = 0
     asset_allocation = {}
 
+    # 處理台股
     for item in PORTFOLIO_TW:
-        price, div = get_data(get_yf_ticker_tw(item['Ticker']))
-        value = price * item['Shares']
+        ticker_raw = item['Ticker']
+        shares = item['Shares']
+        yf_ticker = get_yf_ticker_tw(ticker_raw)
+        asset_type = classify_asset(ticker_raw, 'TW')
+        
+        price, div = get_data(yf_ticker)
+        value = price * shares
+        div_total = div * shares
+        
         total_market_value += value
-        total_dividends_2026 += div * item['Shares']
-        atype = classify_asset(item['Ticker'], 'TW')
-        asset_allocation[atype] = asset_allocation.get(atype, 0) + value
-        time.sleep(0.1)
+        total_dividends_2026 += div_total
+        asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
+        time.sleep(0.3)
 
+    # 處理美股
     for item in PORTFOLIO_US:
-        price, div = get_data(item['Ticker'])
-        value = price * item['Shares'] * usdtwd
+        ticker = item['Ticker']
+        shares = item['Shares']
+        asset_type = classify_asset(ticker, 'US')
+        
+        price, div = get_data(ticker)
+        value = price * shares * usdtwd
+        div_total = div * shares * usdtwd
+        
         total_market_value += value
-        total_dividends_2026 += div * item['Shares'] * usdtwd
-        atype = classify_asset(item['Ticker'], 'US')
-        asset_allocation[atype] = asset_allocation.get(atype, 0) + value
-        time.sleep(0.1)
+        total_dividends_2026 += div_total
+        asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
+        time.sleep(0.3)
 
+    # 1. 傳送投資組合報告 (文字)
     today = datetime.now().strftime('%Y-%m-%d')
-    msg = f"📅 <b>{today} 投資組合報告</b>\n\n"
-    msg += f"💰 <b>總市值:</b> {total_market_value:,.0f} TWD\n"
-    msg += f"💵 <b>2026 累計股息:</b> {total_dividends_2026:,.0f} TWD\n\n"
-    msg += "📊 <b>資產配置:</b>\n"
+    msg_portfolio = f"📅 <b>{today} 投資組合報告</b>\n\n"
+    msg_portfolio += f"💰 <b>總市值:</b> {total_market_value:,.0f} TWD\n"
+    msg_portfolio += f"💵 <b>2026 累計股息:</b> {total_dividends_2026:,.0f} TWD\n\n"
+    msg_portfolio += "📊 <b>資產配置:</b>\n"
     
     sorted_allocation = sorted(asset_allocation.items(), key=lambda x: x[1], reverse=True)
     for asset, value in sorted_allocation:
-        pct = (value / total_market_value * 100) if total_market_value > 0 else 0
-        msg += f"- {asset}: {pct:.1f}%\n"
+        pct = (value / total_market_value) * 100 if total_market_value > 0 else 0
+        msg_portfolio += f"- {asset}: {pct:.1f}%\n"
 
-    print(msg)
-    send_telegram_notify(msg)
+    print("發送投資組合報告...")
+    send_telegram_notify(msg_portfolio)
+
+    # 2. 傳送匯率分析報告 (圖片 + 文字)
+    buf, msg_fx = analyze_and_plot_fx("TWD=X")
+    if buf:
+        print("發送匯率圖表...")
+        send_telegram_photo(msg_fx, buf)
+    else:
+        send_telegram_notify(msg_fx)
 
 if __name__ == "__main__":
     main()
