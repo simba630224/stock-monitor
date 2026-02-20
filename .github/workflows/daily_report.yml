@@ -1,12 +1,12 @@
-name: Daily Credit Card Strategy
+name: Daily Credit Card Report
 
 on:
   schedule:
     - cron: '0 0 * * *' # 台北時間 08:00
-  workflow_dispatch: # 支援手動觸發測試
+  workflow_dispatch:
 
 jobs:
-  build:
+  report:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -16,7 +16,7 @@ jobs:
           python-version: '3.9'
       - name: Install dependencies
         run: pip install google-generativeai requests
-      - name: Run Script
+      - name: Run script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
