@@ -15,21 +15,21 @@ def get_daily_strategy():
     
     today = datetime.now().strftime("%Y-%m-%d (%A)")
     
-    # 修正後的穩定版 URL (使用 v1 版本)
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # 修正後的 v1beta URL，這是目前支援 gemini-1.5-flash 最穩定的路徑
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
     prompt_text = f"""
     今天是 {today}。請針對以下 7 張信用卡，提供全台今日最優刷卡策略：
     永豐幣倍卡、中信uniopen、國泰CUBE JCB卡、富邦Costco、富邦Momo、富邦JCB/J卡、台新Richart 卡。
     
     分析重點：
-    1. 量販超市 (全聯週五有無加碼、家樂福)
-    2. 百貨 (中壢大江現抵 10% 活動)
-    3. 餐飲交通 (星巴克、中油加油)
-    4. 線上購物 (Momo)
+    1. 量販超市：全聯（國泰CUBE 2%）、家樂福（中信uniopen 4%）。
+    2. 百貨商場：中壢大江（賀歲慶現抵 10% 倒數中）。
+    3. 餐飲交通：星巴克週五外送買一送一、中油加油。
+    4. 線上購物：Momo 購物。
     
     請註明：每張卡最優支付方式與 CUBE/Richart 的方案切換建議。
-    格式要求：使用 HTML 標籤 (<b>, <i>, <u>) 讓訊息易讀，不要使用 Markdown 的星號。
+    格式要求：使用 HTML 標籤（如 <b>, <i>, <u>），避免使用 Markdown 星號，確保 Telegram 顯示美觀。
     """
 
     payload = {
@@ -41,16 +41,16 @@ def get_daily_strategy():
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
-        # 若發生錯誤，印出詳細訊息以便除錯
+        # 增加詳細錯誤回報，若 404 則顯示完整回應
         if response.status_code != 200:
-            return f"Gemini API 呼叫失敗: {response.status_code} - {response.text}"
+            return f"Gemini API 呼叫失敗: {response.status_code}\n{response.text}"
             
         data = response.json()
         return data['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"程式執行異常: {str(e)}"
 
-# --- 3. Telegram 傳送函式 (您的原版) ---
+# --- 3. Telegram 傳送函式 ---
 def send_telegram_notify(msg):
     if not telegram_token or not telegram_chat_id:
         print("Telegram 設定缺失")
