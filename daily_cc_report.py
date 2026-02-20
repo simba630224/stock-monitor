@@ -3,16 +3,14 @@ import requests
 from google import genai
 from datetime import datetime
 
-# --- 1. 環境變數 ---
-# 注意：新版 SDK 預設會讀取 GOOGLE_API_KEY
+# --- 1. 環境變數 (名稱已對齊您的 GitHub Secrets) ---
 api_key = os.environ.get("GOOGLE_API_KEY")
-telegram_token = os.environ.get("TELEGRAM_TOKEN")
+telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN") # 修正為截圖中的名稱
 telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 2. 獲取策略分析 (使用新版 SDK) ---
 def get_daily_strategy():
     if not api_key:
-        return "錯誤：找不到 API Key，請檢查 GitHub Secrets 設定。"
+        return "錯誤：找不到 GOOGLE_API_KEY，請檢查 GitHub Secrets。"
     
     client = genai.Client(api_key=api_key)
     today = datetime.now().strftime("%Y-%m-%d (%A)")
@@ -31,17 +29,15 @@ def get_daily_strategy():
     格式要求：使用 HTML 標籤 (<b>, <i>, <u>)，結構清晰。
     """
     
-    # 使用新版 SDK 的生成語法
     response = client.models.generate_content(
-        model="gemini-2.0-flash", # 使用 2026 最新主流模型
+        model="gemini-2.0-flash", 
         contents=prompt
     )
     return response.text
 
-# --- 3. Telegram 傳送函式 (採用您的版本) ---
 def send_telegram_notify(msg):
     if not telegram_token or not telegram_chat_id:
-        print("Telegram 設定缺失")
+        print("Telegram 設定缺失，請檢查 Secrets 名稱是否正確")
         return
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
     payload = {"chat_id": telegram_chat_id, "text": msg, "parse_mode": "HTML"}
