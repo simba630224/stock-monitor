@@ -13,12 +13,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # 提升版本以消除警告
+          python-version: '3.10'
       - name: Install dependencies
-        run: pip install google-genai requests # 使用新版 SDK
+        run: pip install google-genai requests
       - name: Run script
         env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }} # 建議 GitHub Secrets 也改名
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }} # 對應截圖名稱
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python daily_cc_report.py
