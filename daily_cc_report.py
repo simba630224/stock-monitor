@@ -11,85 +11,86 @@ telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-# --- 2. 獲取 Gemini 策略分析 ---
+# --- 2. 獲取可用模型並生成內容 ---
 def get_daily_strategy():
-    if not api_key:
-        return "ERROR: 缺少 GOOGLE_API_KEY"
+    if not api_key: return "ERROR: 缺少 GOOGLE_API_KEY"
 
-    today = datetime.now().strftime("%Y-%m-%d (%A)")
-    
-    # 嘗試多個模型 ID，解決部分帳號找不到特定模型的問題
-    model_candidates = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro",
-        "gemini-pro"
-    ]
-    
-    last_error = ""
-    for model_id in model_candidates:
-        log(f"嘗試使用模型: {model_id}")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
+    # A. 嘗試列出可用模型，確保不踩 404
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    target_model = None
+    try:
+        log("正在向伺服器查詢您的可用模型清單...")
+        m_resp = requests.get(list_url)
+        m_data = m_resp.json()
         
-        prompt_text = f"""
-        今天是 {today}。請針對以下 7 張信用卡，分析今日在全台及桃園中壢地區的最優刷卡策略：
-        1. 永豐幣倍卡
-        2. 中信uniopen (統一集團/家樂福)
-        3. 國泰CUBE JCB卡 (需手動切換方案)
-        4. 富邦Costco
-        5. 富邦Momo
-        6. 富邦JCB/J卡 (悠遊卡加值)
-        7. 台新Richart 卡
+        # 篩選出支援生成內容的模型
+        valid_models = [
+            m['name'] for m in m_data.get('models', []) 
+            if 'generateContent' in m.get('supportedGenerationMethods', [])
+        ]
+        
+        # 優先級排序
+        for pref in ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-pro"]:
+            if pref in valid_models:
+                target_model = pref
+                break
+        
+        if not target_model and valid_models:
+            target_model = valid_models[0]
+            
+        if not target_model:
+            log("警告: 清單為空，嘗試保底路徑")
+            target_model = "models/gemini-1.5-flash"
+            
+        log(f"最終選定呼叫路徑: {target_model}")
+    except Exception as e:
+        log(f"清單查詢異常: {e}")
+        target_model = "models/gemini-1.5-flash"
 
-        【分析核心：行動支付最優搭配】
-        請明確推薦以下支付方式的組合：
-        - LINE Pay、全支付 (PX Pay Plus)、街口、icash Pay
-        - Apple Pay、Costco Pay、家樂福 Pay (Carrefour Pay)
+    # B. 呼叫生成
+    today = datetime.now().strftime("%Y-%m-%d (%A)")
+    url = f"https://generativelanguage.googleapis.com/v1beta/{target_model}:generateContent?key={api_key}"
+    
+    prompt_text = f"""
+    今天是 {today}（農曆正月初五）。請針對以下 7 張信用卡，分析今日在桃園及全台的最優刷卡策略：
+    1. 永豐幣倍卡、2. 中信uniopen、3. 國泰CUBE JCB、4. 富邦Costco、5. 富邦Momo、6. 富邦J/J卡、7. 台新Richart卡。
 
-        【重點場景建議】
-        - 家樂福：比較使用「家樂福 Pay」或「icash Pay」綁定 uniopen 卡。
-        - Costco：使用「Costco Pay」或實體刷富邦Costco卡。
-        - 全聯：使用「全支付」或「PX Pay」綁定 Richart 或 CUBE 卡。
-        - 中壢大江/百貨：比較「LINE Pay」與實體刷卡的現抵活動。
+    【支付方式最優化】
+    請明確指出使用 LINE Pay、全支付、街口、icash pay、Apple Pay、Costco Pay 或 家樂福Pay (Carrefour Pay) 哪種最划算。
 
-        【格式規範】
-        1. 僅限使用 <b>, <i>, <u>, <code>, <a> HTML 標籤。
-        2. 標題用 <b>加粗</b>，清單用「·」符號並換行。
-        3. 內容精簡，適合手機閱讀。
-        """
+    【核心場景】
+    · 全聯：比較「全支付」綁Richart或CUBE方案。
+    · 家樂福：使用「家樂福 Pay」或「icash Pay」搭配 uniopen 效益。
+    · Costco：推薦「Costco Pay」與聯名卡。
+    · 百貨：中壢大江賀歲慶現抵活動（LINE Pay搭配卡片回饋）。
+    · 交通：中油加油(Apple Pay或實體感應)。
 
-        payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-        headers = {'Content-Type': 'application/json'}
+    【格式規範】
+    1. 僅限使用 <b>, <i>, <u>, <code>, <a> HTML 標籤。
+    2. 標題用 <b>加粗</b>，清單用「·」符號並換行。
+    3. 針對桃園中壢特色提供建議，格式需精簡。
+    """
 
-        try:
-            response = requests.post(url, headers=headers, data=json.dumps(payload))
-            if response.status_code == 200:
-                data = response.json()
-                log(f"成功使用模型: {model_id}")
-                return data['candidates'][0]['content']['parts'][0]['text']
-            else:
-                last_error = f"{response.status_code}: {response.text}"
-                log(f"模型 {model_id} 失敗: {last_error}")
-        except Exception as e:
-            last_error = str(e)
-            log(f"模型 {model_id} 異常: {last_error}")
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+    try:
+        response = requests.post(url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            return f"Gemini 呼叫失敗 ({response.status_code}): {response.text}"
+    except Exception as e:
+        return f"執行異常: {str(e)}"
 
-    return f"Gemini 呼叫均失敗。最後錯誤: {last_error}"
-
-# --- 3. Telegram 傳送函式 ---
+# --- 3. Telegram 傳送 ---
 def send_telegram_notify(msg):
-    if not telegram_token or not telegram_chat_id:
-        log("缺少 Telegram 設定")
-        return
+    if not telegram_token or not telegram_chat_id: return
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
     payload = {"chat_id": telegram_chat_id, "text": msg, "parse_mode": "HTML"}
     r = requests.post(url, data=payload)
     if r.status_code != 200:
-        log(f"Telegram 傳送失敗: {r.text}")
-        payload["parse_mode"] = "" # 失敗時改用純文字
+        # 失敗時嘗試純文字
+        payload["parse_mode"] = ""
         requests.post(url, data=payload)
-    else:
-        log("Telegram 訊息已成功送出")
 
 if __name__ == "__main__":
     report = get_daily_strategy()
