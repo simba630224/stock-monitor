@@ -11,61 +11,55 @@ telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-# --- 2. 核心功能：多路徑備援生成 ---
+# --- 2. 核心功能：具體錯誤回報生成 ---
 def get_daily_strategy():
-    if not api_key: return "ERROR: 缺少 GOOGLE_API_KEY"
+    if not api_key: return "ERROR: 缺少 GOOGLE_API_KEY，請檢查 GitHub Secrets 設定。"
 
     today = datetime.now().strftime("%Y-%m-%d (%A)")
     
-    # 指令：鎖定 2026 年已公佈之具體活動
+    # 嚴格指令：基於 2026 年既有權益，禁止模糊推估
     prompt_text = f"""
     今天是 {today}。請針對以下 7 張信用卡，分析今日在桃園及全台的最優刷卡策略。
-    請檢索 2026 年已公佈且延續至今日的具體回饋（如 Richart 2026 權益、大江賀歲慶規則等）。
-    【嚴格執行】禁止使用「歷史推估」或「權益以公告為準」等詞彙。
+    請檢索 2026 年已公佈之具體活動（如 Richart 2026 權益、大江賀歲慶規章）。
+    【絕對禁止】使用「歷史推估」或「權益以公告為準」等詞彙。
 
-    【分析對象】
-    1. 永豐幣倍卡、2. 中信uniopen、3. 國泰CUBE JCB、4. 富邦Costco、5. 富邦Momo、6. 富邦J/J卡、7. 台新Richart卡。
+    卡片：1.永豐幣倍 2.中信uniopen 3.國泰CUBE 4.富邦Costco 5.富邦Momo 6.富邦J卡 7.台新Richart。
+    支付：LINE Pay, 全支付, 街口, icash Pay, Apple Pay, Costco Pay, 家樂福 Pay。
+    
+    分析重點：
+    · 全聯：週六全支付加碼 650 點活動。
+    · 家樂福：週末滿 2000 元 9 折與 uniopen 搭配。
+    · 百貨：中壢大江賀歲慶滿 1800 現抵 180。
 
-    【核心場景與支付】
-    · 全聯：全支付綁定卡片(如Richart 3.8%或CUBE 2%)之週六贈點。
-    · 家樂福：家樂福 Pay 或 icash Pay 綁定 uniopen 獲取週末9折券與 Open Point。
-    · Costco：Costco Pay 與聯名卡 2026 店內回饋。
-    · 百貨：中壢大江賀歲慶(滿1800現抵180) 搭配 LINE Pay 支付。
-    · 交通：中油加油最優搭配。
-
-    【格式規範】
-    1. 僅限使用 <b> 與 <i> 標籤。
-    2. 標題用 <b>加粗</b>，清單用「·」符號開頭並換行。
-    3. 語氣堅定，直接給出結論。
+    格式：僅限使用 <b> 與 <i> 標籤。標題加粗，清單用「·」開頭並換行。
     """
 
-    # 嘗試不同的 API 路徑與版本組合 (解決 404 問題)
+    # 嘗試最標準的兩個模型路徑
     endpoints = [
-        ("v1beta", "gemini-1.5-flash"),
-        ("v1", "gemini-1.5-flash"),
-        ("v1beta", "gemini-pro"),
-        ("v1", "gemini-pro")
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
     ]
 
-    for version, model in endpoints:
-        log(f"嘗試路徑: {version} -> {model}")
-        url = f"https://generativelanguage.googleapis.com/{version}/models/{model}:generateContent?key={api_key}"
+    error_logs = []
+    for url_base in endpoints:
+        full_url = f"{url_base}?key={api_key}"
         payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-        headers = {'Content-Type': 'application/json'}
-
+        
         try:
-            response = requests.post(url, headers=headers, data=json.dumps(payload))
+            response = requests.post(full_url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
             if response.status_code == 200:
-                log(f"成功連線至 {model}")
                 return response.json()['candidates'][0]['content']['parts'][0]['text']
             else:
-                log(f"失敗: {response.status_code}")
+                # 擷取具體的錯誤原因
+                err_msg = response.json().get('error', {}).get('message', '未知錯誤')
+                error_logs.append(f"路徑 {url_base.split('/')[-2]} 失敗 ({response.status_code}): {err_msg}")
         except Exception as e:
-            log(f"異常: {str(e)}")
+            error_logs.append(f"連線異常: {str(e)}")
 
-    return "所有 API 路徑均失效，請確認 Google Cloud 專案權限。"
+    # 如果全數失敗，將詳細原因回傳給 Telegram 進行最後偵錯
+    debug_report = "<b>❌ API 呼叫全數失敗</b>\n\n" + "\n".join(error_logs)
+    return debug_report
 
-# --- 3. Telegram 傳送 ---
 def send_telegram_notify(msg):
     if not (telegram_token and telegram_chat_id): return
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
