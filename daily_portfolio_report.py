@@ -69,7 +69,7 @@ PORTFOLIO_US = [
     {'Ticker': 'VOO', 'Shares': 10.0 + 5.3},
     {'Ticker': 'VT', 'Shares': 230.48 + 86.19 + 76.78 + 75.5},
     {'Ticker': 'VTI', 'Shares': 8.65},
-    {'Ticker': 'VWRA.L', 'Shares': 38.0},
+    {'Ticker': 'VWRA.L', 'Shares': 56.0},
     {'Ticker': 'VXUS', 'Shares': 12.0},
 ]
 
