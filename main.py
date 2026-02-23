@@ -19,16 +19,18 @@ TW_CORE = [
     {'symbol': '0050.TW', 'name': '元大台灣50'},
     {'symbol': '00878.TW', 'name': '國泰永續高股息'},
     {'symbol': '00937B.TW', 'name': '群益ESG投等債20+'},
-    {'symbol': '00687B.TW', 'name': '國泰20年美債'}
+    {'symbol': '00687B.TW', 'name': '國泰20年美債'},
+    {'symbol': '009812.TW', 'name': '野村日本東證ETF'}
 ]
 
 US_WATCH = {
-    '^GSPC': '標普500 S&P500 指數', # 使用複合名稱避開 S 字干擾
+    '^GSPC': '標普500 S&P500 指數', 
     '^IXIC': '納斯達克 Nasdaq', 
     '^SOX': '費城半導體 SOX',
     'NVDA': '輝達 Nvidia',
     'AAPL': '蘋果 Apple',
-    'MSFT': '微軟 Microsoft'
+    'MSFT': '微軟 Microsoft',
+    'GOOGL': '谷歌 Google'
 }
 
 def get_filtered_news(name):
@@ -37,16 +39,11 @@ def get_filtered_news(name):
     1. 強制搜尋標題包含財經關鍵字 (股市/股價/財經/ETF/債券)
     2. 強制排除娛樂圈所有相關關鍵字
     """
-    # 核心財經主題限定
     topic_limit = "(intitle:股市 OR intitle:股價 OR intitle:財經 OR intitle:ETF OR intitle:債券 OR intitle:美股)"
-    # 娛樂圈排除清單 (包含大S、小S及其親友相關)
     exclude_list = "-娛樂 -明星 -藝人 -影視 -大S -小S -汪小菲 -具俊曄 -許雅鈞 -綜藝 -緋聞 -穿搭 -八卦"
-    # 指定報系
     media_limit = "(經濟日報 OR 工商日報 OR 華爾街日報)"
     
-    # 組合最終搜尋字串
     query = f"{name} {topic_limit} {media_limit} {exclude_list}"
-    
     url = f"https://news.google.com/rss/search?q={query}+when:48h&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
     
     try:
@@ -57,14 +54,14 @@ def get_filtered_news(name):
             title = item.find('title').text
             link = item.find('link').text
             
-            # 最終人工校驗：若標題仍含極高風險詞則跳過
             if any(bad in title for bad in ["大S", "小S", "汪小菲", "婚姻", "婆婆"]):
                 continue
                 
             items.append(f"🔹 {title}\n   [閱讀原文]({link})")
             
         return "\n".join(items) if items else "近期暫無指定權威報系之重大財經報導。"
-    except: return "新聞載入暫時失敗。"
+    except: 
+        return "新聞載入暫時失敗。"
 
 def analyze_ma_relation(price, ma20, ma60):
     if price > ma20 and price > ma60: return "🟢 站穩 MA20 與 MA60 (強勢排列)"
@@ -96,10 +93,28 @@ def send_tg(msg, img=None):
 
 def process_target(sym, name):
     try:
+        # 1. 抓取股價歷史資料
         df_raw = yf.download(sym, period="2y", progress=False)
         if df_raw.empty: return
-        if isinstance(df_raw.columns, pd.MultiIndex): df_raw.columns = df_raw.columns.get_level_values(0)
+        if isinstance(df_raw.columns, pd.MultiIndex): 
+            df_raw.columns = df_raw.columns.get_level_values(0)
         df, df_w = calculate_indicators(df_raw.astype(float).dropna())
+        
+        # 2. 抓取 本益比 (Trailing & Forward)
+        t_pe_str = "無"
+        f_pe_str = "無"
+        try:
+            ticker_obj = yf.Ticker(sym)
+            info = ticker_obj.info
+            t_pe = info.get('trailingPE')
+            f_pe = info.get('forwardPE')
+            
+            if isinstance(t_pe, (int, float)):
+                t_pe_str = f"{t_pe:.2f}"
+            if isinstance(f_pe, (int, float)):
+                f_pe_str = f"{f_pe:.2f}"
+        except:
+            pass 
         
         last_p = df['Close'].iloc[-1]
         ma_status = analyze_ma_relation(last_p, df['MA20'].iloc[-1], df['MA60'].iloc[-1])
@@ -117,16 +132,19 @@ def process_target(sym, name):
         # 抓取過濾後新聞
         news = get_filtered_news(name)
         
+        # 3. 輸出文字模板更新
         msg = (f"📊 *報告標的：{name}*\n"
                f"目前價位: `{last_p:.2f}`\n"
+               f"本益比: `歷史 {t_pe_str} / 預估 {f_pe_str}`\n"
                f"均線位置: {ma_status}\n"
                f"週線 KD: `{k:.1f}/{d:.1f}` ({kd_text})\n\n"
                f"📰 *核心財經頭條：*\n{news}")
         
         send_tg(msg, fn)
         if os.path.exists(fn): os.remove(fn)
-        time.sleep(1)
-    except Exception as e: print(f"Error {sym}: {e}")
+        time.sleep(1) # 增加暫停時間，避免被 Yahoo API 阻擋
+    except Exception as e: 
+        print(f"Error {sym}: {e}")
 
 def main():
     now_str = datetime.now().strftime('%Y/%m/%d')
