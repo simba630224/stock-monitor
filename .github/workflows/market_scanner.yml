@@ -1,0 +1,33 @@
+name: 台股百大盤前掃描
+
+on:
+  schedule:
+    # UTC 時間 00:17 = 台灣時間早上 08:17
+    # 1-5 代表星期一到星期五 (避開週末)
+    # 分鐘設定在 17 分，完美避開 GitHub 整點與半點的全球大塞車
+    - cron: '17 0 * * 1-5'
+  workflow_dispatch: # 保留手動執行的按鈕
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 下載程式碼
+        uses: actions/checkout@v3
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: 安裝必要套件
+        run: |
+          pip install yfinance pandas requests
+
+      - name: 執行大盤掃描程式
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python market_scanner.py
