@@ -34,11 +34,6 @@ US_WATCH = {
 }
 
 def get_filtered_news(name):
-    """
-    深度財經過濾邏輯：
-    1. 強制搜尋標題包含財經關鍵字 (股市/股價/財經/ETF/債券)
-    2. 強制排除娛樂圈所有相關關鍵字
-    """
     topic_limit = "(intitle:股市 OR intitle:股價 OR intitle:財經 OR intitle:ETF OR intitle:債券 OR intitle:美股)"
     exclude_list = "-娛樂 -明星 -藝人 -影視 -大S -小S -汪小菲 -具俊曄 -許雅鈞 -綜藝 -緋聞 -穿搭 -八卦"
     media_limit = "(經濟日報 OR 工商日報 OR 華爾街日報)"
@@ -95,12 +90,13 @@ def process_target(sym, name):
     try:
         # 1. 抓取股價歷史資料
         df_raw = yf.download(sym, period="2y", progress=False)
-        if df_raw.empty: return
+        if df_raw.empty: return None
         if isinstance(df_raw.columns, pd.MultiIndex): 
             df_raw.columns = df_raw.columns.get_level_values(0)
         df, df_w = calculate_indicators(df_raw.astype(float).dropna())
         
-        # 2. 抓取 本益比 (Trailing & Forward)
+        # 2. 抓取本益比
+        t_pe = None # 用於後續數值判斷
         t_pe_str = "無"
         f_pe_str = "無"
         try:
@@ -109,12 +105,9 @@ def process_target(sym, name):
             t_pe = info.get('trailingPE')
             f_pe = info.get('forwardPE')
             
-            if isinstance(t_pe, (int, float)):
-                t_pe_str = f"{t_pe:.2f}"
-            if isinstance(f_pe, (int, float)):
-                f_pe_str = f"{f_pe:.2f}"
-        except:
-            pass 
+            if isinstance(t_pe, (int, float)): t_pe_str = f"{t_pe:.2f}"
+            if isinstance(f_pe, (int, float)): f_pe_str = f"{f_pe:.2f}"
+        except: pass 
         
         last_p = df['Close'].iloc[-1]
         ma_status = analyze_ma_relation(last_p, df['MA20'].iloc[-1], df['MA60'].iloc[-1])
@@ -122,17 +115,15 @@ def process_target(sym, name):
         k, d, pk, pd_v = df_w['K'].iloc[-1], df_w['D'].iloc[-1], df_w['K'].iloc[-2], df_w['D'].iloc[-2]
         kd_text = "金叉轉強" if k > d and pk <= pd_v else "死亡交叉" if k < d and pk >= pd_v else "趨勢延續"
         
-        # 繪圖 (MA20藍, MA60橘)
+        # 繪圖
         fn = f"chart_{sym.replace('^','').replace('.','_')}.png"
         pdf = df.tail(60)
         ap = [mpf.make_addplot(pdf['MA20'], color='blue', width=1.2), 
               mpf.make_addplot(pdf['MA60'], color='orange', width=1.2)]
         mpf.plot(pdf, type='candle', style='charles', addplot=ap, title=f"{name}", savefig=fn)
         
-        # 抓取過濾後新聞
         news = get_filtered_news(name)
         
-        # 3. 輸出文字模板更新
         msg = (f"📊 *報告標的：{name}*\n"
                f"目前價位: `{last_p:.2f}`\n"
                f"本益比: `歷史 {t_pe_str} / 預估 {f_pe_str}`\n"
@@ -142,22 +133,65 @@ def process_target(sym, name):
         
         send_tg(msg, fn)
         if os.path.exists(fn): os.remove(fn)
-        time.sleep(1) # 增加暫停時間，避免被 Yahoo API 阻擋
+        time.sleep(1) 
+        
+        # [修改點] 將該標的數據回傳給 main() 進行總結
+        return {
+            'name': name,
+            'kd_text': kd_text,
+            'k_value': k,
+            'trailing_pe': t_pe
+        }
+        
     except Exception as e: 
         print(f"Error {sym}: {e}")
+        return None
 
 def main():
     now_str = datetime.now().strftime('%Y/%m/%d')
     send_tg(f"🏛️ *全球財經深度掃描報告 ({now_str})*")
     
-    # 台股標的
-    for item in TW_CORE:
-        process_target(item['symbol'], item['name'])
-    # 美股標的
-    for sym, name in US_WATCH.items():
-        process_target(sym, name)
+    # 用於儲存摘要資訊的清單
+    summary_golden_cross = []
+    summary_death_cross = []
+    summary_low_pe = []
 
-    send_tg(f"🏁 *報告傳輸完成。*")
+    # 彙整所有標的
+    all_targets = []
+    for item in TW_CORE: all_targets.append((item['symbol'], item['name']))
+    for sym, name in US_WATCH.items(): all_targets.append((sym, name))
+
+    # 逐一處理並收集回傳值
+    for sym, name in all_targets:
+        res = process_target(sym, name)
+        
+        if res: # 如果成功抓取資料
+            # 1. 判斷低檔週KD金叉 (設定標準：發生金叉且 K 值小於 30)
+            if res['kd_text'] == "金叉轉強" and res['k_value'] < 30:
+                summary_golden_cross.append(res['name'])
+            
+            # 2. 判斷高檔週KD死叉 (設定標準：發生死叉且 K 值大於 70)
+            if res['kd_text'] == "死亡交叉" and res['k_value'] > 70:
+                summary_death_cross.append(res['name'])
+            
+            # 3. 判斷歷史本益比 < 25
+            if isinstance(res['trailing_pe'], (int, float)) and res['trailing_pe'] < 25:
+                # 順便附上 P/E 值讓摘要更清楚
+                summary_low_pe.append(f"{res['name']} ({res['trailing_pe']:.1f})")
+
+    # --- 輸出總結摘要訊息 ---
+    summary_msg = f"🏁 *掃描完畢！今日盤後亮點摘要：*\n\n"
+    
+    summary_msg += "📈 *低檔週KD金叉 (K<30)：*\n"
+    summary_msg += "、".join(summary_golden_cross) if summary_golden_cross else "無"
+    
+    summary_msg += "\n\n📉 *高檔週KD死叉 (K>70)：*\n"
+    summary_msg += "、".join(summary_death_cross) if summary_death_cross else "無"
+    
+    summary_msg += "\n\n💡 *歷史本益比 < 25 倍：*\n"
+    summary_msg += "、".join(summary_low_pe) if summary_low_pe else "無"
+
+    send_tg(summary_msg)
 
 if __name__ == "__main__":
     main()
