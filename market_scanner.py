@@ -14,7 +14,7 @@ TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # --- 2. 觀察清單 ---
 TARGET_LIST = [
-    # [新增] 美股 Top 10 市值巨頭
+    # 美股 Top 10 市值巨頭
     "AAPL:蘋果", "MSFT:微軟", "NVDA:輝達", "GOOGL:谷歌", "AMZN:亞馬遜", 
     "META:Meta", "BRK-B:波克夏", "LLY:禮來", "AVGO:博通", "TSLA:特斯拉",
 
@@ -69,12 +69,16 @@ def get_weekly_kd(df):
     return df_w
 
 def scan_target(sym, name):
-    # 判斷是否為 ETF (台股 ETF 通常為 00 開頭)
-    is_etf = sym.startswith('00')
+    # 分類判斷
+    is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
+    is_etf = is_tw and sym.startswith('00')
+    is_us = not is_tw
     
     result = {
         'name': name, 
         'is_etf': is_etf,
+        'is_tw': is_tw,
+        'is_us': is_us,
         'golden_cross': False, 
         'trailing_pe': None,
         'forward_pe': None,
@@ -113,12 +117,19 @@ def scan_target(sym, name):
     
     return result
 
+def format_pe_item(item):
+    """格式化輸出字串，包含歷史與預估本益比"""
+    t_pe_str = f"{item['trailing_pe']:.1f}" if item['trailing_pe'] is not None else "無"
+    f_pe_str = f"{item['forward_pe']:.1f}" if item['forward_pe'] is not None else "無"
+    return f"{item['name']} (歷史 {t_pe_str} / 預估 {f_pe_str})"
+
 def main():
     print(f"啟動市場掃描... 共計 {len(TARGET_LIST)} 檔標的")
     
     golden_cross_list = []
     pe_etfs = []
-    pe_stocks = []
+    pe_tw_stocks = []
+    pe_us_stocks = []
     
     for item in TARGET_LIST:
         parts = item.split(':')
@@ -129,29 +140,27 @@ def main():
         
         # 收集低檔金叉
         if res['golden_cross']:
-            golden_cross_list.append(name)
+            golden_cross_list.append(res)
             
-        # 收集歷史 P/E < 20 的標的，並依據 ETF/個股 分流
+        # 收集歷史 P/E < 20 的標的，並依據 ETF/台股/美股 分流
         if res['trailing_pe'] is not None and res['trailing_pe'] < 20:
             if res['is_etf']:
                 pe_etfs.append(res)
-            else:
-                pe_stocks.append(res)
+            elif res['is_tw']:
+                pe_tw_stocks.append(res)
+            elif res['is_us']:
+                pe_us_stocks.append(res)
                 
         time.sleep(0.2) 
 
     # --- 排序與擷取 Top 5 ---
-    # 依市值 (market_cap) 降冪排序
     pe_etfs.sort(key=lambda x: x['market_cap'], reverse=True)
-    pe_stocks.sort(key=lambda x: x['market_cap'], reverse=True)
+    pe_tw_stocks.sort(key=lambda x: x['market_cap'], reverse=True)
+    pe_us_stocks.sort(key=lambda x: x['market_cap'], reverse=True)
     
     top5_etfs = pe_etfs[:5]
-    top5_stocks = pe_stocks[:5]
-
-    def format_pe_item(item):
-        t_pe_str = f"{item['trailing_pe']:.1f}"
-        f_pe_str = f"{item['forward_pe']:.1f}" if item['forward_pe'] is not None else "無"
-        return f"{item['name']} (歷史 {t_pe_str} / 預估 {f_pe_str})"
+    top5_tw_stocks = pe_tw_stocks[:5]
+    top5_us_stocks = pe_us_stocks[:5]
 
     # --- 組合 Telegram 訊息 ---
     now_str = datetime.now().strftime('%Y/%m/%d')
@@ -159,24 +168,38 @@ def main():
     
     # 1. 低檔金叉
     msg += "📈 <b>低檔週KD金叉 (K&lt;30)：</b>\n"
-    msg += "、".join(golden_cross_list) if golden_cross_list else "今日無符合標的"
+    if golden_cross_list:
+        for item in golden_cross_list:
+            msg += f"• {format_pe_item(item)}\n"
+    else:
+        msg += "今日無符合標的\n"
         
-    # 2. 本益比 < 20 (分 ETF 與 個股)
-    msg += "\n\n💡 <b>歷史本益比 &lt; 20 倍 (依市值Top 5)：</b>\n"
+    # 2. 本益比 < 20 (分 台股ETF、台股個股、美股個股)
+    msg += "\n💡 <b>歷史本益比 &lt; 20 倍 (依市值Top 5)：</b>\n"
     
-    msg += "📍 <b>【ETF】</b>\n"
+    # 【台股 ETF】
+    msg += "\n📍 <b>【台股 ETF】</b>\n"
     if top5_etfs:
         for idx, item in enumerate(top5_etfs, 1):
             msg += f"{idx}. {format_pe_item(item)}\n"
     else:
-        msg += "- 無符合標的或無法取得本益比\n"
+        msg += "- 無符合標的或無數值\n"
         
-    msg += "\n📍 <b>【個股】</b>\n"
-    if top5_stocks:
-        for idx, item in enumerate(top5_stocks, 1):
+    # 【台股 個股】
+    msg += "\n📍 <b>【台股 個股】</b>\n"
+    if top5_tw_stocks:
+        for idx, item in enumerate(top5_tw_stocks, 1):
             msg += f"{idx}. {format_pe_item(item)}\n"
     else:
-        msg += "- 無符合標的或無法取得本益比\n"
+        msg += "- 無符合標的或無數值\n"
+
+    # 【美股 個股】
+    msg += "\n📍 <b>【美股 個股】</b>\n"
+    if top5_us_stocks:
+        for idx, item in enumerate(top5_us_stocks, 1):
+            msg += f"{idx}. {format_pe_item(item)}\n"
+    else:
+        msg += "- 無符合標的或無數值\n"
 
     send_tg_summary(msg)
     print("掃描完畢，已發送。")
