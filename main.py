@@ -24,8 +24,8 @@ TW_CORE = [
     {'symbol': '2308.TW', 'name': '台達電'},
     {'symbol': '0050.TW', 'name': '元大台灣50'},
     {'symbol': '00878.TW', 'name': '國泰永續高股息'},
-    {'symbol': '00937B.TW', 'name': '群益ESG投等債20+'},
-    {'symbol': '00687B.TW', 'name': '國泰20年美債'},
+    {'symbol': '00713.TW', 'name': '元大台灣高息低波'},
+    {'symbol': '00919.TW', 'name': '群益台灣精選高息'},
     {'symbol': '009812.TW', 'name': '野村日本東證ETF'}
 ]
 
@@ -125,7 +125,6 @@ def send_grouped_messages_and_charts(category_name, results_list):
     current_chunk = f"📁 <b>【{category_name}】監控彙整報告</b>\n\n"
     for res in results_list:
         msg = res['detail_msg']
-        # 若加上這段會超過長度限制，先發送當前的，再開新的一則
         if len(current_chunk) + len(msg) > 3800:
             send_tg_text(current_chunk)
             time.sleep(1)
@@ -140,17 +139,16 @@ def send_grouped_messages_and_charts(category_name, results_list):
     chart_fns = [res['chart_fn'] for res in results_list if res['chart_fn'] and os.path.exists(res['chart_fn'])]
     if chart_fns:
         send_tg_album(chart_fns)
-        # 傳送完畢後刪除圖片檔案，保持乾淨
         for fn in chart_fns:
             try: os.remove(fn)
             except: pass
 
 # --- 3. 核心處理邏輯 ---
 def classify_target(sym):
+    # 只區分台股與美股
     if sym.endswith('.TW') or sym.endswith('.TWO'):
-        if sym.startswith('00'): return 'ETF'
-        return '台股個股'
-    return '美股與指數'
+        return '台股'
+    return '美股'
 
 def process_target(sym, name):
     try:
@@ -209,17 +207,16 @@ def process_target(sym, name):
 
 def main():
     now_str = datetime.now().strftime('%Y/%m/%d')
-    send_tg_text(f"🏛️ <b>全球財經深度掃描報告 ({now_str})</b>\n資料開始彙整中...")
+    print(f"啟動財經掃描... ({now_str})")
     
     summary_golden_cross = []
     summary_death_cross = []
     summary_low_pe = []
     
-    # 準備三個分類的「購物車」存放資料
+    # 準備兩個分類的「購物車」存放資料
     grouped_results = {
-        '台股個股': [],
-        '美股與指數': [],
-        'ETF': []
+        '台股': [],
+        '美股': []
     }
 
     all_targets = []
@@ -232,32 +229,35 @@ def main():
             # 放入對應分類的購物車
             grouped_results[res['category']].append(res)
             
-            # 收集摘要
+            # 準備本益比字串
+            pe_val = res['trailing_pe']
+            pe_str = f"{pe_val:.1f}" if isinstance(pe_val, (int, float)) else "無"
+            
+            # 收集摘要並附加本益比資訊
             if res['kd_text'] == "金叉轉強" and res['k_value'] < 30:
-                summary_golden_cross.append(res['name'])
+                summary_golden_cross.append(f"{res['name']} (P/E: {pe_str})")
             if res['kd_text'] == "死亡交叉" and res['k_value'] > 70:
-                summary_death_cross.append(res['name'])
-            if isinstance(res['trailing_pe'], (int, float)) and res['trailing_pe'] < 25:
-                summary_low_pe.append(f"{res['name']} ({res['trailing_pe']:.1f})")
+                summary_death_cross.append(f"{res['name']} (P/E: {pe_str})")
+            if isinstance(pe_val, (int, float)) and pe_val < 25:
+                summary_low_pe.append(f"{res['name']} (P/E: {pe_val:.1f})")
                 
         time.sleep(0.5)
 
     # --- 批次發送 (文字 + 圖表相簿) ---
-    send_grouped_messages_and_charts("台股個股", grouped_results['台股個股'])
-    send_grouped_messages_and_charts("美股與指數", grouped_results['美股與指數'])
-    send_grouped_messages_and_charts("ETF", grouped_results['ETF'])
+    send_grouped_messages_and_charts("台股", grouped_results['台股'])
+    send_grouped_messages_and_charts("美股", grouped_results['美股'])
 
     # --- 傳送最後的精華摘要 ---
-    summary_msg = f"🏁 <b>掃描完畢！今日盤後亮點摘要：</b>\n\n"
+    summary_msg = f"🏁 <b>全球財經深度掃描報告 ({now_str}) - 盤後亮點摘要：</b>\n\n"
     
     summary_msg += "📈 <b>低檔週KD金叉 (K&lt;30)：</b>\n"
-    summary_msg += "、".join(summary_golden_cross) if summary_golden_cross else "無"
+    summary_msg += "、\n".join(summary_golden_cross) if summary_golden_cross else "無"
     
     summary_msg += "\n\n📉 <b>高檔週KD死叉 (K&gt;70)：</b>\n"
-    summary_msg += "、".join(summary_death_cross) if summary_death_cross else "無"
+    summary_msg += "、\n".join(summary_death_cross) if summary_death_cross else "無"
     
     summary_msg += "\n\n💡 <b>歷史本益比 &lt; 25 倍：</b>\n"
-    summary_msg += "、".join(summary_low_pe) if summary_low_pe else "無"
+    summary_msg += "、\n".join(summary_low_pe) if summary_low_pe else "無"
 
     send_tg_text(summary_msg)
 
