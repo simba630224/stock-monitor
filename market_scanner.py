@@ -1,5 +1,6 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import requests
 import os
 import time
@@ -59,17 +60,17 @@ def send_tg_summary(msg):
     except Exception as e:
         print(f"❌ Telegram 發送發生例外錯誤: {e}")
 
-def get_weekly_kd(df):
-    df_w = df.resample('W-FRI').agg({'High':'max','Low':'min','Close':'last'}).dropna()
-    ln = df_w['Low'].rolling(9).min()
-    hn = df_w['High'].rolling(9).max()
-    rsv = (df_w['Close'] - ln) / (hn - ln) * 100
-    df_w['K'] = rsv.ewm(com=2, adjust=False).mean()
-    df_w['D'] = df_w['K'].ewm(com=2, adjust=False).mean()
-    return df_w
+def calc_days_since(df_bool_series):
+    """計算最後一次發生 True 到現在經過了幾個「交易週期」"""
+    if not df_bool_series.any():
+        return -1 # 沒發生過
+    # 取得最後一個為 True 的索引
+    last_idx = df_bool_series[df_bool_series].index[-1]
+    # 計算到最後一天相差幾個列 (週期)
+    days_since = len(df_bool_series.loc[last_idx:]) - 1
+    return days_since
 
 def scan_target(sym, name):
-    # 分類判斷
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     is_etf = is_tw and sym.startswith('00')
     is_us = not is_tw
@@ -79,33 +80,86 @@ def scan_target(sym, name):
         'is_etf': is_etf,
         'is_tw': is_tw,
         'is_us': is_us,
-        'golden_cross': False, 
+        'kd_golden_days': -1, 
+        'kd_death_days': -1,
+        'break_ma20_days': -1,
+        'above_ma20_days': -1,
         'trailing_pe': None,
         'forward_pe': None,
         'market_cap': 0
     }
     
     try:
-        # 1. 判斷技術指標
-        df_raw = yf.download(sym, period="2y", progress=False)
-        if not df_raw.empty:
-            if isinstance(df_raw.columns, pd.MultiIndex): 
-                df_raw.columns = df_raw.columns.get_level_values(0)
+        # 下載歷史資料 (拉長到 1 年以確保有足夠跨度尋找交叉點)
+        df = yf.download(sym, period="1y", progress=False)
+        if df.empty: return result
+        if isinstance(df.columns, pd.MultiIndex): 
+            df.columns = df.columns.get_level_values(0)
             
-            df_w = get_weekly_kd(df_raw.astype(float).dropna())
-            if len(df_w) >= 2:
-                k, d = df_w['K'].iloc[-1], df_w['D'].iloc[-1]
-                pk, pd_v = df_w['K'].iloc[-2], df_w['D'].iloc[-2]
-                if k > d and pk <= pd_v and k < 30:
-                    result['golden_cross'] = True
+        df = df.dropna()
+        if len(df) < 20: return result
 
-        # 2. 抓取基本面數據 (本益比與市值)
+        # ==========================================
+        # 技術面 1：日線 (Daily) 月線交叉判斷
+        # ==========================================
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        
+        # 跌破月線：昨天還在月線上(或平)，今天收盤小於月線
+        df['Break_MA20'] = (df['Close'] < df['MA20']) & (df['Close'].shift(1) >= df['MA20'].shift(1))
+        # 站上月線：昨天還在月線下(或平)，今天收盤大於月線
+        df['Above_MA20'] = (df['Close'] > df['MA20']) & (df['Close'].shift(1) <= df['MA20'].shift(1))
+        
+        # 只捕捉「目前還在該狀態」的標的。例如：雖然 3 天前站上月線，但如果昨天又跌破，那「站上月線天數」就沒有意義。
+        # 因此，最後一天的狀態(收盤價與MA20的關係) 必須符合條件。
+        last_close = df['Close'].iloc[-1]
+        last_ma20 = df['MA20'].iloc[-1]
+        
+        if last_close < last_ma20:
+            result['break_ma20_days'] = calc_days_since(df['Break_MA20'])
+        elif last_close > last_ma20:
+            result['above_ma20_days'] = calc_days_since(df['Above_MA20'])
+
+        # ==========================================
+        # 技術面 2：週線 (Weekly) KD 交叉判斷
+        # ==========================================
+        df_w = df.resample('W-FRI').agg({'High':'max','Low':'min','Close':'last'}).dropna()
+        ln = df_w['Low'].rolling(9).min()
+        hn = df_w['High'].rolling(9).max()
+        rsv = (df_w['Close'] - ln) / (hn - ln) * 100
+        df_w['K'] = rsv.ewm(com=2, adjust=False).mean()
+        df_w['D'] = df_w['K'].ewm(com=2, adjust=False).mean()
+        
+        # 黃金交叉：K > D，且上週 K <= D
+        df_w['Golden_Cross'] = (df_w['K'] > df_w['D']) & (df_w['K'].shift(1) <= df_w['D'].shift(1))
+        # 死亡交叉：K < D，且上週 K >= D
+        df_w['Death_Cross'] = (df_w['K'] < df_w['D']) & (df_w['K'].shift(1) >= df_w['D'].shift(1))
+        
+        last_k = df_w['K'].iloc[-1]
+        last_d = df_w['D'].iloc[-1]
+        
+        # 金叉 (必須確認目前 K>D，且發生金叉時 K處於低檔區<30)
+        if last_k > last_d:
+            # 找到最後一次金叉的索引
+            if df_w['Golden_Cross'].any():
+                last_gc_idx = df_w[df_w['Golden_Cross']].index[-1]
+                # 確認發生金叉當下的 K 值是否 < 30
+                if df_w.loc[last_gc_idx, 'K'] < 30:
+                    result['kd_golden_days'] = calc_days_since(df_w['Golden_Cross'])
+
+        # 死叉 (必須確認目前 K<D，且發生死叉時 K處於高檔區>70)
+        elif last_k < last_d:
+            if df_w['Death_Cross'].any():
+                last_dc_idx = df_w[df_w['Death_Cross']].index[-1]
+                if df_w.loc[last_dc_idx, 'K'] > 70:
+                    result['kd_death_days'] = calc_days_since(df_w['Death_Cross'])
+
+        # ==========================================
+        # 基本面：本益比與市值
+        # ==========================================
         ticker_obj = yf.Ticker(sym)
         info = ticker_obj.info
-        
         t_pe = info.get('trailingPE')
         f_pe = info.get('forwardPE')
-        # ETF 的規模在 Yahoo 中有時存於 totalAssets
         m_cap = info.get('marketCap') or info.get('totalAssets') or 0
         
         if isinstance(t_pe, (int, float)): result['trailing_pe'] = t_pe
@@ -117,16 +171,27 @@ def scan_target(sym, name):
     
     return result
 
-def format_pe_item(item):
-    """格式化輸出字串，包含歷史與預估本益比"""
+def format_pe_item(item, days, unit="天"):
+    """格式化輸出字串，包含天數與本益比"""
     t_pe_str = f"{item['trailing_pe']:.1f}" if item['trailing_pe'] is not None else "無"
     f_pe_str = f"{item['forward_pe']:.1f}" if item['forward_pe'] is not None else "無"
-    return f"{item['name']} (歷史 {t_pe_str} / 預估 {f_pe_str})"
+    
+    # 若天數為 0，表示「今天剛發生」
+    if days == 0:
+        day_str = "<b>(今日剛發生)</b>"
+    else:
+        day_str = f"({days} {unit}前)"
+        
+    return f"{item['name']} {day_str} [P/E 歷史 {t_pe_str} / 預估 {f_pe_str}]"
 
 def main():
     print(f"啟動市場掃描... 共計 {len(TARGET_LIST)} 檔標的")
     
     golden_cross_list = []
+    death_cross_list = []
+    break_ma20_list = []
+    above_ma20_list = []
+    
     pe_etfs = []
     pe_tw_stocks = []
     pe_us_stocks = []
@@ -138,68 +203,77 @@ def main():
         print(f"Scanning: {sym} {name}")
         res = scan_target(sym, name)
         
-        # 收集低檔金叉
-        if res['golden_cross']:
+        # 收集技術面觸發標的 (0~10天內發生的才列出，避免太久遠的訊號干擾)
+        if 0 <= res['kd_golden_days'] <= 5: # 週線 5 週內
             golden_cross_list.append(res)
             
-        # 收集歷史 P/E < 20 的標的，並依據 ETF/台股/美股 分流
+        if 0 <= res['kd_death_days'] <= 5: # 週線 5 週內
+            death_cross_list.append(res)
+            
+        if 0 <= res['break_ma20_days'] <= 10: # 日線 10 天內
+            break_ma20_list.append(res)
+            
+        if 0 <= res['above_ma20_days'] <= 10: # 日線 10 天內
+            above_ma20_list.append(res)
+            
+        # 收集 P/E < 20 的標的分流
         if res['trailing_pe'] is not None and res['trailing_pe'] < 20:
-            if res['is_etf']:
-                pe_etfs.append(res)
-            elif res['is_tw']:
-                pe_tw_stocks.append(res)
-            elif res['is_us']:
-                pe_us_stocks.append(res)
+            if res['is_etf']: pe_etfs.append(res)
+            elif res['is_tw']: pe_tw_stocks.append(res)
+            elif res['is_us']: pe_us_stocks.append(res)
                 
         time.sleep(0.2) 
 
-    # --- 排序與擷取 Top 5 ---
+    # --- 排序 ---
+    # 技術面依照「發生天數」由近到遠排序
+    golden_cross_list.sort(key=lambda x: x['kd_golden_days'])
+    death_cross_list.sort(key=lambda x: x['kd_death_days'])
+    break_ma20_list.sort(key=lambda x: x['break_ma20_days'])
+    above_ma20_list.sort(key=lambda x: x['above_ma20_days'])
+    
+    # 價值面依市值降冪排序
     pe_etfs.sort(key=lambda x: x['market_cap'], reverse=True)
     pe_tw_stocks.sort(key=lambda x: x['market_cap'], reverse=True)
     pe_us_stocks.sort(key=lambda x: x['market_cap'], reverse=True)
-    
-    top5_etfs = pe_etfs[:5]
-    top5_tw_stocks = pe_tw_stocks[:5]
-    top5_us_stocks = pe_us_stocks[:5]
 
     # --- 組合 Telegram 訊息 ---
     now_str = datetime.now().strftime('%Y/%m/%d')
     msg = f"🏆 <b>大盤百大/ETF/美巨頭 盤前掃描 ({now_str})</b>\n\n"
     
-    # 1. 低檔金叉
+    # 1. 週線 KD 狀態 (K<30金叉 / K>70死叉)
     msg += "📈 <b>低檔週KD金叉 (K&lt;30)：</b>\n"
     if golden_cross_list:
         for item in golden_cross_list:
-            msg += f"• {format_pe_item(item)}\n"
-    else:
-        msg += "今日無符合標的\n"
-        
-    # 2. 本益比 < 20 (分 台股ETF、台股個股、美股個股)
-    msg += "\n💡 <b>歷史本益比 &lt; 20 倍 (依市值Top 5)：</b>\n"
-    
-    # 【台股 ETF】
-    msg += "\n📍 <b>【台股 ETF】</b>\n"
-    if top5_etfs:
-        for idx, item in enumerate(top5_etfs, 1):
-            msg += f"{idx}. {format_pe_item(item)}\n"
-    else:
-        msg += "- 無符合標的或無數值\n"
-        
-    # 【台股 個股】
-    msg += "\n📍 <b>【台股 個股】</b>\n"
-    if top5_tw_stocks:
-        for idx, item in enumerate(top5_tw_stocks, 1):
-            msg += f"{idx}. {format_pe_item(item)}\n"
-    else:
-        msg += "- 無符合標的或無數值\n"
+            msg += f"• {format_pe_item(item, item['kd_golden_days'], '週')}\n"
+    else: msg += "今日/近期無符合標的\n"
 
-    # 【美股 個股】
-    msg += "\n📍 <b>【美股 個股】</b>\n"
-    if top5_us_stocks:
-        for idx, item in enumerate(top5_us_stocks, 1):
-            msg += f"{idx}. {format_pe_item(item)}\n"
-    else:
-        msg += "- 無符合標的或無數值\n"
+    msg += "\n📉 <b>高檔週KD死叉 (K&gt;70)：</b>\n"
+    if death_cross_list:
+        for item in death_cross_list:
+            msg += f"• {format_pe_item(item, item['kd_death_days'], '週')}\n"
+    else: msg += "今日/近期無符合標的\n"
+
+    # 2. 日線 MA20 狀態
+    msg += "\n🟢 <b>強勢站上月線 (MA20)：</b>\n"
+    if above_ma20_list:
+        for item in above_ma20_list:
+            msg += f"• {format_pe_item(item, item['above_ma20_days'], '日')}\n"
+    else: msg += "今日/近期無符合標的\n"
+
+    msg += "\n🔴 <b>弱勢跌破月線 (MA20)：</b>\n"
+    if break_ma20_list:
+        for item in break_ma20_list:
+            msg += f"• {format_pe_item(item, item['break_ma20_days'], '日')}\n"
+    else: msg += "今日/近期無符合標的\n"
+        
+    # 3. 本益比 < 20
+    msg += "\n💡 <b>歷史本益比 &lt; 20 倍 (依市值Top 5)：</b>\n"
+    msg += "📍 <b>【台股 ETF】</b>\n"
+    for idx, item in enumerate(pe_etfs[:5], 1): msg += f"{idx}. {item['name']} [P/E {item['trailing_pe']:.1f}]\n"
+    msg += "📍 <b>【台股 個股】</b>\n"
+    for idx, item in enumerate(pe_tw_stocks[:5], 1): msg += f"{idx}. {item['name']} [P/E {item['trailing_pe']:.1f}]\n"
+    msg += "📍 <b>【美股 個股】</b>\n"
+    for idx, item in enumerate(pe_us_stocks[:5], 1): msg += f"{idx}. {item['name']} [P/E {item['trailing_pe']:.1f}]\n"
 
     send_tg_summary(msg)
     print("掃描完畢，已發送。")
