@@ -1,6 +1,6 @@
 - name: 執行測試程式
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }} 
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           # 呼叫測試版的投資組合報告
