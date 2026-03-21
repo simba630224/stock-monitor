@@ -19,14 +19,14 @@ TARGET_LIST = [
     "AAPL:蘋果", "MSFT:微軟", "NVDA:輝達", "GOOGL:谷歌", "AMZN:亞馬遜", 
     "META:Meta", "BRK-B:波克夏", "LLY:禮來", "AVGO:博通", "TSLA:特斯拉",
 
-    # Top 20 台股 ETF (已排除債券，全數替換為純股ETF)
+    # Top 20 台股 ETF (全數為純股ETF)
     "0050.TW:元大台灣50", "0056.TW:元大高股息", "00878.TW:國泰永續高股息", "00919.TW:群益台灣精選高息", 
     "00929.TW:復華台灣科技優息", "00713.TW:元大台灣高息低波", "006208.TW:富邦台50", "00939.TW:統一台灣高息動能", 
     "00940.TW:元大台灣價值高息", "00692.TW:富邦公司治理", "00881.TW:國泰台灣5G+", "00915.TW:凱基優選高股息30", 
     "00918.TW:大華優利高填息30", "00922.TW:國泰台灣領袖50", "00757.TW:統一FANG+", "00830.TW:國泰費城半導體",
     "00850.TW:元大臺灣ESG永續", "00923.TW:群益台灣ESG低碳", "00905.TW:FT臺灣Smart", "00891.TW:中信關鍵半導體",
     
-    # 台股權值股 (僅保留電子股)
+    # 台股權值股 (純電子/半導體/網通/光電)
     "2330.TW:台積電", "2317.TW:鴻海", "2454.TW:聯發科", "2308.TW:台達電", "2382.TW:廣達", 
     "3711.TW:日月光投控", "2303.TW:聯電", "2345.TW:智邦", "2357.TW:華碩", "2379.TW:瑞昱", 
     "2395.TW:研華", "3008.TW:大立光", "3034.TW:聯詠", "3045.TW:台灣大", "3231.TW:緯創", 
@@ -47,9 +47,6 @@ def send_tg_summary(msg):
         return
         
     print(f"\n準備發送 Telegram... 訊息總字元數: {len(msg)}")
-    if len(msg) > 4000:
-        print("⚠️ 警告：訊息長度逼近或超過 Telegram 4096 字元上限！")
-        
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
         response = requests.post(url, data={'chat_id':TG_CHAT_ID, 'text':msg, 'parse_mode':'HTML', 'disable_web_page_preview':True})
@@ -65,6 +62,14 @@ def calc_days_since(df_bool_series):
     last_idx = df_bool_series[df_bool_series].index[-1]
     return len(df_bool_series.loc[last_idx:]) - 1
 
+def analyze_ma_relation(price, ma20, ma60):
+    if pd.isna(ma20) or pd.isna(ma60): return "均線資料不足"
+    if price > ma20 and price > ma60: return "🟢 站穩月季線之上 (強勢)"
+    if price < ma20 and price < ma60: return "🔴 跌破月季線之下 (弱勢)"
+    if price > ma60 and price < ma20: return "🟡 守住季線，受月線壓制"
+    if price > ma20 and price < ma60: return "🔵 站上月線，臨季線挑戰"
+    return "均線交纏整理"
+
 def scan_target(sym, name):
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     is_etf = is_tw and sym.startswith('00')
@@ -73,7 +78,7 @@ def scan_target(sym, name):
     result = {
         'name': name, 'is_etf': is_etf, 'is_tw': is_tw, 'is_us': is_us,
         'kd_golden_days': -1, 'kd_death_days': -1,
-        'break_ma20_days': -1, 'above_ma20_days': -1,
+        'current_price': 0, 'ma20': None, 'ma60': None, 'ma_status': "",
         'trailing_pe': None, 'forward_pe': None, 'market_cap': 0
     }
     
@@ -86,14 +91,14 @@ def scan_target(sym, name):
         df = df.dropna()
         if len(df) < 20: return result
 
-        # 1. 日線 MA20 判斷
+        # 1. 均線計算與關聯性判斷
         df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['Break_MA20'] = (df['Close'] < df['MA20']) & (df['Close'].shift(1) >= df['MA20'].shift(1))
-        df['Above_MA20'] = (df['Close'] > df['MA20']) & (df['Close'].shift(1) <= df['MA20'].shift(1))
+        df['MA60'] = df['Close'].rolling(window=60).mean()
         
-        last_close, last_ma20 = df['Close'].iloc[-1], df['MA20'].iloc[-1]
-        if last_close < last_ma20: result['break_ma20_days'] = calc_days_since(df['Break_MA20'])
-        elif last_close > last_ma20: result['above_ma20_days'] = calc_days_since(df['Above_MA20'])
+        result['current_price'] = df['Close'].iloc[-1]
+        result['ma20'] = df['MA20'].iloc[-1]
+        result['ma60'] = df['MA60'].iloc[-1]
+        result['ma_status'] = analyze_ma_relation(result['current_price'], result['ma20'], result['ma60'])
 
         # 2. 週線 KD 判斷
         df_w = df.resample('W-FRI').agg({'High':'max','Low':'min','Close':'last'}).dropna()
@@ -133,20 +138,31 @@ def scan_target(sym, name):
     
     return result
 
-def format_pe_item(item, days, unit="天"):
+def format_kd_item(item, days):
+    """格式化 KD 金叉/死叉 輸出內容 (含均線資訊)"""
+    day_str = "<b>(本週)</b>" if days == 0 else f"({days}週前)"
+    safe_name = item['name'].replace('<', '').replace('>', '')
+    
+    price_str = f"{item['current_price']:.2f}"
+    ma20_str = f"{item['ma20']:.2f}" if pd.notna(item['ma20']) else "無"
+    ma60_str = f"{item['ma60']:.2f}" if pd.notna(item['ma60']) else "無"
+    
+    return (f"• {safe_name} {day_str}\n"
+            f"  └ 收: {price_str} | 月: {ma20_str} | 季: {ma60_str}\n"
+            f"  └ {item['ma_status']}")
+
+def format_pe_item(item):
+    """格式化 P/E 輸出內容"""
     t_pe_str = f"{item['trailing_pe']:.1f}" if item['trailing_pe'] is not None else "無"
     f_pe_str = f"{item['forward_pe']:.1f}" if item['forward_pe'] is not None else "無"
-    day_str = "<b>(今日)</b>" if days == 0 else f"({days}{unit}前)"
     safe_name = item['name'].replace('<', '').replace('>', '')
-    return f"{safe_name} {day_str} [P/E {t_pe_str} / {f_pe_str}]"
+    return f"{safe_name} [P/E {t_pe_str} / {f_pe_str}]"
 
 def main():
     print(f"啟動市場掃描... 共計 {len(TARGET_LIST)} 檔標的")
     
     golden_cross_list = []
     death_cross_list = []
-    break_ma20_list = []
-    above_ma20_list = []
     pe_etfs = []
     pe_tw_stocks = []
     pe_us_stocks = []
@@ -162,8 +178,6 @@ def main():
         
         if 0 <= res['kd_golden_days'] <= 5: golden_cross_list.append(res)
         if 0 <= res['kd_death_days'] <= 5: death_cross_list.append(res)
-        if 0 <= res['break_ma20_days'] <= 10: break_ma20_list.append(res)
-        if 0 <= res['above_ma20_days'] <= 10: above_ma20_list.append(res)
             
         if res['trailing_pe'] is not None and res['trailing_pe'] < 20:
             if res['is_etf']: pe_etfs.append(res)
@@ -175,8 +189,6 @@ def main():
     # --- 排序邏輯：全面改為「依市值降冪排序」，並只取 Top 10 ---
     golden_cross_list.sort(key=lambda x: x['market_cap'], reverse=True)
     death_cross_list.sort(key=lambda x: x['market_cap'], reverse=True)
-    break_ma20_list.sort(key=lambda x: x['market_cap'], reverse=True)
-    above_ma20_list.sort(key=lambda x: x['market_cap'], reverse=True)
     
     pe_etfs.sort(key=lambda x: x['market_cap'], reverse=True)
     pe_tw_stocks.sort(key=lambda x: x['market_cap'], reverse=True)
@@ -185,10 +197,8 @@ def main():
     # 擷取 Top 10
     top10_golden = golden_cross_list[:10]
     top10_death = death_cross_list[:10]
-    top10_above = above_ma20_list[:10]
-    top10_break = break_ma20_list[:10]
 
-    print(f"\n資料蒐集完畢！找到 {len(golden_cross_list)} 個金叉, {len(death_cross_list)} 個死叉, {len(above_ma20_list)} 個站上月線, {len(break_ma20_list)} 個跌破月線。")
+    print(f"\n資料蒐集完畢！找到 {len(golden_cross_list)} 個金叉, {len(death_cross_list)} 個死叉。")
 
     # --- 組合 Telegram 訊息 ---
     now_str = datetime.now().strftime('%Y/%m/%d')
@@ -196,34 +206,28 @@ def main():
     
     msg += "📈 <b>低檔週KD金叉 (K&lt;30) Top 10：</b>\n"
     if top10_golden:
-        for idx, item in enumerate(top10_golden, 1): msg += f"{idx}. {format_pe_item(item, item['kd_golden_days'], '週')}\n"
-    else: msg += "- 無符合標的\n"
+        for idx, item in enumerate(top10_golden, 1): 
+            msg += f"{idx}. {format_kd_item(item, item['kd_golden_days'])}\n"
+    else: 
+        msg += "- 無符合標的\n"
 
     msg += "\n📉 <b>高檔週KD死叉 (K&gt;70) Top 10：</b>\n"
     if top10_death:
-        for idx, item in enumerate(top10_death, 1): msg += f"{idx}. {format_pe_item(item, item['kd_death_days'], '週')}\n"
-    else: msg += "- 無符合標的\n"
-
-    msg += "\n🟢 <b>強勢站上月線 (MA20) Top 10：</b>\n"
-    if top10_above:
-        for idx, item in enumerate(top10_above, 1): msg += f"{idx}. {format_pe_item(item, item['above_ma20_days'], '日')}\n"
-    else: msg += "- 無符合標的\n"
-
-    msg += "\n🔴 <b>弱勢跌破月線 (MA20) Top 10：</b>\n"
-    if top10_break:
-        for idx, item in enumerate(top10_break, 1): msg += f"{idx}. {format_pe_item(item, item['break_ma20_days'], '日')}\n"
-    else: msg += "- 無符合標的\n"
+        for idx, item in enumerate(top10_death, 1): 
+            msg += f"{idx}. {format_kd_item(item, item['kd_death_days'])}\n"
+    else: 
+        msg += "- 無符合標的\n"
         
     msg += "\n💡 <b>歷史本益比 &lt; 20 倍 (依市值Top 10)：</b>\n"
     
     msg += "📍 <b>【台股 ETF】</b>\n"
-    for idx, item in enumerate(pe_etfs[:10], 1): msg += f"{idx}. {item['name']} [P/E {item['trailing_pe']:.1f}]\n"
+    for idx, item in enumerate(pe_etfs[:10], 1): msg += f"{idx}. {format_pe_item(item)}\n"
     
     msg += "📍 <b>【台股 個股】</b>\n"
-    for idx, item in enumerate(pe_tw_stocks[:10], 1): msg += f"{idx}. {item['name']} [P/E {item['trailing_pe']:.1f}]\n"
+    for idx, item in enumerate(pe_tw_stocks[:10], 1): msg += f"{idx}. {format_pe_item(item)}\n"
     
     msg += "📍 <b>【美股 個股】</b>\n"
-    for idx, item in enumerate(pe_us_stocks[:10], 1): msg += f"{idx}. {item['name']} [P/E {item['trailing_pe']:.1f}]\n"
+    for idx, item in enumerate(pe_us_stocks[:10], 1): msg += f"{idx}. {format_pe_item(item)}\n"
 
     send_tg_summary(msg)
 
