@@ -5,8 +5,9 @@ import requests
 import os
 import time
 import json
+import traceback
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg') # 避免無頭伺服器繪圖報錯
 import mplfinance as mpf
 from datetime import datetime
 import warnings
@@ -44,31 +45,23 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2, market):
     short_term_name = "月/季線"
     status = ""
     
-    # 判斷中短線 (月/季)
+    # 判斷中短線
     if pd.notna(ma_s1) and pd.notna(ma_s2):
-        if price > ma_s1 and price > ma_s2:
-            status += f"🟢 站穩 {short_term_name} (強勢)"
-        elif price < ma_s1 and price < ma_s2:
-            status += f"🔴 位於 {short_term_name} 之下 (偏空)"
-        elif price > ma_s2 and price < ma_s1:
-            status += f"🟡 守住季線，受月線壓制"
-        elif price > ma_s1 and price < ma_s2:
-            status += f"🔵 站上月線，臨季線挑戰"
+        if price > ma_s1 and price > ma_s2: status += f"🟢 站穩 {short_term_name} (強勢)"
+        elif price < ma_s1 and price < ma_s2: status += f"🔴 位於 {short_term_name} 之下 (偏空)"
+        elif price > ma_s2 and price < ma_s1: status += f"🟡 守住季線，受月線壓制"
+        elif price > ma_s1 and price < ma_s2: status += f"🔵 站上月線，臨季線挑戰"
     else:
         status += "中短均線資料不足"
 
     status += " | "
     
-    # 判斷長線 (半年/年)
+    # 判斷長線
     if pd.notna(ma_l1) and pd.notna(ma_l2):
-        if price > ma_l1 and price > ma_l2:
-            status += f"🟢 長線多頭"
-        elif price < ma_l1 and price < ma_l2:
-            status += f"🔴 長線空頭"
-        elif price > ma_l2 and price < ma_l1:
-            status += f"🟡 守年線，受半年線壓"
-        elif price > ma_l1 and price < ma_l2:
-            status += f"🔵 站半年線，臨年線壓"
+        if price > ma_l1 and price > ma_l2: status += f"🟢 長線多頭"
+        elif price < ma_l1 and price < ma_l2: status += f"🔴 長線空頭"
+        elif price > ma_l2 and price < ma_l1: status += f"🟡 守年線，受半年線壓"
+        elif price > ma_l1 and price < ma_l2: status += f"🔵 站半年線，臨年線壓"
     else:
         status += "長線均線資料不足"
         
@@ -111,7 +104,7 @@ def send_tg_text(msg):
     try:
         requests.post(url, data={'chat_id':TG_CHAT_ID, 'text':msg, 'parse_mode':'HTML', 'disable_web_page_preview':True})
     except Exception as e:
-        print(f"Telegram Text 發送失敗: {e}")
+        print(f"❌ Telegram 文字發送失敗: {e}")
 
 def send_tg_album(image_paths):
     if not TG_TOKEN or not TG_CHAT_ID or not image_paths: return
@@ -128,7 +121,7 @@ def send_tg_album(image_paths):
         try:
             requests.post(url, data={'chat_id': TG_CHAT_ID, 'media': json.dumps(media)}, files=files)
         except Exception as e:
-            print(f"Telegram Album 發送失敗: {e}")
+            print(f"❌ Telegram 圖片發送失敗: {e}")
         finally:
             for f in files.values(): f.close()
         time.sleep(1)
@@ -164,12 +157,30 @@ def classify_target(sym):
 def process_target(sym, name):
     try:
         df_raw = yf.download(sym, period="3y", progress=False) 
-        if df_raw.empty: return None
+        if df_raw.empty: 
+            print(f"⚠️ {sym} ({name}) 無法取得資料，跳過。")
+            return None
+            
         if isinstance(df_raw.columns, pd.MultiIndex): 
             df_raw.columns = df_raw.columns.get_level_values(0)
             
+        # 防呆：去除時區資訊，確保 mplfinance 不會報錯
+        df_raw.index = df_raw.index.tz_localize(None)
+        df_raw.index.name = 'Date'
+        
+        df = df_raw[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
+        
+        # 防呆：確保有足夠天數計算技術指標 (至少需大於 60 天)
+        if len(df) < 60:
+            print(f"⚠️ {sym} ({name}) 歷史資料筆數不足 ({len(df)}筆)，跳過。")
+            return None
+            
         market = classify_target(sym)
-        df, df_w = calculate_indicators(df_raw.astype(float).dropna(), market)
+        df, df_w = calculate_indicators(df, market)
+        
+        # 防呆：確保週線資料也有產生
+        if len(df_w) < 2:
+            return None
         
         t_pe, t_pe_str, f_pe_str = None, "無", "無"
         try:
@@ -182,11 +193,8 @@ def process_target(sym, name):
         except: pass 
         
         last_p = df['Close'].iloc[-1]
-        
-        ma_s1 = df['MA_S1'].iloc[-1]
-        ma_s2 = df['MA_S2'].iloc[-1]
-        ma_l1 = df['MA_L1'].iloc[-1]
-        ma_l2 = df['MA_L2'].iloc[-1]
+        ma_s1, ma_s2 = df['MA_S1'].iloc[-1], df['MA_S2'].iloc[-1]
+        ma_l1, ma_l2 = df['MA_L1'].iloc[-1], df['MA_L2'].iloc[-1]
         
         ma_status = analyze_ma_relation(last_p, ma_s1, ma_s2, ma_l1, ma_l2, market)
         
@@ -225,34 +233,30 @@ def process_target(sym, name):
                f"週 KD: {k_w:.1f}/{d_w:.1f} ({kd_text_w})")
         
         return {
-            'name': name,
-            'category': market,
-            'detail_msg': msg,
-            'chart_fn': fn,
-            'k_d': k_d, 'kd_text_d': kd_text_d,
-            'k_w': k_w, 'kd_text_w': kd_text_w,
+            'name': name, 'category': market, 'detail_msg': msg, 'chart_fn': fn,
+            'k_d': k_d, 'kd_text_d': kd_text_d, 'k_w': k_w, 'kd_text_w': kd_text_w,
             'trailing_pe': t_pe
         }
         
     except Exception as e: 
-        print(f"Error {sym}: {e}")
+        print(f"❌ 解析 {sym} ({name}) 時發生嚴重錯誤:")
+        traceback.print_exc() # 列印詳細錯誤供排錯
         return None
 
 def main():
+    # ⚠️ 終極防呆：檢查金鑰設定
+    if not TG_TOKEN or not TG_CHAT_ID:
+        raise ValueError("❌ 嚴重錯誤：找不到 TELEGRAM_TOKEN 或 CHAT_ID！請確認您的 GitHub Secrets 名稱是否正確無誤！")
+
     now_str = datetime.now().strftime('%Y/%m/%d')
     print(f"啟動財經掃描... ({now_str})")
     
-    summary_golden_d = []
-    summary_death_d = []
-    summary_golden_w = []
-    summary_death_w = []
+    summary_golden_d, summary_death_d = [], []
+    summary_golden_w, summary_death_w = [], []
     summary_low_pe = []
-    
     grouped_results = {'台股': [], '美股': []}
 
-    all_targets = []
-    for item in TW_CORE: all_targets.append((item['symbol'], item['name']))
-    for sym, name in US_WATCH.items(): all_targets.append((sym, name))
+    all_targets = [(item['symbol'], item['name']) for item in TW_CORE] + list(US_WATCH.items())
 
     for sym, name in all_targets:
         res = process_target(sym, name)
@@ -262,18 +266,11 @@ def main():
             pe_val = res['trailing_pe']
             pe_str = f"{pe_val:.1f}" if isinstance(pe_val, (int, float)) else "無"
             
-            if res['kd_text_d'] == "金叉轉強" and res['k_d'] < 30:
-                summary_golden_d.append(f"{res['name']} (P/E: {pe_str})")
-            if res['kd_text_d'] == "死亡交叉" and res['k_d'] > 70:
-                summary_death_d.append(f"{res['name']} (P/E: {pe_str})")
-                
-            if res['kd_text_w'] == "金叉轉強" and res['k_w'] < 30:
-                summary_golden_w.append(f"{res['name']} (P/E: {pe_str})")
-            if res['kd_text_w'] == "死亡交叉" and res['k_w'] > 70:
-                summary_death_w.append(f"{res['name']} (P/E: {pe_str})")
-                
-            if isinstance(pe_val, (int, float)) and pe_val < 25:
-                summary_low_pe.append(f"{res['name']} (P/E: {pe_val:.1f})")
+            if res['kd_text_d'] == "金叉轉強" and res['k_d'] < 30: summary_golden_d.append(f"{res['name']} (P/E: {pe_str})")
+            if res['kd_text_d'] == "死亡交叉" and res['k_d'] > 70: summary_death_d.append(f"{res['name']} (P/E: {pe_str})")
+            if res['kd_text_w'] == "金叉轉強" and res['k_w'] < 30: summary_golden_w.append(f"{res['name']} (P/E: {pe_str})")
+            if res['kd_text_w'] == "死亡交叉" and res['k_w'] > 70: summary_death_w.append(f"{res['name']} (P/E: {pe_str})")
+            if isinstance(pe_val, (int, float)) and pe_val < 25: summary_low_pe.append(f"{res['name']} (P/E: {pe_val:.1f})")
                 
         time.sleep(0.5)
 
@@ -281,21 +278,11 @@ def main():
     send_grouped_messages_and_charts("美股", grouped_results['美股'])
 
     summary_msg = f"🏁 <b>全球財經深度掃描 ({now_str}) - 盤後亮點摘要：</b>\n\n"
-    
-    summary_msg += "☀️ <b>低檔【日】KD金叉 (K&lt;30)：</b>\n"
-    summary_msg += "、\n".join(summary_golden_d) if summary_golden_d else "無"
-    
-    summary_msg += "\n\n⛈️ <b>高檔【日】KD死叉 (K&gt;70)：</b>\n"
-    summary_msg += "、\n".join(summary_death_d) if summary_death_d else "無"
-    
-    summary_msg += "\n\n📈 <b>低檔【週】KD金叉 (K&lt;30)：</b>\n"
-    summary_msg += "、\n".join(summary_golden_w) if summary_golden_w else "無"
-    
-    summary_msg += "\n\n📉 <b>高檔【週】KD死叉 (K&gt;70)：</b>\n"
-    summary_msg += "、\n".join(summary_death_w) if summary_death_w else "無"
-    
-    summary_msg += "\n\n💡 <b>歷史本益比 &lt; 25 倍：</b>\n"
-    summary_msg += "、\n".join(summary_low_pe) if summary_low_pe else "無"
+    summary_msg += "☀️ <b>低檔【日】KD金叉 (K&lt;30)：</b>\n" + ("、\n".join(summary_golden_d) if summary_golden_d else "無")
+    summary_msg += "\n\n⛈️ <b>高檔【日】KD死叉 (K&gt;70)：</b>\n" + ("、\n".join(summary_death_d) if summary_death_d else "無")
+    summary_msg += "\n\n📈 <b>低檔【週】KD金叉 (K&lt;30)：</b>\n" + ("、\n".join(summary_golden_w) if summary_golden_w else "無")
+    summary_msg += "\n\n📉 <b>高檔【週】KD死叉 (K&gt;70)：</b>\n" + ("、\n".join(summary_death_w) if summary_death_w else "無")
+    summary_msg += "\n\n💡 <b>歷史本益比 &lt; 25 倍：</b>\n" + ("、\n".join(summary_low_pe) if summary_low_pe else "無")
 
     send_tg_text(summary_msg)
 
