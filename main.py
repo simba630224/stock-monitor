@@ -6,7 +6,7 @@ import os
 import time
 import json
 import matplotlib
-matplotlib.use('Agg') # 設定背景繪圖，避免 GitHub Actions 報錯
+matplotlib.use('Agg')
 import mplfinance as mpf
 from datetime import datetime
 import warnings
@@ -41,20 +41,15 @@ US_WATCH = {
 
 # --- 2. 輔助功能 ---
 def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2, market):
-    """
-    綜合判斷短、中、長天期均線格局
-    ma_s1: 月線, ma_s2: 季線, ma_l1: 半年線, ma_l2: 年線
-    """
     short_term_name = "月/季線"
-    
     status = ""
     
     # 判斷中短線 (月/季)
     if pd.notna(ma_s1) and pd.notna(ma_s2):
         if price > ma_s1 and price > ma_s2:
-            status += f"🟢 站穩 {short_term_name} (強勢排列)"
+            status += f"🟢 站穩 {short_term_name} (強勢)"
         elif price < ma_s1 and price < ma_s2:
-            status += f"🔴 位於 {short_term_name} 之下 (偏空格局)"
+            status += f"🔴 位於 {short_term_name} 之下 (偏空)"
         elif price > ma_s2 and price < ma_s1:
             status += f"🟡 守住季線，受月線壓制"
         elif price > ma_s1 and price < ma_s2:
@@ -80,26 +75,23 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2, market):
     return status
 
 def calculate_indicators(df, market):
-    # 1. 均線計算 (台股與美股不同)
     if market == '台股':
-        df['MA_S1'] = df['Close'].rolling(20).mean()   # 月線
-        df['MA_S2'] = df['Close'].rolling(60).mean()   # 季線
-        df['MA_L1'] = df['Close'].rolling(120).mean()  # 半年線
-        df['MA_L2'] = df['Close'].rolling(240).mean()  # 年線
+        df['MA_S1'] = df['Close'].rolling(20).mean()
+        df['MA_S2'] = df['Close'].rolling(60).mean()
+        df['MA_L1'] = df['Close'].rolling(120).mean()
+        df['MA_L2'] = df['Close'].rolling(240).mean()
     else:
-        df['MA_S1'] = df['Close'].rolling(20).mean()   # 月線
-        df['MA_S2'] = df['Close'].rolling(50).mean()   # 季線 (美股慣用)
-        df['MA_L1'] = df['Close'].rolling(100).mean()  # 半年線 (美股慣用)
-        df['MA_L2'] = df['Close'].rolling(200).mean()  # 年線 (美股慣用)
+        df['MA_S1'] = df['Close'].rolling(20).mean()
+        df['MA_S2'] = df['Close'].rolling(50).mean()
+        df['MA_L1'] = df['Close'].rolling(100).mean()
+        df['MA_L2'] = df['Close'].rolling(200).mean()
 
-    # 2. 日線 KD 計算
     ln_d = df['Low'].rolling(9).min()
     hn_d = df['High'].rolling(9).max()
     rsv_d = (df['Close'] - ln_d) / (hn_d - ln_d) * 100
     df['K_d'] = rsv_d.ewm(com=2, adjust=False).mean()
     df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
 
-    # 3. 週線 KD 計算
     df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
     ln_w = df_w['Low'].rolling(9).min()
     hn_w = df_w['High'].rolling(9).max()
@@ -110,7 +102,6 @@ def calculate_indicators(df, market):
     return df, df_w
 
 def fmt_val(val):
-    """將數值格式化，處理 NaN 情況"""
     return f"{val:.2f}" if pd.notna(val) else "無"
 
 # --- Telegram 傳送模組 ---
@@ -172,7 +163,6 @@ def classify_target(sym):
 
 def process_target(sym, name):
     try:
-        # 拉長為3年以確保能算240日均線
         df_raw = yf.download(sym, period="3y", progress=False) 
         if df_raw.empty: return None
         if isinstance(df_raw.columns, pd.MultiIndex): 
@@ -193,34 +183,28 @@ def process_target(sym, name):
         
         last_p = df['Close'].iloc[-1]
         
-        # 取得最後的均線數值
         ma_s1 = df['MA_S1'].iloc[-1]
         ma_s2 = df['MA_S2'].iloc[-1]
         ma_l1 = df['MA_L1'].iloc[-1]
         ma_l2 = df['MA_L2'].iloc[-1]
         
-        # 判斷均線格局
         ma_status = analyze_ma_relation(last_p, ma_s1, ma_s2, ma_l1, ma_l2, market)
         
-        # 組合均線數值字串
         if market == '台股':
             ma_val_str = f"MA20: {fmt_val(ma_s1)} | MA60: {fmt_val(ma_s2)}\nMA120: {fmt_val(ma_l1)} | MA240: {fmt_val(ma_l2)}"
         else:
             ma_val_str = f"MA20: {fmt_val(ma_s1)} | MA50: {fmt_val(ma_s2)}\nMA100: {fmt_val(ma_l1)} | MA200: {fmt_val(ma_l2)}"
         
-        # 判斷 日KD
         k_d, d_d = df['K_d'].iloc[-1], df['D_d'].iloc[-1]
         pk_d, pd_d = df['K_d'].iloc[-2], df['D_d'].iloc[-2]
         kd_text_d = "金叉轉強" if k_d > d_d and pk_d <= pd_d else "死亡交叉" if k_d < d_d and pk_d >= pd_d else "趨勢延續"
         
-        # 判斷 週KD
         k_w, d_w = df_w['K_w'].iloc[-1], df_w['D_w'].iloc[-1]
         pk_w, pd_w = df_w['K_w'].iloc[-2], df_w['D_w'].iloc[-2]
         kd_text_w = "金叉轉強" if k_w > d_w and pk_w <= pd_w else "死亡交叉" if k_w < d_w and pk_w >= pd_w else "趨勢延續"
         
-        # 繪圖 
         fn = f"chart_{sym.replace('^','').replace('.','_')}.png"
-        pdf = df.tail(120) # 顯示更長天期以容納較長均線
+        pdf = df.tail(120)
         
         ap = []
         if pd.notna(pdf['MA_S1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S1'], color='blue', width=1.0))
@@ -235,10 +219,10 @@ def process_target(sym, name):
         
         msg = (f"📊 <b>{name} ({sym})</b>\n"
                f"目前價位: {last_p:.2f} | P/E: 歷史 {t_pe_str} / 預估 {f_pe_str}\n"
-               f"[{market}均線數值]\n{ma_val_str}\n"
-               f"均線位置: {ma_status}\n"
-               f"日線 KD: {k_d:.1f}/{d_d:.1f} ({kd_text_d})\n"
-               f"週線 KD: {k_w:.1f}/{d_w:.1f} ({kd_text_w})")
+               f"[{market}均線]\n{ma_val_str}\n"
+               f"位置: {ma_status}\n"
+               f"日 KD: {k_d:.1f}/{d_d:.1f} ({kd_text_d})\n"
+               f"週 KD: {k_w:.1f}/{d_w:.1f} ({kd_text_w})")
         
         return {
             'name': name,
@@ -258,7 +242,6 @@ def main():
     now_str = datetime.now().strftime('%Y/%m/%d')
     print(f"啟動財經掃描... ({now_str})")
     
-    # 建立亮點名單
     summary_golden_d = []
     summary_death_d = []
     summary_golden_w = []
@@ -279,30 +262,25 @@ def main():
             pe_val = res['trailing_pe']
             pe_str = f"{pe_val:.1f}" if isinstance(pe_val, (int, float)) else "無"
             
-            # 日 KD
             if res['kd_text_d'] == "金叉轉強" and res['k_d'] < 30:
                 summary_golden_d.append(f"{res['name']} (P/E: {pe_str})")
             if res['kd_text_d'] == "死亡交叉" and res['k_d'] > 70:
                 summary_death_d.append(f"{res['name']} (P/E: {pe_str})")
                 
-            # 週 KD
             if res['kd_text_w'] == "金叉轉強" and res['k_w'] < 30:
                 summary_golden_w.append(f"{res['name']} (P/E: {pe_str})")
             if res['kd_text_w'] == "死亡交叉" and res['k_w'] > 70:
                 summary_death_w.append(f"{res['name']} (P/E: {pe_str})")
                 
-            # 本益比
             if isinstance(pe_val, (int, float)) and pe_val < 25:
                 summary_low_pe.append(f"{res['name']} (P/E: {pe_val:.1f})")
                 
         time.sleep(0.5)
 
-    # --- 批次發送 (文字 + 圖表相簿) ---
     send_grouped_messages_and_charts("台股", grouped_results['台股'])
     send_grouped_messages_and_charts("美股", grouped_results['美股'])
 
-    # --- 傳送最後的精華摘要 ---
-    summary_msg = f"🏁 <b>全球財經深度掃描報告 ({now_str}) - 盤後亮點摘要：</b>\n\n"
+    summary_msg = f"🏁 <b>全球財經深度掃描 ({now_str}) - 盤後亮點摘要：</b>\n\n"
     
     summary_msg += "☀️ <b>低檔【日】KD金叉 (K&lt;30)：</b>\n"
     summary_msg += "、\n".join(summary_golden_d) if summary_golden_d else "無"
