@@ -1,7 +1,32 @@
-- name: 執行測試程式
+name: "📊 每日財經深度掃描"
+
+on:
+  schedule:
+    # 每天台灣時間下午 5 點執行 (UTC 時間 09:00，週一至週五)
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch: # 允許在 GitHub Actions 頁面手動點擊執行
+
+jobs:
+  scan_run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 取得程式碼
+        uses: actions/checkout@v3
+
+      - name: 設定 Python 3.11 環境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: 安裝必要套件
+        run: |
+          pip install yfinance pandas requests matplotlib mplfinance
+
+      - name: 執行掃描程式
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # 確保這裡的 Secrets 名稱與您 GitHub 上的設定一致
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }} 
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # 呼叫測試版的投資組合報告
-          python test_portfolio_report.py
+          python main.py
