@@ -9,7 +9,6 @@ import matplotlib
 matplotlib.use('Agg') # 設定背景繪圖，避免 GitHub Actions 報錯
 import mplfinance as mpf
 from datetime import datetime
-import xml.etree.ElementTree as ET
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -41,40 +40,45 @@ US_WATCH = {
 }
 
 # --- 2. 輔助功能 ---
-def get_filtered_news(name):
-    topic_limit = "(intitle:股市 OR intitle:股價 OR intitle:財經 OR intitle:ETF OR intitle:債券 OR intitle:美股)"
-    exclude_list = "-娛樂 -明星 -藝人 -影視 -大S -小S -汪小菲 -具俊曄 -許雅鈞 -綜藝 -緋聞 -穿搭 -八卦"
-    media_limit = "(經濟日報 OR 工商日報 OR 華爾街日報)"
+def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2, market):
+    """
+    綜合判斷短、中、長天期均線格局
+    ma_s1: 月線, ma_s2: 季線, ma_l1: 半年線, ma_l2: 年線
+    """
+    short_term_name = "月/季線"
+    long_term_name = "半年/年線"
     
-    query = f"{name} {topic_limit} {media_limit} {exclude_list}"
-    url = f"https://news.google.com/rss/search?q={query}+when:48h&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    status = ""
     
-    try:
-        r = requests.get(url, timeout=10)
-        root = ET.fromstring(r.text)
-        items = []
-        for item in root.findall('.//item')[:2]:
-            title = item.find('title').text
-            link = item.find('link').text
-            if any(bad in title for bad in ["大S", "小S", "汪小菲", "婚姻", "婆婆"]):
-                continue
-            safe_title = title.replace('<', '〈').replace('>', '〉').replace('&', '＆')
-            items.append(f"🔹 {safe_title}\n   <a href='{link}'>[閱讀原文]</a>")
-        return "\n".join(items) if items else "近期無指定權威報系之重大財經報導。"
-    except: 
-        return "新聞載入暫時失敗。"
+    # 判斷中短線 (月/季)
+    if pd.notna(ma_s1) and pd.notna(ma_s2):
+        if price > ma_s1 and price > ma_s2:
+            status += f"🟢 站穩 {short_term_name} (強勢排列)"
+        elif price < ma_s1 and price < ma_s2:
+            status += f"🔴 位於 {short_term_name} 之下 (偏空格局)"
+        elif price > ma_s2 and price < ma_s1:
+            status += f"🟡 守住季線，受月線壓制"
+        elif price > ma_s1 and price < ma_s2:
+            status += f"🔵 站上月線，臨季線挑戰"
+    else:
+        status += "中短均線資料不足"
 
-def analyze_ma_relation(price, ma_short, ma_long, market):
-    # 依據市場設定均線文字
-    s_name = "MA20"
-    l_name = "MA60" if market == '台股' else "MA50"
+    status += " | "
     
-    if pd.isna(ma_short) or pd.isna(ma_long): return "均線資料不足"
-    if price > ma_short and price > ma_long: return f"🟢 站穩 {s_name} 與 {l_name} (強勢排列)"
-    if price < ma_short and price < ma_long: return f"🔴 位於 {s_name} 與 {l_name} 之下 (偏空格局)"
-    if price > ma_long and price < ma_short: return f"🟡 守住 {l_name}，但上方受 {s_name} 壓制 (築底中)"
-    if price > ma_short and price < ma_long: return f"🔵 突破 {s_name}，但面臨 {l_name} 挑戰 (反彈中)"
-    return "均線交纏整理中"
+    # 判斷長線 (半年/年)
+    if pd.notna(ma_l1) and pd.notna(ma_l2):
+        if price > ma_l1 and price > ma_l2:
+            status += f"🟢 長線多頭"
+        elif price < ma_l1 and price < ma_l2:
+            status += f"🔴 長線空頭"
+        elif price > ma_l2 and price < ma_l1:
+            status += f"🟡 守年線，受半年線壓"
+        elif price > ma_l1 and price < ma_l2:
+            status += f"🔵 站半年線，臨年線壓"
+    else:
+        status += "長線均線資料不足"
+        
+    return status
 
 def calculate_indicators(df, market):
     # 1. 均線計算 (台股與美股不同)
@@ -169,7 +173,7 @@ def classify_target(sym):
 
 def process_target(sym, name):
     try:
-        df_raw = yf.download(sym, period="2y", progress=False)
+        df_raw = yf.download(sym, period="3y", progress=False) # 拉長為3年以確保能算240日均線
         if df_raw.empty: return None
         if isinstance(df_raw.columns, pd.MultiIndex): 
             df_raw.columns = df_raw.columns.get_level_values(0)
@@ -196,7 +200,7 @@ def process_target(sym, name):
         ma_l2 = df['MA_L2'].iloc[-1]
         
         # 判斷均線格局
-        ma_status = analyze_ma_relation(last_p, ma_s1, ma_s2, market)
+        ma_status = analyze_ma_relation(last_p, ma_s1, ma_s2, ma_l1, ma_l2, market)
         
         # 組合均線數值字串
         if market == '台股':
@@ -214,30 +218,27 @@ def process_target(sym, name):
         pk_w, pd_w = df_w['K_w'].iloc[-2], df_w['D_w'].iloc[-2]
         kd_text_w = "金叉轉強" if k_w > d_w and pk_w <= pd_w else "死亡交叉" if k_w < d_w and pk_w >= pd_w else "趨勢延續"
         
-        # 繪圖 (只畫短天期避免畫面過度混亂)
+        # 繪圖 
         fn = f"chart_{sym.replace('^','').replace('.','_')}.png"
-        pdf = df.tail(60)
+        pdf = df.tail(120) # 顯示更長天期以容納較長均線
         
         ap = []
-        if pd.notna(pdf['MA_S1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S1'], color='blue', width=1.2))
-        if pd.notna(pdf['MA_S2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S2'], color='orange', width=1.2))
-        if pd.notna(pdf['MA_L1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L1'], color='green', width=1.2))
-        if pd.notna(pdf['MA_L2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L2'], color='red', width=1.2))
+        if pd.notna(pdf['MA_S1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S1'], color='blue', width=1.0))
+        if pd.notna(pdf['MA_S2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S2'], color='orange', width=1.0))
+        if pd.notna(pdf['MA_L1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L1'], color='green', width=1.2, linestyle='--'))
+        if pd.notna(pdf['MA_L2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L2'], color='red', width=1.2, linestyle='--'))
         
         if ap:
             mpf.plot(pdf, type='candle', style='charles', addplot=ap, title=f"{name} ({sym})", savefig=fn)
         else:
             mpf.plot(pdf, type='candle', style='charles', title=f"{name} ({sym})", savefig=fn)
         
-        news = get_filtered_news(name)
-        
         msg = (f"📊 <b>{name} ({sym})</b>\n"
                f"目前價位: {last_p:.2f} | P/E: 歷史 {t_pe_str} / 預估 {f_pe_str}\n"
-               f"均線位置: {ma_status}\n"
                f"[{market}均線數值]\n{ma_val_str}\n"
+               f"均線位置: {ma_status}\n"
                f"日線 KD: {k_d:.1f}/{d_d:.1f} ({kd_text_d})\n"
-               f"週線 KD: {k_w:.1f}/{d_w:.1f} ({kd_text_w})\n\n"
-               f"📰 <b>核心財經頭條：</b>\n{news}")
+               f"週線 KD: {k_w:.1f}/{d_w:.1f} ({kd_text_w})")
         
         return {
             'name': name,
