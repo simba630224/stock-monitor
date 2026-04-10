@@ -46,8 +46,8 @@ PORTFOLIO_TW = [
     {'Ticker': '009800', 'Shares': 13000 + 1000},
     {'Ticker': '009811', 'Shares': 1161 + 1427 + 7000},
     {'Ticker': '009812', 'Shares': 772 + 13000},
-    {'Ticker': '009813', 'Shares': 6165 + 26000},
-    {'Ticker': '009815', 'Shares': 5000},
+    {'Ticker': '009813', 'Shares': 7165 + 26000},
+    {'Ticker': '009815', 'Shares': 6000},
     {'Ticker': '00981A', 'Shares': 3600},
     {'Ticker': '00988A', 'Shares': 1233 + 3000},
     {'Ticker': '1216', 'Shares': 650 + 1000},
@@ -69,7 +69,7 @@ PORTFOLIO_US = [
     {'Ticker': 'VNQ', 'Shares': 8.0 + 26.04 + 19.39},
     {'Ticker': 'VOO', 'Shares': 10.0 + 5.31},
     {'Ticker': 'VT', 'Shares': 232.49 + 56.19 + 76.78 + 82.63},
-    {'Ticker': 'VWRA.L', 'Shares': 90.0},
+    {'Ticker': 'VWRA.L', 'Shares': 106.0},
     {'Ticker': 'VXUS', 'Shares': 24.0},
 ]
 
