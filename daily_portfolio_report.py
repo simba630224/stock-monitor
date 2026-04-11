@@ -11,6 +11,9 @@ import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 from datetime import datetime
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # =======================================================
 # 每日定時投資組合報告 + 匯率分析走勢圖 (GitHub Actions + Telegram)
@@ -104,24 +107,40 @@ def get_data(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d")
-        price = 0 if hist.empty else hist['Close'].iloc[-1]
+        
+        # 【防呆機制】：過濾掉 nan 的數據，抓取最新的一筆有效收盤價
+        price = 0.0
+        if not hist.empty:
+            valid_closes = hist['Close'].dropna()
+            if not valid_closes.empty:
+                price = float(valid_closes.iloc[-1])
+        
         div_2026 = 0.0
         try:
             dividends = stock.dividends
             if not dividends.empty:
                 divs_2026 = dividends[dividends.index.year == 2026]
-                div_2026 = divs_2026.sum()
+                div_sum = divs_2026.sum()
+                if not pd.isna(div_sum): 
+                    div_2026 = float(div_sum)
         except: pass
+        
         return price, div_2026
     except Exception as e:
         print(f"Error fetching {ticker}: {e}")
-        return 0, 0
+        return 0.0, 0.0
 
 def get_usdtwd():
     try:
         hist = yf.Ticker("TWD=X").history(period="5d")
-        return hist['Close'].iloc[-1]
-    except: return 32.5
+        # 【防呆機制】：過濾匯率的空值
+        if not hist.empty:
+            valid_closes = hist['Close'].dropna()
+            if not valid_closes.empty:
+                return float(valid_closes.iloc[-1])
+        return 32.5
+    except: 
+        return 32.5
 
 # --- 3. Telegram 傳送函式 ---
 
@@ -148,19 +167,19 @@ def send_telegram_photo(caption, photo_buffer):
 def analyze_and_plot_fx(fx_ticker="TWD=X"):
     print("📈 開始繪製匯率走勢圖...")
     try:
-        # 抓取近一年資料
         data = yf.Ticker(fx_ticker).history(period="1y")
         if data.empty: return None, "無法取得匯率資料"
         
-        # 計算均線
+        # 避免畫圖時遇到 nan 導致錯誤
+        data = data.dropna(subset=['Close'])
+        
         data['MA20'] = data['Close'].rolling(window=20).mean()
         data['MA60'] = data['Close'].rolling(window=60).mean()
         
         curr_price = data['Close'].iloc[-1]
-        ma20_val = data['MA20'].iloc[-1]
-        ma60_val = data['MA60'].iloc[-1]
+        ma20_val = data['MA20'].iloc[-1] if not pd.isna(data['MA20'].iloc[-1]) else curr_price
+        ma60_val = data['MA60'].iloc[-1] if not pd.isna(data['MA60'].iloc[-1]) else curr_price
         
-        # 繪圖設定
         plt.figure(figsize=(10, 5))
         plt.plot(data.index, data['Close'], label='USD/TWD', color='black', linewidth=1.5)
         plt.plot(data.index, data['MA20'], label='MA20 (月線)', color='blue', linestyle='--')
@@ -171,12 +190,10 @@ def analyze_and_plot_fx(fx_ticker="TWD=X"):
         plt.legend(loc='upper left')
         plt.tight_layout()
         
-        # 存入記憶體緩衝區
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=100)
         plt.close()
         
-        # 產生分析文字
         status = []
         if curr_price > ma20_val: status.append("站上月線")
         else: status.append("跌破月線")
@@ -199,6 +216,7 @@ def analyze_and_plot_fx(fx_ticker="TWD=X"):
 def main():
     print("🚀 開始執行投資組合計算...")
     usdtwd = get_usdtwd()
+    print(f"💵 取得目前匯率: {usdtwd}")
     
     total_market_value = 0
     total_dividends_2026 = 0
@@ -215,9 +233,13 @@ def main():
         value = price * shares
         div_total = div * shares
         
-        total_market_value += value
-        total_dividends_2026 += div_total
-        asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
+        # 避免任何突發的 nan 污染加總
+        if pd.notna(value): 
+            total_market_value += value
+            asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
+        if pd.notna(div_total): 
+            total_dividends_2026 += div_total
+            
         time.sleep(0.3)
 
     # 處理美股
@@ -230,9 +252,12 @@ def main():
         value = price * shares * usdtwd
         div_total = div * shares * usdtwd
         
-        total_market_value += value
-        total_dividends_2026 += div_total
-        asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
+        if pd.notna(value):
+            total_market_value += value
+            asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
+        if pd.notna(div_total):
+            total_dividends_2026 += div_total
+            
         time.sleep(0.3)
 
     # 1. 傳送投資組合報告 (文字)
