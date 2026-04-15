@@ -106,7 +106,8 @@ def classify_asset(ticker, market):
 def get_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="5d")
+        # 【修正點】：將抓取區間從 5d 放寬到 1y，確保能讀取到今年完整的除息紀錄
+        hist = stock.history(period="1y")
         
         # 【防呆機制】：過濾掉 nan 的數據，抓取最新的一筆有效收盤價
         price = 0.0
@@ -115,16 +116,16 @@ def get_data(ticker):
             if not valid_closes.empty:
                 price = float(valid_closes.iloc[-1])
         
+        # 【修正點】：直接從 1y 的歷史紀錄表裡面抓取 Dividends 欄位，避開 yfinance 快取 Bug
         div_2026 = 0.0
-        try:
-            dividends = stock.dividends
-            if not dividends.empty:
-                divs_2026 = dividends[dividends.index.year == 2026]
-                div_sum = divs_2026.sum()
-                if not pd.isna(div_sum): 
-                    div_2026 = float(div_sum)
-        except: pass
-        
+        if not hist.empty and 'Dividends' in hist.columns:
+            divs = hist['Dividends']
+            # 篩選出 2026 年的配息紀錄
+            divs_2026 = divs[divs.index.year == 2026]
+            div_sum = divs_2026.sum()
+            if not pd.isna(div_sum): 
+                div_2026 = float(div_sum)
+                
         return price, div_2026
     except Exception as e:
         print(f"Error fetching {ticker}: {e}")
