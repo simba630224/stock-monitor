@@ -36,7 +36,7 @@ PORTFOLIO_TW = [
     {'Ticker': '00713', 'Shares': 2000 + 10000},
     {'Ticker': '00717', 'Shares': 2000},
     {'Ticker': '00719B', 'Shares': 6137},
-    {'Ticker': '00720B', 'Shares': 450077},
+    {'Ticker': '00720B', 'Shares': 4500},
     {'Ticker': '00725B', 'Shares': 600},
     {'Ticker': '00751B', 'Shares': 600 + 2000},
     {'Ticker': '00757', 'Shares': 300 + 3000},
