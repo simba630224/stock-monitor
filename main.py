@@ -18,9 +18,9 @@ warnings.filterwarnings('ignore')
 TG_TOKEN = os.getenv('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# --- 2. 觀察清單更新 ---
+# --- 2. 觀察清單更新 (依據您的最新需求) ---
 TW_CORE = [
-    # 台股權值股 (純電子/半導體/網通/光電)
+    # 台股權值股 (精簡至您指定的 5 檔)
     {'symbol': '2330.TW', 'name': '台積電'},
     {'symbol': '2317.TW', 'name': '鴻海'},
     {'symbol': '2454.TW', 'name': '聯發科'},
@@ -173,9 +173,17 @@ def process_target(sym, name):
         except: pass 
         
         last_p = df['Close'].iloc[-1]
+        prev_p = df['Close'].iloc[-2]
         ma_s1, ma_s2 = df['MA_S1'].iloc[-1], df['MA_S2'].iloc[-1]
+        prev_ma_s1, prev_ma_s2 = df['MA_S1'].iloc[-2], df['MA_S2'].iloc[-2]
         ma_l1, ma_l2 = df['MA_L1'].iloc[-1], df['MA_L2'].iloc[-1]
-        ma_status = analyze_ma_relation(last_p, ma_s1, ma_s2, ma_l1, ma_l2, market)
+        
+        # 判斷是否跌破
+        is_break_ma20 = (last_p < ma_s1 and prev_p >= prev_ma_s1)
+        is_break_ma60 = (last_p < ma_s2 and prev_p >= prev_ma_s2)
+        
+        ma_status_base = analyze_ma_relation(last_p, ma_s1, ma_s2, ma_l1, ma_l2, market)
+        ma_status = f"🔴 {ma_status_base}" if is_break_ma20 or is_break_ma60 else ma_status_base
         
         if market == '台股':
             ma_val_str = f"MA20: {fmt_val(ma_s1)} | MA60: {fmt_val(ma_s2)}\nMA120: {fmt_val(ma_l1)} | MA240: {fmt_val(ma_l2)}"
@@ -188,17 +196,14 @@ def process_target(sym, name):
         
         k_w, d_w = df_w['K_w'].iloc[-1], df_w['D_w'].iloc[-1]
         pk_w, pd_w = df_w['K_w'].iloc[-2], df_w['D_w'].iloc[-2]
-        # 週 KD 死亡交叉邏輯修訂：若符合則加上紅燈
         kd_text_w_base = "金叉轉強" if k_w > d_w and pk_w <= pd_w else "死亡交叉" if k_w < d_w and pk_w >= pd_w else "趨勢延續"
         kd_text_w = f"🔴 {kd_text_w_base}" if kd_text_w_base == "死亡交叉" else kd_text_w_base
         
         # --- 條件繪圖判斷 ---
-        prev_p = df['Close'].iloc[-2]
-        prev_ma_s1 = df['MA_S1'].iloc[-2]
         cond1 = (kd_text_w_base == "金叉轉強" and k_w < 30)   # 週KD低檔金叉
         cond2 = (kd_text_d == "金叉轉強" and k_d < 30)   # 日KD低檔金叉
         cond3 = (kd_text_w_base == "死亡交叉" and k_w > 70)   # 週KD高檔死叉
-        cond4 = (last_p < ma_s1 and prev_p >= prev_ma_s1) # 跌破MA20
+        cond4 = is_break_ma20 or is_break_ma60          # 跌破月線或季線
         
         needs_chart = cond1 or cond2 or cond3 or cond4
         fn = None
@@ -221,7 +226,7 @@ def process_target(sym, name):
         
         return {'name': name, 'category': market, 'detail_msg': msg, 'chart_fn': fn,
                 'k_d': k_d, 'kd_text_d': kd_text_d, 'k_w': k_w, 'kd_text_w_base': kd_text_w_base,
-                'trailing_pe': t_pe}
+                'is_break_ma': cond4, 'trailing_pe': t_pe}
     except Exception as e: 
         print(f"❌ 解析 {sym} ({name}) 時發生錯誤: {e}")
         return None
@@ -234,6 +239,7 @@ def main():
     
     summary_golden_d, summary_death_d = [], []
     summary_golden_w, summary_death_w = [], []
+    summary_ma_break = []
     summary_low_pe = []
     grouped_results = {'台股': [], '美股': []}
     all_targets = [(item['symbol'], item['name']) for item in TW_CORE] + list(US_WATCH.items())
@@ -248,9 +254,11 @@ def main():
             # 日摘要
             if res['kd_text_d'] == "金叉轉強" and res['k_d'] < 30: summary_golden_d.append(f"{res['name']} (P/E: {pe_str})")
             if res['kd_text_d'] == "死亡交叉" and res['k_d'] > 70: summary_death_d.append(f"{res['name']} (P/E: {pe_str})")
-            # 週摘要 (同步標示紅燈)
+            
+            # 週摘要與均線跌破 (標示紅燈)
             if res['kd_text_w_base'] == "金叉轉強" and res['k_w'] < 30: summary_golden_w.append(f"{res['name']} (P/E: {pe_str})")
             if res['kd_text_w_base'] == "死亡交叉" and res['k_w'] > 70: summary_death_w.append(f"🔴 {res['name']} (P/E: {pe_str})")
+            if res['is_break_ma']: summary_ma_break.append(f"🔴 {res['name']}")
             
             if isinstance(pe_val, (int, float)) and pe_val < 25: summary_low_pe.append(f"{res['name']} (P/E: {pe_val:.1f})")
         time.sleep(0.5)
@@ -263,6 +271,7 @@ def main():
     summary_msg += "\n\n⛈️ <b>高檔【日】KD死叉 (K>70)：</b>\n" + ("、\n".join(summary_death_d) if summary_death_d else "無")
     summary_msg += "\n\n📈 <b>低檔【週】KD金叉 (K<30)：</b>\n" + ("、\n".join(summary_golden_w) if summary_golden_w else "無")
     summary_msg += "\n\n📉 <b>高檔【週】KD死叉 (K>70)：</b>\n" + ("、\n".join(summary_death_w) if summary_death_w else "無")
+    summary_msg += "\n\n⚠️ <b>今日跌破月/季線：</b>\n" + ("、\n".join(summary_ma_break) if summary_ma_break else "無")
     summary_msg += "\n\n💡 <b>歷史本益比 < 25 倍：</b>\n" + ("、\n".join(summary_low_pe) if summary_low_pe else "無")
     send_tg_text(summary_msg)
 
