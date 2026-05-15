@@ -20,7 +20,7 @@ TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # --- 2. 觀察清單更新 ---
 TW_CORE = [
-    # 台股權值股 Top 10 (純電子/半導體/網通/光電)
+    # 台股權值股 (純電子/半導體/網通/光電)
     {'symbol': '2330.TW', 'name': '台積電'},
     {'symbol': '2317.TW', 'name': '鴻海'},
     {'symbol': '2454.TW', 'name': '聯發科'},
@@ -177,7 +177,6 @@ def process_target(sym, name):
         ma_l1, ma_l2 = df['MA_L1'].iloc[-1], df['MA_L2'].iloc[-1]
         ma_status = analyze_ma_relation(last_p, ma_s1, ma_s2, ma_l1, ma_l2, market)
         
-        # 這裡就是修正好的均線字串排版，確保引號都有成對包好
         if market == '台股':
             ma_val_str = f"MA20: {fmt_val(ma_s1)} | MA60: {fmt_val(ma_s2)}\nMA120: {fmt_val(ma_l1)} | MA240: {fmt_val(ma_l2)}"
         else:
@@ -186,16 +185,19 @@ def process_target(sym, name):
         k_d, d_d = df['K_d'].iloc[-1], df['D_d'].iloc[-1]
         pk_d, pd_d = df['K_d'].iloc[-2], df['D_d'].iloc[-2]
         kd_text_d = "金叉轉強" if k_d > d_d and pk_d <= pd_d else "死亡交叉" if k_d < d_d and pk_d >= pd_d else "趨勢延續"
+        
         k_w, d_w = df_w['K_w'].iloc[-1], df_w['D_w'].iloc[-1]
         pk_w, pd_w = df_w['K_w'].iloc[-2], df_w['D_w'].iloc[-2]
-        kd_text_w = "金叉轉強" if k_w > d_w and pk_w <= pd_w else "死亡交叉" if k_w < d_w and pk_w >= pd_w else "趨勢延續"
+        # 週 KD 死亡交叉邏輯修訂：若符合則加上紅燈
+        kd_text_w_base = "金叉轉強" if k_w > d_w and pk_w <= pd_w else "死亡交叉" if k_w < d_w and pk_w >= pd_w else "趨勢延續"
+        kd_text_w = f"🔴 {kd_text_w_base}" if kd_text_w_base == "死亡交叉" else kd_text_w_base
         
         # --- 條件繪圖判斷 ---
         prev_p = df['Close'].iloc[-2]
         prev_ma_s1 = df['MA_S1'].iloc[-2]
-        cond1 = (kd_text_w == "金叉轉強" and k_w < 30)   # 週KD低檔金叉
+        cond1 = (kd_text_w_base == "金叉轉強" and k_w < 30)   # 週KD低檔金叉
         cond2 = (kd_text_d == "金叉轉強" and k_d < 30)   # 日KD低檔金叉
-        cond3 = (kd_text_w == "死亡交叉" and k_w > 70)   # 週KD高檔死叉
+        cond3 = (kd_text_w_base == "死亡交叉" and k_w > 70)   # 週KD高檔死叉
         cond4 = (last_p < ma_s1 and prev_p >= prev_ma_s1) # 跌破MA20
         
         needs_chart = cond1 or cond2 or cond3 or cond4
@@ -218,7 +220,7 @@ def process_target(sym, name):
                f"週 KD: {k_w:.1f}/{d_w:.1f} ({kd_text_w})")
         
         return {'name': name, 'category': market, 'detail_msg': msg, 'chart_fn': fn,
-                'k_d': k_d, 'kd_text_d': kd_text_d, 'k_w': k_w, 'kd_text_w': kd_text_w,
+                'k_d': k_d, 'kd_text_d': kd_text_d, 'k_w': k_w, 'kd_text_w_base': kd_text_w_base,
                 'trailing_pe': t_pe}
     except Exception as e: 
         print(f"❌ 解析 {sym} ({name}) 時發生錯誤: {e}")
@@ -242,10 +244,14 @@ def main():
             grouped_results[res['category']].append(res)
             pe_val = res['trailing_pe']
             pe_str = f"{pe_val:.1f}" if isinstance(pe_val, (int, float)) else "無"
+            
+            # 日摘要
             if res['kd_text_d'] == "金叉轉強" and res['k_d'] < 30: summary_golden_d.append(f"{res['name']} (P/E: {pe_str})")
             if res['kd_text_d'] == "死亡交叉" and res['k_d'] > 70: summary_death_d.append(f"{res['name']} (P/E: {pe_str})")
-            if res['kd_text_w'] == "金叉轉強" and res['k_w'] < 30: summary_golden_w.append(f"{res['name']} (P/E: {pe_str})")
-            if res['kd_text_w'] == "死亡交叉" and res['k_w'] > 70: summary_death_w.append(f"{res['name']} (P/E: {pe_str})")
+            # 週摘要 (同步標示紅燈)
+            if res['kd_text_w_base'] == "金叉轉強" and res['k_w'] < 30: summary_golden_w.append(f"{res['name']} (P/E: {pe_str})")
+            if res['kd_text_w_base'] == "死亡交叉" and res['k_w'] > 70: summary_death_w.append(f"🔴 {res['name']} (P/E: {pe_str})")
+            
             if isinstance(pe_val, (int, float)) and pe_val < 25: summary_low_pe.append(f"{res['name']} (P/E: {pe_val:.1f})")
         time.sleep(0.5)
 
