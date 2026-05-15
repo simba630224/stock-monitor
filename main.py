@@ -24,13 +24,8 @@ TW_CORE = [
     {'symbol': '2330.TW', 'name': '台積電'},
     {'symbol': '2317.TW', 'name': '鴻海'},
     {'symbol': '2454.TW', 'name': '聯發科'},
-    {'symbol': '2382.TW', 'name': '廣達'},
     {'symbol': '2308.TW', 'name': '台達電'},
-    {'symbol': '3711.TW', 'name': '日月光投控'},
-    {'symbol': '2303.TW', 'name': '聯電'},
-    {'symbol': '6669.TW', 'name': '緯穎'},
     {'symbol': '3008.TW', 'name': '大立光'},
-    {'symbol': '3231.TW', 'name': '緯創'},
     
     # 台股 ETF 
     {'symbol': '0050.TW', 'name': '元大台灣50'},
@@ -41,9 +36,9 @@ TW_CORE = [
     {'symbol': '00922.TW', 'name': '國泰台灣領袖50'},
     {'symbol': '00923.TW', 'name': '群益台灣ESG低碳'},
     {'symbol': '00830.TW', 'name': '國泰費城半導體'},
-    {'symbol': '00981A.TW', 'name': '野村日本龍頭企業'},
-    {'symbol': '00988A.TW', 'name': '復華日本龍頭'},
-    {'symbol': '009815.TW', 'name': '野村日經225'}
+    {'symbol': '00981A.TW', 'name': '主動統一台股增長'},
+    {'symbol': '00988A.TW', 'name': '主動統一全球創新'},
+    {'symbol': '009815.TW', 'name': '大華美國MAG7+'}
 ]
 
 US_WATCH = {
