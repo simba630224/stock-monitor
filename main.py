@@ -182,5 +182,88 @@ def process_target(sym, name):
         ma_l1, ma_l2 = df['MA_L1'].iloc[-1], df['MA_L2'].iloc[-1]
         ma_status = analyze_ma_relation(last_p, ma_s1, ma_s2, ma_l1, ma_l2, market)
         
+        # 這裡就是修正好的均線字串排版，確保引號都有成對包好
         if market == '台股':
-            ma_val_str = f"MA20: {fmt_val(ma_s1)} | MA60: {fmt_val(ma_s2)}\nMA120: {fmt_val(ma_l1)} |
+            ma_val_str = f"MA20: {fmt_val(ma_s1)} | MA60: {fmt_val(ma_s2)}\nMA120: {fmt_val(ma_l1)} | MA240: {fmt_val(ma_l2)}"
+        else:
+            ma_val_str = f"MA20: {fmt_val(ma_s1)} | MA50: {fmt_val(ma_s2)}\nMA100: {fmt_val(ma_l1)} | MA200: {fmt_val(ma_l2)}"
+        
+        k_d, d_d = df['K_d'].iloc[-1], df['D_d'].iloc[-1]
+        pk_d, pd_d = df['K_d'].iloc[-2], df['D_d'].iloc[-2]
+        kd_text_d = "金叉轉強" if k_d > d_d and pk_d <= pd_d else "死亡交叉" if k_d < d_d and pk_d >= pd_d else "趨勢延續"
+        k_w, d_w = df_w['K_w'].iloc[-1], df_w['D_w'].iloc[-1]
+        pk_w, pd_w = df_w['K_w'].iloc[-2], df_w['D_w'].iloc[-2]
+        kd_text_w = "金叉轉強" if k_w > d_w and pk_w <= pd_w else "死亡交叉" if k_w < d_w and pk_w >= pd_w else "趨勢延續"
+        
+        # --- 條件繪圖判斷 ---
+        prev_p = df['Close'].iloc[-2]
+        prev_ma_s1 = df['MA_S1'].iloc[-2]
+        cond1 = (kd_text_w == "金叉轉強" and k_w < 30)   # 週KD低檔金叉
+        cond2 = (kd_text_d == "金叉轉強" and k_d < 30)   # 日KD低檔金叉
+        cond3 = (kd_text_w == "死亡交叉" and k_w > 70)   # 週KD高檔死叉
+        cond4 = (last_p < ma_s1 and prev_p >= prev_ma_s1) # 跌破MA20
+        
+        needs_chart = cond1 or cond2 or cond3 or cond4
+        fn = None
+        if needs_chart:
+            fn = f"chart_{sym.replace('^','').replace('.','_')}.png"
+            pdf = df.tail(120)
+            ap = []
+            if pd.notna(pdf['MA_S1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S1'], color='blue', width=1.0))
+            if pd.notna(pdf['MA_S2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S2'], color='orange', width=1.0))
+            if pd.notna(pdf['MA_L1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L1'], color='green', width=1.2, linestyle='--'))
+            if pd.notna(pdf['MA_L2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L2'], color='red', width=1.2, linestyle='--'))
+            mpf.plot(pdf, type='candle', style='charles', addplot=ap, title=f"{name} ({sym})", savefig=fn)
+        
+        msg = (f"📊 <b>{name} ({sym})</b>\n"
+               f"目前價位: {last_p:.2f} | P/E: 歷史 {t_pe_str} / 預估 {f_pe_str}\n"
+               f"[{market}均線]\n{ma_val_str}\n"
+               f"位置: {ma_status}\n"
+               f"日 KD: {k_d:.1f}/{d_d:.1f} ({kd_text_d})\n"
+               f"週 KD: {k_w:.1f}/{d_w:.1f} ({kd_text_w})")
+        
+        return {'name': name, 'category': market, 'detail_msg': msg, 'chart_fn': fn,
+                'k_d': k_d, 'kd_text_d': kd_text_d, 'k_w': k_w, 'kd_text_w': kd_text_w,
+                'trailing_pe': t_pe}
+    except Exception as e: 
+        print(f"❌ 解析 {sym} ({name}) 時發生錯誤: {e}")
+        return None
+
+def main():
+    if not TG_TOKEN or not TG_CHAT_ID:
+        raise ValueError("❌ 找不到 TELEGRAM 設定")
+    now_str = datetime.now().strftime('%Y/%m/%d')
+    print(f"啟動財經掃描... ({now_str})")
+    
+    summary_golden_d, summary_death_d = [], []
+    summary_golden_w, summary_death_w = [], []
+    summary_low_pe = []
+    grouped_results = {'台股': [], '美股': []}
+    all_targets = [(item['symbol'], item['name']) for item in TW_CORE] + list(US_WATCH.items())
+
+    for sym, name in all_targets:
+        res = process_target(sym, name)
+        if res:
+            grouped_results[res['category']].append(res)
+            pe_val = res['trailing_pe']
+            pe_str = f"{pe_val:.1f}" if isinstance(pe_val, (int, float)) else "無"
+            if res['kd_text_d'] == "金叉轉強" and res['k_d'] < 30: summary_golden_d.append(f"{res['name']} (P/E: {pe_str})")
+            if res['kd_text_d'] == "死亡交叉" and res['k_d'] > 70: summary_death_d.append(f"{res['name']} (P/E: {pe_str})")
+            if res['kd_text_w'] == "金叉轉強" and res['k_w'] < 30: summary_golden_w.append(f"{res['name']} (P/E: {pe_str})")
+            if res['kd_text_w'] == "死亡交叉" and res['k_w'] > 70: summary_death_w.append(f"{res['name']} (P/E: {pe_str})")
+            if isinstance(pe_val, (int, float)) and pe_val < 25: summary_low_pe.append(f"{res['name']} (P/E: {pe_val:.1f})")
+        time.sleep(0.5)
+
+    send_grouped_messages_and_charts("台股", grouped_results['台股'])
+    send_grouped_messages_and_charts("美股", grouped_results['美股'])
+
+    summary_msg = f"🏁 <b>全球財經深度掃描 ({now_str}) - 盤後亮點摘要：</b>\n\n"
+    summary_msg += "☀️ <b>低檔【日】KD金叉 (K<30)：</b>\n" + ("、\n".join(summary_golden_d) if summary_golden_d else "無")
+    summary_msg += "\n\n⛈️ <b>高檔【日】KD死叉 (K>70)：</b>\n" + ("、\n".join(summary_death_d) if summary_death_d else "無")
+    summary_msg += "\n\n📈 <b>低檔【週】KD金叉 (K<30)：</b>\n" + ("、\n".join(summary_golden_w) if summary_golden_w else "無")
+    summary_msg += "\n\n📉 <b>高檔【週】KD死叉 (K>70)：</b>\n" + ("、\n".join(summary_death_w) if summary_death_w else "無")
+    summary_msg += "\n\n💡 <b>歷史本益比 < 25 倍：</b>\n" + ("、\n".join(summary_low_pe) if summary_low_pe else "無")
+    send_tg_text(summary_msg)
+
+if __name__ == "__main__":
+    main()
