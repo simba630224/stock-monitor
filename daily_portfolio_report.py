@@ -86,9 +86,9 @@ def classify_asset(ticker, market):
     if market == 'TW':
         if ticker.endswith('B'): return '債券ETF'
         if ticker.startswith('00'):
-            overseas = ['00646', '00757', '00662', '00830', '009811', '00712', '00717', '009800', '009813', '00981A']
+            overseas = ['00646', '00757', '00662', '00830', '009811', '00712', '00717', '009800', '009813','009815', '00988A']
             if ticker in overseas: return '美股ETF與個股'
-            market_cap = ['0050', '006208', '00692', '00922', '00923', '00850', '00981A']
+            market_cap = ['0050', '006208', '00692', '00922', '00923']
             if ticker in market_cap: return '台股市值型ETF'
             high_div = ['0056', '00878', '00919', '00713']
             if ticker in high_div: return '台股高股息型ETF'
