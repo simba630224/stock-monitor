@@ -3,3 +3,7 @@ pandas
 pandas-ta
 mplfinance
 requests
+streamlit
+matplotlib
+numpy
+multitasking==0.0.9
