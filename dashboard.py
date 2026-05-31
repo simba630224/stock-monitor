@@ -1,72 +1,73 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
 import re
 from datetime import datetime
 import warnings
 
 warnings.filterwarnings('ignore')
 
-# 設定網頁標題與排版
-st.set_page_config(page_title="個人投資組合儀表板", layout="wide")
+# 設定網頁標題與排版 (寬螢幕模式)
+st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
-# --- 1. 投資組合資料 ---
+# ==========================================
+# 1. 資料庫與清單設定
+# ==========================================
 PORTFOLIO_TW = [
-    {'Ticker': '0050', 'Shares': 4332},
-    {'Ticker': '0056', 'Shares': 8000},
-    {'Ticker': '006208', 'Shares': 6000},
-    {'Ticker': '00646', 'Shares': 149 + 11000},
-    {'Ticker': '00662', 'Shares': 600 + 2000},
-    {'Ticker': '00679B', 'Shares': 10000},
-    {'Ticker': '00687B', 'Shares': 3438},
-    {'Ticker': '00692', 'Shares': 2000 + 15000},
-    {'Ticker': '00697B', 'Shares': 2262},
-    {'Ticker': '00712', 'Shares': 2918 + 7000},
-    {'Ticker': '00713', 'Shares': 1853 + 13000},
-    {'Ticker': '00719B', 'Shares': 7042},
-    {'Ticker': '00757', 'Shares': 324 + 3000},
-    {'Ticker': '00772B', 'Shares': 100 + 18000},
-    {'Ticker': '00830', 'Shares': 695 + 7000},
-    {'Ticker': '00878', 'Shares': 4108 + 46000},
-    {'Ticker': '00919', 'Shares': 4116+29000},
-    {'Ticker': '00922', 'Shares': 22000+0},
-    {'Ticker': '00923', 'Shares': 23000+5000},
-    {'Ticker': '00937B', 'Shares': 3665 + 19000},
-    {'Ticker': '009800', 'Shares': 14000 + 1000},
-    {'Ticker': '009812', 'Shares': 6273 + 18000},
-    {'Ticker': '009813', 'Shares': 2710 + 39000},
-    {'Ticker': '009815', 'Shares': 0+15000},
-    {'Ticker': '009816', 'Shares': 1000},
-    {'Ticker': '00981A', 'Shares': 7000+2000},
-    {'Ticker': '00988A', 'Shares': 2417 + 9000},
-    {'Ticker': '1216', 'Shares': 2000},
-    {'Ticker': '2317', 'Shares': 154},
-    {'Ticker': '2330', 'Shares': 38},
-    {'Ticker': '2412', 'Shares': 9000},
-    {'Ticker': '2454', 'Shares': 1},
+    {'Ticker': '0050', 'Shares': 4332}, {'Ticker': '0056', 'Shares': 8000},
+    {'Ticker': '006208', 'Shares': 6000}, {'Ticker': '00646', 'Shares': 149 + 11000},
+    {'Ticker': '00662', 'Shares': 600 + 2000}, {'Ticker': '00679B', 'Shares': 10000},
+    {'Ticker': '00687B', 'Shares': 3438}, {'Ticker': '00692', 'Shares': 2000 + 15000},
+    {'Ticker': '00697B', 'Shares': 2262}, {'Ticker': '00712', 'Shares': 2918 + 7000},
+    {'Ticker': '00713', 'Shares': 1853 + 13000}, {'Ticker': '00719B', 'Shares': 7042},
+    {'Ticker': '00757', 'Shares': 324 + 3000}, {'Ticker': '00772B', 'Shares': 100 + 18000},
+    {'Ticker': '00830', 'Shares': 695 + 7000}, {'Ticker': '00878', 'Shares': 4108 + 46000},
+    {'Ticker': '00919', 'Shares': 4116+29000}, {'Ticker': '00922', 'Shares': 22000+0},
+    {'Ticker': '00923', 'Shares': 23000+5000}, {'Ticker': '00937B', 'Shares': 3665 + 19000},
+    {'Ticker': '009800', 'Shares': 14000 + 1000}, {'Ticker': '009812', 'Shares': 6273 + 18000},
+    {'Ticker': '009813', 'Shares': 2710 + 39000}, {'Ticker': '009815', 'Shares': 0+15000},
+    {'Ticker': '009816', 'Shares': 1000}, {'Ticker': '00981A', 'Shares': 7000+2000},
+    {'Ticker': '00988A', 'Shares': 2417 + 9000}, {'Ticker': '1216', 'Shares': 2000},
+    {'Ticker': '2317', 'Shares': 154}, {'Ticker': '2330', 'Shares': 38},
+    {'Ticker': '2412', 'Shares': 9000}, {'Ticker': '2454', 'Shares': 1},
 ]
 
 PORTFOLIO_US = [
-    {'Ticker': 'AOR', 'Shares': 0.19},
-    {'Ticker': 'BNDW', 'Shares': 37.6},
-    {'Ticker': 'META', 'Shares': 2.0},
-    {'Ticker': 'NVDA', 'Shares': 1.0},
-    {'Ticker': 'QQQ', 'Shares': 17.8 + 2.6},
-    {'Ticker': 'VNQ', 'Shares': 8.0 + 27.62 + 19.39},
-    {'Ticker': 'VOO', 'Shares': 10.0 + 5.31},
-    {'Ticker': 'VT', 'Shares': 202.49 + 86.19 + 76.78 + 105.63},
-    {'Ticker': 'VWRA.L', 'Shares': 194.0},
-    {'Ticker': 'CSPX.L', 'Shares': 9.0},
+    {'Ticker': 'AOR', 'Shares': 0.19}, {'Ticker': 'BNDW', 'Shares': 37.6},
+    {'Ticker': 'META', 'Shares': 2.0}, {'Ticker': 'NVDA', 'Shares': 1.0},
+    {'Ticker': 'QQQ', 'Shares': 17.8 + 2.6}, {'Ticker': 'VNQ', 'Shares': 8.0 + 27.62 + 19.39},
+    {'Ticker': 'VOO', 'Shares': 10.0 + 5.31}, {'Ticker': 'VT', 'Shares': 202.49 + 86.19 + 76.78 + 105.63},
+    {'Ticker': 'VWRA.L', 'Shares': 194.0}, {'Ticker': 'CSPX.L', 'Shares': 9.0},
     {'Ticker': 'VXUS', 'Shares': 24.0},
 ]
 
-# --- 2. 輔助函式 (加入暫存機制 ttl=3600秒，避免頻繁請求 yfinance) ---
+# 技術分析觀察清單
+TW_CORE = [
+    {'symbol': '2330.TW', 'name': '台積電'}, {'symbol': '2317.TW', 'name': '鴻海'},
+    {'symbol': '2454.TW', 'name': '聯發科'}, {'symbol': '2308.TW', 'name': '台達電'},
+    {'symbol': '3008.TW', 'name': '大立光'}, {'symbol': '0050.TW', 'name': '元大台灣50'},
+    {'symbol': '00878.TW', 'name': '國泰永續高股息'}, {'symbol': '00713.TW', 'name': '元大台灣高息低波'},
+    {'symbol': '00919.TW', 'name': '群益台灣精選高息'}, {'symbol': '009812.TW', 'name': '野村日本東證ETF'},
+    {'symbol': '00922.TW', 'name': '國泰台灣領袖50'}, {'symbol': '00923.TW', 'name': '群益台灣ESG低碳'},
+    {'symbol': '00830.TW', 'name': '國泰費城半導體'}, {'symbol': '00981A.TW', 'name': '主動統一台股增長'},
+    {'symbol': '00988A.TW', 'name': '主動統一全球創新'}, {'symbol': '009815.TW', 'name': '大華美國MAG7+'}
+]
+
+US_WATCH = [
+    {'symbol': 'NVDA', 'name': '輝達 Nvidia'}, {'symbol': 'MSFT', 'name': '微軟 Microsoft'},
+    {'symbol': 'GOOGL', 'name': '谷歌 Google'}, {'symbol': 'VOO', 'name': '標普500 VOO'},
+    {'symbol': 'QQQ', 'name': '納斯達克 QQQ'}
+]
+
+# ==========================================
+# 2. 核心抓取與計算邏輯 (加入快取避免重複讀取)
+# ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
-    if re.match(r'^\d+B$', ticker):
-        return f"{ticker}.TWO"
-    return f"{ticker}.TW"
+    return f"{ticker}.TWO" if re.match(r'^\d+B$', ticker) else f"{ticker}.TW"
 
 def classify_asset(ticker, market):
     ticker = str(ticker).strip().upper()
@@ -74,12 +75,9 @@ def classify_asset(ticker, market):
     if market == 'TW':
         if ticker.endswith('B'): return '債券ETF'
         if ticker.startswith('00'):
-            overseas = ['00646', '00757', '00662', '00830', '009811', '00712', '00717', '009800', '009813','009815', '00988A']
-            if ticker in overseas: return '美股ETF與個股'
-            market_cap = ['0050', '006208', '00692', '00922', '00923']
-            if ticker in market_cap: return '台股市值型ETF'
-            high_div = ['0056', '00878', '00919', '00713']
-            if ticker in high_div: return '台股高股息型ETF'
+            if ticker in ['00646', '00757', '00662', '00830', '009811', '00712', '00717', '009800', '009813','009815', '00988A']: return '美股ETF與個股'
+            if ticker in ['0050', '006208', '00692', '00922', '00923']: return '台股市值型ETF'
+            if ticker in ['0056', '00878', '00919', '00713']: return '台股高股息型ETF'
             return '台股其他ETF'
         return '台股個股'
     elif market == 'US':
@@ -88,130 +86,179 @@ def classify_asset(ticker, market):
     return '其他'
 
 @st.cache_data(ttl=3600)
-def get_data(ticker):
+def get_basic_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
-        price = 0.0
-        if not hist.empty:
-            valid_closes = hist['Close'].dropna()
-            if not valid_closes.empty:
-                price = float(valid_closes.iloc[-1])
-        
-        div_2026 = 0.0
-        if not hist.empty and 'Dividends' in hist.columns:
-            divs = hist['Dividends']
-            divs_2026 = divs[divs.index.year == 2026]
-            div_sum = divs_2026.sum()
-            if not pd.isna(div_sum): 
-                div_2026 = float(div_sum)
-                
+        hist = yf.Ticker(ticker).history(period="1y")
+        price = float(hist['Close'].dropna().iloc[-1]) if not hist.empty else 0.0
+        div_2026 = float(hist['Dividends'][hist.index.year == 2026].sum()) if not hist.empty and 'Dividends' in hist.columns else 0.0
         return price, div_2026
-    except Exception:
+    except:
         return 0.0, 0.0
 
 @st.cache_data(ttl=3600)
 def get_usdtwd():
     try:
         hist = yf.Ticker("TWD=X").history(period="5d")
-        if not hist.empty:
-            valid_closes = hist['Close'].dropna()
-            if not valid_closes.empty:
-                return float(valid_closes.iloc[-1])
-        return 32.5
-    except: 
-        return 32.5
+        return float(hist['Close'].dropna().iloc[-1]) if not hist.empty else 32.5
+    except: return 32.5
 
 @st.cache_data(ttl=3600)
-def get_fx_data(fx_ticker="TWD=X"):
-    data = yf.Ticker(fx_ticker).history(period="1y")
-    data = data.dropna(subset=['Close'])
+def get_fx_data():
+    data = yf.Ticker("TWD=X").history(period="1y").dropna(subset=['Close'])
     data['MA20'] = data['Close'].rolling(window=20).mean()
     data['MA60'] = data['Close'].rolling(window=60).mean()
     return data
 
-# --- 3. 網頁渲染邏輯 ---
-st.title("📈 個人投資組合儀表板")
-st.text(f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-with st.spinner("正在同步即時報價資料..."):
-    usdtwd = get_usdtwd()
-    total_market_value = 0
-    total_dividends_2026 = 0
-    asset_allocation = {}
-
-    # 處理台股與美股
-    for item in PORTFOLIO_TW:
-        yf_ticker = get_yf_ticker_tw(item['Ticker'])
-        asset_type = classify_asset(item['Ticker'], 'TW')
-        price, div = get_data(yf_ticker)
-        value = price * item['Shares']
-        div_total = div * item['Shares']
+@st.cache_data(ttl=3600)
+def process_technical_analysis(sym, name):
+    try:
+        df = yf.download(sym, period="3y", progress=False)
+        if df.empty or len(df) < 60: return None
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
+        market = '台股' if sym.endswith('.TW') or sym.endswith('.TWO') else '美股'
         
-        if pd.notna(value): 
-            total_market_value += value
-            asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
-        if pd.notna(div_total): 
-            total_dividends_2026 += div_total
-
-    for item in PORTFOLIO_US:
-        asset_type = classify_asset(item['Ticker'], 'US')
-        price, div = get_data(item['Ticker'])
-        value = price * item['Shares'] * usdtwd
-        div_total = div * item['Shares'] * usdtwd
+        # 均線計算
+        df['MA_S1'] = df['Close'].rolling(20).mean()
+        df['MA_S2'] = df['Close'].rolling(60 if market == '台股' else 50).mean()
         
-        if pd.notna(value):
-            total_market_value += value
-            asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + value
-        if pd.notna(div_total):
-            total_dividends_2026 += div_total
+        # KD 計算 (原生 Pandas 寫法，免套件)
+        df['K_d'] = ((df['Close'] - df['Low'].rolling(9).min()) / (df['High'].rolling(9).max() - df['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
+        df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
+        
+        df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+        df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
+        df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
+        if len(df_w) < 2: return None
 
-# --- 頂端指標 ---
-col1, col2, col3 = st.columns(3)
-col1.metric("💰 總市值 (TWD)", f"{total_market_value:,.0f}")
-col2.metric("💵 2026 累計股息 (TWD)", f"{total_dividends_2026:,.0f}")
-col3.metric("💱 目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
+        last_p = float(df['Close'].iloc[-1])
+        ma_s1, ma_s2 = float(df['MA_S1'].iloc[-1]), float(df['MA_S2'].iloc[-1])
+        k_d, d_d = float(df['K_d'].iloc[-1]), float(df['D_d'].iloc[-1])
+        pk_d, pd_d = float(df['K_d'].iloc[-2]), float(df['D_d'].iloc[-2])
+        k_w, d_w = float(df_w['K_w'].iloc[-1]), float(df_w['D_w'].iloc[-1])
+        pk_w, pd_w = float(df_w['K_w'].iloc[-2]), float(df_w['D_w'].iloc[-2])
 
-st.divider()
+        # 狀態判定
+        kd_d_status = "🟢 金叉轉強" if (k_d > d_d and pk_d <= pd_d) else ("🔴 死亡交叉" if (k_d < d_d and pk_d >= pd_d) else "趨勢延續")
+        kd_w_status = "🟢 金叉轉強" if (k_w > d_w and pk_w <= pd_w) else ("🔴 死亡交叉" if (k_w < d_w and pk_w >= pd_w) else "趨勢延續")
+        
+        if last_p > ma_s1 and last_p > ma_s2: ma_status = "🟢 站穩月季線 (強勢)"
+        elif last_p < ma_s1 and last_p < ma_s2: ma_status = "🔴 月季線之下 (偏空)"
+        elif last_p > ma_s2 and last_p < ma_s1: ma_status = "🟡 守季線/受月線壓"
+        else: ma_status = "🔵 站月線/臨季線壓"
+        
+        # P/E 取得
+        pe_str = "無"
+        try:
+            pe_val = yf.Ticker(sym).info.get('trailingPE')
+            if pd.notna(pe_val): pe_str = f"{pe_val:.1f}"
+        except: pass
 
-# --- 資產配置與圖表 ---
-st.subheader("📊 資產配置")
-col_chart, col_table = st.columns([2, 1])
+        return {
+            "市場": market, "標的": f"{name} ({sym})", "收盤價": f"{last_p:.2f}",
+            "均線狀態": ma_status, 
+            "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
+            "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})",
+            "P/E": pe_str
+        }
+    except Exception as e:
+        return None
 
-# 準備配置資料表
-df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
-df_allocation = df_allocation.sort_values(by='市值 (TWD)', ascending=False)
-df_allocation['佔比 (%)'] = (df_allocation['市值 (TWD)'] / total_market_value * 100).round(1)
+# ==========================================
+# 3. 網頁 UI 渲染
+# ==========================================
+st.title("📊 個人投資組合與技術分析儀表板")
+st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-with col_chart:
-    fig_pie, ax_pie = plt.subplots(figsize=(8, 5))
-    ax_pie.pie(df_allocation['市值 (TWD)'], labels=df_allocation['資產類別'], autopct='%1.1f%%', startangle=140)
-    ax_pie.axis('equal')
-    st.pyplot(fig_pie)
+# 建立雙分頁
+tab1, tab2 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描"])
 
-with col_table:
-    st.dataframe(df_allocation, hide_index=True, use_container_width=True)
+# ----------------- 分頁 1：投資組合總覽 -----------------
+with tab1:
+    with st.spinner("正在同步即時報價資料..."):
+        usdtwd = get_usdtwd()
+        total_market_value, total_dividends_2026 = 0, 0
+        asset_allocation = {}
 
-st.divider()
+        for item in PORTFOLIO_TW:
+            ticker = get_yf_ticker_tw(item['Ticker'])
+            asset_type = classify_asset(item['Ticker'], 'TW')
+            price, div = get_basic_data(ticker)
+            if price > 0:
+                val = price * item['Shares']
+                total_market_value += val
+                asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                total_dividends_2026 += div * item['Shares']
 
-# --- 匯率走勢圖 ---
-st.subheader("💱 USD/TWD 匯率走勢 (1年)")
-fx_data = get_fx_data()
-if not fx_data.empty:
-    fig_fx, ax_fx = plt.subplots(figsize=(12, 5))
-    ax_fx.plot(fx_data.index, fx_data['Close'], label='USD/TWD', color='black', linewidth=1.5)
-    ax_fx.plot(fx_data.index, fx_data['MA20'], label='MA20 (月線)', color='blue', linestyle='--')
-    ax_fx.plot(fx_data.index, fx_data['MA60'], label='MA60 (季線)', color='red', linestyle='-.')
+        for item in PORTFOLIO_US:
+            asset_type = classify_asset(item['Ticker'], 'US')
+            price, div = get_basic_data(item['Ticker'])
+            if price > 0:
+                val = price * item['Shares'] * usdtwd
+                total_market_value += val
+                asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                total_dividends_2026 += div * item['Shares'] * usdtwd
+
+    # 頂端指標
+    col1, col2, col3 = st.columns(3)
+    col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
+    col2.metric("2026 累計股息預估 (TWD)", f"${total_dividends_2026:,.0f}")
+    col3.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
+
+    st.divider()
     
-    ax_fx.grid(True, linestyle=':', alpha=0.6)
-    ax_fx.legend(loc='upper left')
-    st.pyplot(fig_fx)
+    # 互動式 Plotly 圓餅圖與匯率圖
+    col_chart, col_fx = st.columns([1, 1])
     
-    # 匯率狀態判定
-    curr_price = fx_data['Close'].iloc[-1]
-    ma20_val = fx_data['MA20'].iloc[-1]
-    ma60_val = fx_data['MA60'].iloc[-1]
-    status = []
-    status.append("站上月線" if curr_price > ma20_val else "跌破月線")
-    status.append("站上季線" if curr_price > ma60_val else "跌破季線")
-    st.info(f"現價: **{curr_price:.3f}** | MA20: {ma20_val:.3f} | MA60: {ma60_val:.3f} | 狀態: {' / '.join(status)}")
+    with col_chart:
+        st.subheader("資產配置佔比")
+        df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
+        # 使用 Plotly 繪製圓餅圖 (完美支援中文與滑鼠互動)
+        fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4)
+        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+        fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
+        st.plotly_chart(fig_pie, use_container_width=True)
+        
+    with col_fx:
+        st.subheader("USD/TWD 匯率走勢 (1年)")
+        fx_data = get_fx_data()
+        # 使用 Plotly 繪製折線圖
+        fig_fx = go.Figure()
+        fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['Close'], mode='lines', name='USD/TWD', line=dict(color='white' if st.get_option('theme.base') == 'dark' else 'black', width=2)))
+        fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA20'], mode='lines', name='MA20 (月線)', line=dict(color='#3498db', dash='dash')))
+        fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA60'], mode='lines', name='MA60 (季線)', line=dict(color='#e74c3c', dash='dot')))
+        fig_fx.update_layout(margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_fx, use_container_width=True)
+
+# ----------------- 分頁 2：技術分析掃描 -----------------
+with tab2:
+    st.subheader("🎯 觀察清單技術面掃描")
+    st.markdown("針對台美股核心觀察清單進行**均線與 KD 指標**的自動化判定。")
+    
+    with st.spinner("正在計算各標的技術指標... (約需 10-15 秒)"):
+        ta_results = []
+        # 合併清單進行掃描
+        for item in TW_CORE + US_WATCH:
+            res = process_technical_analysis(item['symbol'], item['name'])
+            if res: ta_results.append(res)
+            
+        if ta_results:
+            df_ta = pd.DataFrame(ta_results)
+            # 將 DataFrame 顯示在網頁上
+            st.dataframe(
+                df_ta, 
+                column_config={
+                    "市場": st.column_config.TextColumn("市場", width="small"),
+                    "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
+                    "收盤價": st.column_config.NumberColumn("最新收盤價"),
+                    "均線狀態": st.column_config.TextColumn("均線位置", width="medium"),
+                    "日KD": st.column_config.TextColumn("日 KD 狀態", width="large"),
+                    "週KD": st.column_config.TextColumn("週 KD 狀態", width="large"),
+                    "P/E": st.column_config.TextColumn("本益比", width="small")
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=600 # 讓表格夠高不必一直捲動
+            )
+        else:
+            st.warning("目前無法取得技術分析資料，請稍後再試。")
