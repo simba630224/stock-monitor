@@ -1,9 +1,5 @@
+streamlit
 yfinance
 pandas
-pandas-ta
-mplfinance
-requests
-streamlit
-matplotlib
+plotly
 numpy
-multitasking==0.0.9
