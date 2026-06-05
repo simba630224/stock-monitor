@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import re
 from datetime import datetime
 import warnings
+from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
 
@@ -14,36 +15,33 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
-# 1. 資料庫與清單設定
+# 1. 資料庫與清單設定 (Google Sheets 連線)
 # ==========================================
-PORTFOLIO_TW = [
-    {'Ticker': '0050', 'Shares': 4528}, {'Ticker': '0056', 'Shares': 8000},
-    {'Ticker': '006208', 'Shares': 6000}, {'Ticker': '00646', 'Shares':500 + 11000},
-    {'Ticker': '00662', 'Shares': 600 + 2000}, {'Ticker': '00679B', 'Shares': 10000},
-    {'Ticker': '00687B', 'Shares': 3438}, {'Ticker': '00692', 'Shares': 2000 + 15000},
-    {'Ticker': '00697B', 'Shares': 2262}, {'Ticker': '00712', 'Shares': 2918 + 7000},
-    {'Ticker': '00713', 'Shares': 1853 + 13000}, {'Ticker': '00719B', 'Shares': 7042},
-    {'Ticker': '00757', 'Shares': 324 + 3000}, {'Ticker': '00772B', 'Shares': 100 + 18000},
-    {'Ticker': '00830', 'Shares': 695 + 7000}, {'Ticker': '00878', 'Shares': 4108 + 46000},
-    {'Ticker': '00919', 'Shares': 4116+29000}, {'Ticker': '00922', 'Shares': 23000+0},
-    {'Ticker': '00923', 'Shares': 23071+5000}, {'Ticker': '00937B', 'Shares': 3665 + 19000},
-    {'Ticker': '009800', 'Shares': 16000 + 1000}, {'Ticker': '009812', 'Shares': 2273 + 24000},
-    {'Ticker': '009813', 'Shares': 6710 + 39000}, {'Ticker': '009815', 'Shares': 1257+15000},
-    {'Ticker': '009816', 'Shares': 3000}, {'Ticker': '00981A', 'Shares': 7667+2000},
-    {'Ticker': '00988A', 'Shares': 2300 + 11000}, {'Ticker': '1216', 'Shares': 2000},
-    {'Ticker': '2317', 'Shares': 154}, {'Ticker': '2330', 'Shares': 38},
-    {'Ticker': '2412', 'Shares': 7000}, {'Ticker': '2454', 'Shares': 1},
-]
+# 建立資料庫連線
+conn = st.connection("gsheets", type=GSheetsConnection)
 
+try:
+    # 讀取台股持股資料 (加上 ttl=0 確保每次重整都抓取最新資料)
+    df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
+    # 清除空白列以防報錯
+    df_tw = df_tw.dropna(subset=['Ticker'])
+    PORTFOLIO_TW = df_tw.to_dict('records')
+except Exception as e:
+    st.error("無法讀取 Google Sheets 資料，請檢查 Secrets 設定與工作表名稱是否正確。")
+    PORTFOLIO_TW = []
+    df_tw = pd.DataFrame(columns=["Ticker", "Shares"])
+
+# 美股持股 (示範用，暫時寫死，未來可比照台股建立 US_Portfolio 工作表)
 PORTFOLIO_US = [
     {'Ticker': 'AOR', 'Shares': 0.19}, {'Ticker': 'BNDW', 'Shares': 37.6},
-    {'Ticker': 'META', 'Shares': 2.0}, {'Ticker': 'NVDA', 'Shares': 0},
-    {'Ticker': 'QQQ', 'Shares': 17.8 }, {'Ticker': 'VNQ', 'Shares': 8.0 + 27.62 + 19.39},
-    {'Ticker': 'VOO', 'Shares': 10.0 + 5.31}, {'Ticker': 'VT', 'Shares': 202.49 + 86.19 + 76.78 + 105.63},
+    {'Ticker': 'META', 'Shares': 2.0}, {'Ticker': 'NVDA', 'Shares': 1.0},
+    {'Ticker': 'QQQ', 'Shares': 20.4}, {'Ticker': 'VNQ', 'Shares': 55.01},
+    {'Ticker': 'VOO', 'Shares': 15.31}, {'Ticker': 'VT', 'Shares': 471.09},
     {'Ticker': 'VWRA.L', 'Shares': 194.0}, {'Ticker': 'CSPX.L', 'Shares': 9.0},
     {'Ticker': 'VXUS', 'Shares': 24.0},
 ]
 
+# 技術分析觀察清單
 TW_CORE = [
     {'symbol': '2330.TW', 'name': '台積電'}, {'symbol': '2317.TW', 'name': '鴻海'},
     {'symbol': '2454.TW', 'name': '聯發科'}, {'symbol': '2308.TW', 'name': '台達電'},
@@ -192,28 +190,32 @@ with tab1:
         usdtwd = get_usdtwd()
         total_market_value, total_dividends_2026 = 0, 0
         asset_allocation = {}
-        individual_holdings = [] # 儲存單一個股/ETF資料
+        individual_holdings = [] 
 
         # 處理台股
         for item in PORTFOLIO_TW:
-            ticker = get_yf_ticker_tw(item['Ticker'])
-            asset_type = classify_asset(item['Ticker'], 'TW')
-            price, div = get_basic_data(ticker)
-            if price > 0:
-                val = price * item['Shares']
-                div_tot = div * item['Shares']
-                total_market_value += val
-                asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                total_dividends_2026 += div_tot
-                individual_holdings.append({'標的': item['Ticker'], '市值': val, '股息': div_tot, '類別': '台股'})
+            # 確保欄位不是空值
+            if pd.notna(item.get('Ticker')) and pd.notna(item.get('Shares')):
+                ticker = get_yf_ticker_tw(str(item['Ticker']))
+                asset_type = classify_asset(str(item['Ticker']), 'TW')
+                price, div = get_basic_data(ticker)
+                shares = float(item['Shares'])
+                if price > 0:
+                    val = price * shares
+                    div_tot = div * shares
+                    total_market_value += val
+                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                    total_dividends_2026 += div_tot
+                    individual_holdings.append({'標的': str(item['Ticker']), '市值': val, '股息': div_tot, '類別': '台股'})
 
         # 處理美股
         for item in PORTFOLIO_US:
             asset_type = classify_asset(item['Ticker'], 'US')
             price, div = get_basic_data(item['Ticker'])
+            shares = float(item['Shares'])
             if price > 0:
-                val = price * item['Shares'] * usdtwd
-                div_tot = div * item['Shares'] * usdtwd
+                val = price * shares * usdtwd
+                div_tot = div * shares * usdtwd
                 total_market_value += val
                 asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
                 total_dividends_2026 += div_tot
@@ -231,21 +233,25 @@ with tab1:
     col_chart, col_fx = st.columns([1, 1])
     with col_chart:
         st.subheader("資產配置佔比")
-        df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
-        fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4)
-        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-        fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
-        st.plotly_chart(fig_pie, use_container_width=True)
+        if asset_allocation:
+            df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
+            fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4)
+            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("尚無資產資料。")
         
     with col_fx:
         st.subheader("USD/TWD 匯率走勢 (1年)")
         fx_data = get_fx_data()
-        fig_fx = go.Figure()
-        fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['Close'], mode='lines', name='USD/TWD', line=dict(color='white' if st.get_option('theme.base') == 'dark' else 'black', width=2)))
-        fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA20'], mode='lines', name='MA20 (月線)', line=dict(color='#3498db', dash='dash')))
-        fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA60'], mode='lines', name='MA60 (季線)', line=dict(color='#e74c3c', dash='dot')))
-        fig_fx.update_layout(margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-        st.plotly_chart(fig_fx, use_container_width=True)
+        if not fx_data.empty:
+            fig_fx = go.Figure()
+            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['Close'], mode='lines', name='USD/TWD', line=dict(color='white' if st.get_option('theme.base') == 'dark' else 'black', width=2)))
+            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA20'], mode='lines', name='MA20 (月線)', line=dict(color='#3498db', dash='dash')))
+            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA60'], mode='lines', name='MA60 (季線)', line=dict(color='#e74c3c', dash='dot')))
+            fig_fx.update_layout(margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_fx, use_container_width=True)
 
     st.divider()
 
@@ -253,7 +259,6 @@ with tab1:
     st.subheader("📊 各標的市值與股息分佈")
     df_ind = pd.DataFrame(individual_holdings)
     if not df_ind.empty:
-        # 依市值排序，讓圖表呈現階梯狀
         df_ind_sorted = df_ind.sort_values(by='市值', ascending=True)
         
         col_bar1, col_bar2 = st.columns(2)
@@ -305,3 +310,31 @@ with tab2:
             )
         else:
             st.warning("目前無法取得技術分析資料，請稍後再試。")
+
+# ==========================================
+# 4. 後台管理介面 (側邊欄)
+# ==========================================
+with st.sidebar:
+    st.header("📝 持股管理系統")
+    st.markdown("在此修改的資料將直接同步至 Google Sheets。")
+    
+    if not df_tw.empty:
+        # 顯示可編輯的表格
+        edited_df_tw = st.data_editor(
+            df_tw,
+            num_rows="dynamic", # 允許新增或刪除列
+            use_container_width=True,
+            key="tw_editor"
+        )
+        
+        # 儲存按鈕
+        if st.button("💾 儲存台股變更", use_container_width=True):
+            with st.spinner("正在將資料寫入雲端..."):
+                try:
+                    # 寫回 Google Sheets
+                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
+                    st.success("更新成功！請重新整理網頁查看最新圖表。")
+                except Exception as e:
+                    st.error(f"寫入失敗：{e}")
+    else:
+        st.warning("尚未連線到 Google Sheets，或資料表為空。")
