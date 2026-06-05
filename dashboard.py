@@ -15,31 +15,29 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
-# 1. 資料庫與清單設定 (Google Sheets 連線)
+# 1. 資料庫與清單設定 (Google Sheets 雙分頁連線)
 # ==========================================
-# 建立資料庫連線
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# 讀取台股持股 (工作表名稱需為 TW_Portfolio)
 try:
-    # 讀取台股持股資料 (加上 ttl=0 確保每次重整都抓取最新資料)
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
-    # 清除空白列以防報錯
     df_tw = df_tw.dropna(subset=['Ticker'])
     PORTFOLIO_TW = df_tw.to_dict('records')
 except Exception as e:
-    st.error("無法讀取 Google Sheets 資料，請檢查 Secrets 設定與工作表名稱是否正確。")
+    st.error("⚠️ 無法讀取台股資料，請確認試算表內有『TW_Portfolio』工作表。")
     PORTFOLIO_TW = []
     df_tw = pd.DataFrame(columns=["Ticker", "Shares"])
 
-# 美股持股 (示範用，暫時寫死，未來可比照台股建立 US_Portfolio 工作表)
-PORTFOLIO_US = [
-    {'Ticker': 'AOR', 'Shares': 0.19}, {'Ticker': 'BNDW', 'Shares': 37.6},
-    {'Ticker': 'META', 'Shares': 2.0}, {'Ticker': 'NVDA', 'Shares': 1.0},
-    {'Ticker': 'QQQ', 'Shares': 20.4}, {'Ticker': 'VNQ', 'Shares': 55.01},
-    {'Ticker': 'VOO', 'Shares': 15.31}, {'Ticker': 'VT', 'Shares': 471.09},
-    {'Ticker': 'VWRA.L', 'Shares': 194.0}, {'Ticker': 'CSPX.L', 'Shares': 9.0},
-    {'Ticker': 'VXUS', 'Shares': 24.0},
-]
+# 讀取美股持股 (工作表名稱需為 US_Portfolio)
+try:
+    df_us = conn.read(worksheet="US_Portfolio", ttl=0)
+    df_us = df_us.dropna(subset=['Ticker'])
+    PORTFOLIO_US = df_us.to_dict('records')
+except Exception as e:
+    st.warning("⚠️ 無法讀取美股資料，請確認試算表內有『US_Portfolio』工作表。")
+    PORTFOLIO_US = []
+    df_us = pd.DataFrame(columns=["Ticker", "Shares"])
 
 # 技術分析觀察清單
 TW_CORE = [
@@ -115,17 +113,14 @@ def process_technical_analysis(sym, name):
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
         market = '台股' if sym.endswith('.TW') or sym.endswith('.TWO') else '美股'
         
-        # 均線計算 (MA10, MA20, MA60, MA120, MA240)
         df['MA10'] = df['Close'].rolling(10).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['MA60'] = df['Close'].rolling(60).mean()
         df['MA120'] = df['Close'].rolling(120).mean()
         df['MA240'] = df['Close'].rolling(240).mean()
         
-        # 近一年(252交易日)最高點
         high_52w = df['High'].tail(252).max()
         
-        # KD 計算 (原生 Pandas)
         df['K_d'] = ((df['Close'] - df['Low'].rolling(9).min()) / (df['High'].rolling(9).max() - df['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
         df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
         
@@ -140,7 +135,6 @@ def process_technical_analysis(sym, name):
         ma120 = float(df['MA120'].iloc[-1]) if pd.notna(df['MA120'].iloc[-1]) else 0
         ma240 = float(df['MA240'].iloc[-1]) if pd.notna(df['MA240'].iloc[-1]) else 0
         
-        # KD狀態
         k_d, d_d = float(df['K_d'].iloc[-1]), float(df['D_d'].iloc[-1])
         pk_d, pd_d = float(df['K_d'].iloc[-2]), float(df['D_d'].iloc[-2])
         k_w, d_w = float(df_w['K_w'].iloc[-1]), float(df_w['D_w'].iloc[-1])
@@ -148,17 +142,14 @@ def process_technical_analysis(sym, name):
         kd_d_status = "🟢 金叉轉強" if (k_d > d_d and pk_d <= pd_d) else ("🔴 死亡交叉" if (k_d < d_d and pk_d >= pd_d) else "趨勢延續")
         kd_w_status = "🟢 金叉轉強" if (k_w > d_w and pk_w <= pd_w) else ("🔴 死亡交叉" if (k_w < d_w and pk_w >= pd_w) else "趨勢延續")
         
-        # 狀態警示 (跌破MA20 或 回落10%)
         alerts = []
-        if last_p < ma20:
-            alerts.append("跌破MA20")
+        if last_p < ma20: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
             alerts.append(f"回落{drop_pct:.1f}%")
             
         alert_str = "⚠️ " + " / ".join(alerts) if alerts else "✅ 正常"
 
-        # P/E 取得
         pe_str = "無"
         try:
             pe_val = yf.Ticker(sym).info.get('trailingPE')
@@ -184,7 +175,6 @@ st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M
 
 tab1, tab2 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描"])
 
-# ----------------- 分頁 1：投資組合總覽 -----------------
 with tab1:
     with st.spinner("正在同步即時報價資料..."):
         usdtwd = get_usdtwd()
@@ -192,9 +182,8 @@ with tab1:
         asset_allocation = {}
         individual_holdings = [] 
 
-        # 處理台股
+        # 計算台股
         for item in PORTFOLIO_TW:
-            # 確保欄位不是空值
             if pd.notna(item.get('Ticker')) and pd.notna(item.get('Shares')):
                 ticker = get_yf_ticker_tw(str(item['Ticker']))
                 asset_type = classify_asset(str(item['Ticker']), 'TW')
@@ -208,18 +197,19 @@ with tab1:
                     total_dividends_2026 += div_tot
                     individual_holdings.append({'標的': str(item['Ticker']), '市值': val, '股息': div_tot, '類別': '台股'})
 
-        # 處理美股
+        # 計算美股
         for item in PORTFOLIO_US:
-            asset_type = classify_asset(item['Ticker'], 'US')
-            price, div = get_basic_data(item['Ticker'])
-            shares = float(item['Shares'])
-            if price > 0:
-                val = price * shares * usdtwd
-                div_tot = div * shares * usdtwd
-                total_market_value += val
-                asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                total_dividends_2026 += div_tot
-                individual_holdings.append({'標的': item['Ticker'], '市值': val, '股息': div_tot, '類別': '美股'})
+            if pd.notna(item.get('Ticker')) and pd.notna(item.get('Shares')):
+                asset_type = classify_asset(str(item['Ticker']), 'US')
+                price, div = get_basic_data(str(item['Ticker']))
+                shares = float(item['Shares'])
+                if price > 0:
+                    val = price * shares * usdtwd
+                    div_tot = div * shares * usdtwd
+                    total_market_value += val
+                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                    total_dividends_2026 += div_tot
+                    individual_holdings.append({'標的': str(item['Ticker']), '市值': val, '股息': div_tot, '類別': '美股'})
 
     # 頂端指標
     col1, col2, col3 = st.columns(3)
@@ -229,7 +219,7 @@ with tab1:
 
     st.divider()
     
-    # 互動式 Plotly 圓餅圖與匯率圖
+    # 圖表區
     col_chart, col_fx = st.columns([1, 1])
     with col_chart:
         st.subheader("資產配置佔比")
@@ -255,12 +245,10 @@ with tab1:
 
     st.divider()
 
-    # 各別標的市值與股息長條圖
     st.subheader("📊 各標的市值與股息分佈")
     df_ind = pd.DataFrame(individual_holdings)
     if not df_ind.empty:
         df_ind_sorted = df_ind.sort_values(by='市值', ascending=True)
-        
         col_bar1, col_bar2 = st.columns(2)
         with col_bar1:
             fig_mv_bar = px.bar(df_ind_sorted, x='市值', y='標的', orientation='h', 
@@ -274,7 +262,6 @@ with tab1:
             fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
-# ----------------- 分頁 2：技術分析掃描 -----------------
 with tab2:
     st.subheader("🎯 觀察清單技術面掃描")
     st.markdown("包含各天期均線 (MA10~MA240)，並自動警示**跌破月線 (MA20)** 或 **自近一年高點回落大於 10%** 的標的。")
@@ -312,29 +299,38 @@ with tab2:
             st.warning("目前無法取得技術分析資料，請稍後再試。")
 
 # ==========================================
-# 4. 後台管理介面 (側邊欄)
+# 4. 後台管理介面 (側邊欄雙分頁編輯)
 # ==========================================
 with st.sidebar:
-    st.header("📝 持股管理系統")
-    st.markdown("在此修改的資料將直接同步至 Google Sheets。")
+    st.header("📝 持股雲端管理")
+    st.markdown("直接在此編輯股數，並點擊下方按鈕同步至 Google Sheets。")
     
+    # --- 台股編輯區 ---
+    st.subheader("🇹🇼 台股持股")
     if not df_tw.empty:
-        # 顯示可編輯的表格
-        edited_df_tw = st.data_editor(
-            df_tw,
-            num_rows="dynamic", # 允許新增或刪除列
-            use_container_width=True,
-            key="tw_editor"
-        )
-        
-        # 儲存按鈕
+        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
         if st.button("💾 儲存台股變更", use_container_width=True):
-            with st.spinner("正在將資料寫入雲端..."):
+            with st.spinner("正在寫入台股資料..."):
                 try:
-                    # 寫回 Google Sheets
                     conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
-                    st.success("更新成功！請重新整理網頁查看最新圖表。")
+                    st.success("✅ 台股更新成功！請重新整理網頁。")
                 except Exception as e:
                     st.error(f"寫入失敗：{e}")
     else:
-        st.warning("尚未連線到 Google Sheets，或資料表為空。")
+        st.info("台股清單目前為空或未連線。")
+
+    st.divider()
+
+    # --- 美股編輯區 ---
+    st.subheader("🇺🇸 美股持股")
+    if not df_us.empty:
+        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
+        if st.button("💾 儲存美股變更", use_container_width=True):
+            with st.spinner("正在寫入美股資料..."):
+                try:
+                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    st.success("✅ 美股更新成功！請重新整理網頁。")
+                except Exception as e:
+                    st.error(f"寫入失敗：{e}")
+    else:
+        st.info("美股清單目前為空或未連線。")
