@@ -25,7 +25,7 @@ try:
     df_tw = df_tw.dropna(subset=['Ticker'])
     PORTFOLIO_TW = df_tw.to_dict('records')
 except Exception as e:
-    st.error("⚠️ 無法讀取台股資料，請確認試算表內有『TW_Portfolio』工作表。")
+    st.error(f"⚠️ 無法讀取台股資料，錯誤原因：{e}")
     PORTFOLIO_TW = []
     df_tw = pd.DataFrame(columns=["Ticker", "Shares"])
 
@@ -35,7 +35,7 @@ try:
     df_us = df_us.dropna(subset=['Ticker'])
     PORTFOLIO_US = df_us.to_dict('records')
 except Exception as e:
-    st.warning("⚠️ 無法讀取美股資料，請確認試算表內有『US_Portfolio』工作表。")
+    st.warning(f"⚠️ 無法讀取美股資料，錯誤原因：{e}")
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "Shares"])
 
