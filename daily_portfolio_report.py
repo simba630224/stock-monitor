@@ -19,56 +19,38 @@ warnings.filterwarnings('ignore')
 # 每日定時投資組合報告 + 匯率分析走勢圖 (GitHub Actions + Telegram)
 # =======================================================
 
-# --- 1. 寫死在程式碼中的投資組合資料 ---
+# --- 1. 從 Google Sheet 讀取投資組合資料 ---
 
-PORTFOLIO_TW = [
-    {'Ticker': '0050', 'Shares': 4332},
-    {'Ticker': '0056', 'Shares': 8000},
-    {'Ticker': '006208', 'Shares': 6000},
-    {'Ticker': '00646', 'Shares': 149 + 11000},
-    {'Ticker': '00662', 'Shares': 600 + 2000},
-    {'Ticker': '00679B', 'Shares': 10000},
-    {'Ticker': '00687B', 'Shares': 3438},
-    {'Ticker': '00692', 'Shares': 2000 + 15000},
-    {'Ticker': '00697B', 'Shares': 2262},
-    {'Ticker': '00712', 'Shares': 2918 + 7000},
-    {'Ticker': '00713', 'Shares': 1853 + 13000},
-    {'Ticker': '00719B', 'Shares': 7042},
-    {'Ticker': '00757', 'Shares': 324 + 3000},
-    {'Ticker': '00772B', 'Shares': 100 + 18000},
-    {'Ticker': '00830', 'Shares': 695 + 7000},
-    {'Ticker': '00878', 'Shares': 4108 + 46000},
-    {'Ticker': '00919', 'Shares': 4116+29000},
-    {'Ticker': '00922', 'Shares': 22000+0},
-    {'Ticker': '00923', 'Shares': 23000+5000},
-    {'Ticker': '00937B', 'Shares': 3665 + 19000},
-    {'Ticker': '009800', 'Shares': 14000 + 1000},
-    {'Ticker': '009812', 'Shares': 6273 + 18000},
-    {'Ticker': '009813', 'Shares': 2710 + 39000},
-    {'Ticker': '009815', 'Shares': 0+15000},
-    {'Ticker': '009816', 'Shares': 1000},
-    {'Ticker': '00981A', 'Shares': 7000+2000},
-    {'Ticker': '00988A', 'Shares': 2417 + 9000},
-    {'Ticker': '1216', 'Shares':2000},
-    {'Ticker': '2317', 'Shares': 154},
-    {'Ticker': '2330', 'Shares': 38},
-    {'Ticker': '2412', 'Shares': 9000},
-    {'Ticker': '2454', 'Shares': 1},
-]
+# 👇 請在此貼上您的 Google Sheet 一般共用連結 👇
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/16EgWvmGUPfOrDKGiefWCovNQNYf-E4RAVDGu7zx1BI4/edit?gid=0#gid=0"
 
-PORTFOLIO_US = [
-    {'Ticker': 'AOR', 'Shares': 0.19},
-    {'Ticker': 'BNDW', 'Shares': 37.6},
-    {'Ticker': 'META', 'Shares': 2.0},
-    {'Ticker': 'NVDA', 'Shares': 1.0},
-    {'Ticker': 'QQQ', 'Shares': 17.8 + 2.6},
-    {'Ticker': 'VNQ', 'Shares': 8.0 + 27.62 + 19.39},
-    {'Ticker': 'VOO', 'Shares': 10.0 + 5.31},
-    {'Ticker': 'VT', 'Shares': 202.49 + 86.19 + 76.78 + 105.63},
-    {'Ticker': 'VWRA.L', 'Shares': 194.0},
-    {'Ticker': 'CSPX.L', 'Shares': 9.0},
-    {'Ticker': 'VXUS', 'Shares': 24.0},
-]
+try:
+    print("📥 正在從 Google Sheet 載入最新持股資料...")
+    
+    # 自動將共用連結轉換為 Excel 下載連結
+    if "/edit" in GOOGLE_SHEET_URL:
+        export_url = GOOGLE_SHEET_URL.split('/edit')[0] + '/export?format=xlsx'
+    else:
+        export_url = GOOGLE_SHEET_URL
+    
+    # 讀取指定的兩個工作表 (sheet_name)，並強制 Ticker 為字串以保留 '0050' 等開頭的 0
+    df_tw = pd.read_excel(export_url, sheet_name='TW_Portfolio', dtype={'Ticker': str})
+    df_us = pd.read_excel(export_url, sheet_name='US_Portfolio', dtype={'Ticker': str})
+
+    # 過濾掉表格中可能不小心留下的空白行
+    df_tw = df_tw.dropna(subset=['Ticker', 'Shares'])
+    df_us = df_us.dropna(subset=['Ticker', 'Shares'])
+
+    # 轉換為字典格式，與後續運算邏輯完美相容
+    PORTFOLIO_TW = df_tw.to_dict('records')
+    PORTFOLIO_US = df_us.to_dict('records')
+    
+    print(f"✅ 成功載入: 台股 {len(PORTFOLIO_TW)} 檔, 美股 {len(PORTFOLIO_US)} 檔")
+
+except Exception as e:
+    print(f"❌ 讀取 Google Sheet 發生錯誤: {e}")
+    PORTFOLIO_TW = []
+    PORTFOLIO_US = []
 
 # --- 2. 輔助函式 ---
 
@@ -84,9 +66,9 @@ def classify_asset(ticker, market):
     if market == 'TW':
         if ticker.endswith('B'): return '債券ETF'
         if ticker.startswith('00'):
-            overseas = ['00646', '00757', '00662', '00830', '009811', '00712', '00717', '009800', '009813','009815', '00988A']
+            overseas = ['00646', '00757', '00662', '00830', '009811', '00712', '00717', '009800', '009813', '00981A', '009815', '00988A']
             if ticker in overseas: return '美股ETF與個股'
-            market_cap = ['0050', '006208', '00692', '00922', '00923']
+            market_cap = ['0050', '006208', '00692', '00922', '00923', '00850']
             if ticker in market_cap: return '台股市值型ETF'
             high_div = ['0056', '00878', '00919', '00713']
             if ticker in high_div: return '台股高股息型ETF'
@@ -100,7 +82,7 @@ def classify_asset(ticker, market):
 def get_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        # 【修正點】：將抓取區間從 5d 放寬到 1y，確保能讀取到今年完整的除息紀錄
+        # 抓取區間設為 1y，確保能讀取到今年完整的除息紀錄
         hist = stock.history(period="1y")
         
         # 【防呆機制】：過濾掉 nan 的數據，抓取最新的一筆有效收盤價
@@ -110,7 +92,7 @@ def get_data(ticker):
             if not valid_closes.empty:
                 price = float(valid_closes.iloc[-1])
         
-        # 【修正點】：直接從 1y 的歷史紀錄表裡面抓取 Dividends 欄位，避開 yfinance 快取 Bug
+        # 直接從 1y 的歷史紀錄表裡面抓取 Dividends 欄位，避開 yfinance 快取問題
         div_2026 = 0.0
         if not hist.empty and 'Dividends' in hist.columns:
             divs = hist['Dividends']
@@ -140,7 +122,7 @@ def get_usdtwd():
 # --- 3. Telegram 傳送函式 ---
 
 def send_telegram_notify(msg):
-    token = os.environ.get("TELEGRAM_TOKEN")
+    token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id: return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -148,7 +130,7 @@ def send_telegram_notify(msg):
     requests.post(url, data=payload)
 
 def send_telegram_photo(caption, photo_buffer):
-    token = os.environ.get("TELEGRAM_TOKEN")
+    token = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id: return
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
@@ -209,6 +191,10 @@ def analyze_and_plot_fx(fx_ticker="TWD=X"):
 # --- 5. 主程式邏輯 ---
 
 def main():
+    if not PORTFOLIO_TW and not PORTFOLIO_US:
+        print("❌ 投資組合為空，取消計算。請檢查 Google Sheet 連結與權限。")
+        return
+
     print("🚀 開始執行投資組合計算...")
     usdtwd = get_usdtwd()
     print(f"💵 取得目前匯率: {usdtwd}")
