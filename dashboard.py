@@ -104,7 +104,7 @@ def get_fx_data():
 
 @st.cache_data(ttl=3600)
 def get_stock_data(sym):
-    """取得個股歷史資料並計算所需技術指標"""
+    """取得個股歷史資料並計算所需技術指標 (包含 MA, KD, MACD)"""
     df = yf.download(sym, period="3y", progress=False)
     if df.empty or len(df) < 252: return None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
@@ -125,6 +125,13 @@ def get_stock_data(sym):
     df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
     df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
     
+    # 計算日 MACD
+    df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
+    df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = df['EMA12'] - df['EMA26'] # DIF
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean() # DEA
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal'] # OSC (柱狀圖)
+    
     return df
 
 @st.cache_data(ttl=3600)
@@ -134,10 +141,18 @@ def process_technical_analysis(sym, name):
         if df is None: return None
         market = '台股' if sym.endswith('.TW') or sym.endswith('.TWO') else '美股'
         
-        # 計算週 KD
+        # 計算週線指標 (KD, MACD)
         df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+        
+        # 週 KD
         df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
         df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
+        
+        # 週 MACD
+        df_w['EMA12'] = df_w['Close'].ewm(span=12, adjust=False).mean()
+        df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
+        df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
+        df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
         
         last_p = float(df['Close'].iloc[-1])
         ma10 = float(df['MA10'].iloc[-1]) if pd.notna(df['MA10'].iloc[-1]) else 0
@@ -155,8 +170,17 @@ def process_technical_analysis(sym, name):
         
         kd_d_status = "🟢 金叉轉強" if (k_d > d_d and pk_d <= pd_d) else ("🔴 死亡交叉" if (k_d < d_d and pk_d >= pd_d) else "趨勢延續")
         kd_w_status = "🟢 金叉轉強" if (k_w > d_w and pk_w <= pd_w) else ("🔴 死亡交叉" if (k_w < d_w and pk_w >= pd_w) else "趨勢延續")
+
+        # MACD狀態判定
+        macd_d, macds_d = float(df['MACD'].iloc[-1]), float(df['MACD_Signal'].iloc[-1])
+        pmacd_d, pmacds_d = float(df['MACD'].iloc[-2]), float(df['MACD_Signal'].iloc[-2])
+        macd_w, macds_w = float(df_w['MACD'].iloc[-1]), float(df_w['MACD_Signal'].iloc[-1])
+        pmacd_w, pmacds_w = float(df_w['MACD'].iloc[-2]), float(df_w['MACD_Signal'].iloc[-2])
         
-        # 綜合狀態警示 (含 MA跌破、高點回落、KD高低檔交叉)
+        macd_d_status = "🟢 金叉" if (macd_d > macds_d and pmacd_d <= pmacds_d) else ("🔴 死叉" if (macd_d < macds_d and pmacd_d >= pmacds_d) else "趨勢延續")
+        macd_w_status = "🟢 金叉" if (macd_w > macds_w and pmacd_w <= pmacds_w) else ("🔴 死叉" if (macd_w < macds_w and pmacd_w >= pmacds_w) else "趨勢延續")
+        
+        # 綜合狀態警示
         alerts = []
         if last_p < ma20: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
@@ -167,6 +191,10 @@ def process_technical_analysis(sym, name):
         if (k_d < d_d and pk_d >= pd_d) and k_d > 70: alerts.append("日KD高檔死叉")
         if (k_w > d_w and pk_w <= pd_w) and k_w < 30: alerts.append("週KD低檔金叉")
         if (k_w < d_w and pk_w >= pd_w) and k_w > 70: alerts.append("週KD高檔死叉")
+        
+        # MACD 零軸上下交叉警示
+        if (macd_d > macds_d and pmacd_d <= pmacds_d) and macd_d < 0: alerts.append("日MACD零下金叉")
+        if (macd_d < macds_d and pmacd_d >= pmacds_d) and macd_d > 0: alerts.append("日MACD零上死叉")
             
         alert_str = "⚠️ " + " / ".join(alerts) if alerts else "✅ 正常"
 
@@ -182,6 +210,8 @@ def process_technical_analysis(sym, name):
             "MA10": ma10, "MA20": ma20, "MA60": ma60, "MA120": ma120, "MA240": ma240,
             "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
             "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})",
+            "日MACD": f"DIF:{macd_d:.2f} ({macd_d_status})",
+            "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})",
             "P/E": pe_str
         }
     except Exception as e:
@@ -250,132 +280,4 @@ with tab1:
         st.subheader("USD/TWD 匯率走勢 (1年)")
         fx_data = get_fx_data()
         if not fx_data.empty:
-            fig_fx = go.Figure()
-            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['Close'], mode='lines', name='USD/TWD', line=dict(color='white' if st.get_option('theme.base') == 'dark' else 'black', width=2)))
-            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA20'], mode='lines', name='MA20 (月線)', line=dict(color='#3498db', dash='dash')))
-            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA60'], mode='lines', name='MA60 (季線)', line=dict(color='#e74c3c', dash='dot')))
-            fig_fx.update_layout(margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            st.plotly_chart(fig_fx, use_container_width=True)
-
-    st.divider()
-
-    st.subheader("📊 各標的市值與股息分佈")
-    df_ind = pd.DataFrame(individual_holdings)
-    if not df_ind.empty:
-        df_ind_sorted = df_ind.sort_values(by='市值', ascending=True)
-        col_bar1, col_bar2 = st.columns(2)
-        with col_bar1:
-            fig_mv_bar = px.bar(df_ind_sorted, x='市值', y='標的', orientation='h', title='各標的市值 (TWD)', color='類別', text_auto='.2s')
-            fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
-            st.plotly_chart(fig_mv_bar, use_container_width=True)
-        with col_bar2:
-            fig_div_bar = px.bar(df_ind_sorted, x='股息', y='標的', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s')
-            fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
-            st.plotly_chart(fig_div_bar, use_container_width=True)
-
-with tab2:
-    st.subheader("🎯 觀察清單技術面掃描")
-    st.markdown("自動警示跌破月線、高點回落大於 10%，以及**KD 低檔金叉/高檔死叉**。")
-    
-    with st.spinner("正在計算各標的技術指標..."):
-        ta_results = []
-        target_options = {} # 供繪圖選單使用
-        for item in TW_CORE + US_WATCH:
-            res = process_technical_analysis(item['symbol'], item['name'])
-            if res: 
-                ta_results.append(res)
-                target_options[f"{item['name']} ({item['symbol']})"] = item['symbol']
-            
-        if ta_results:
-            df_ta = pd.DataFrame(ta_results)
-            st.dataframe(
-                df_ta, 
-                column_config={
-                    "市場": st.column_config.TextColumn("市場", width="small"),
-                    "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
-                    "狀態警示": st.column_config.TextColumn("🚨 狀態警示", width="large"),
-                    "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                    "近一年高點": st.column_config.NumberColumn("1年高點", format="%.2f"),
-                    "MA10": st.column_config.NumberColumn("MA10", format="%.2f"),
-                    "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
-                    "MA60": st.column_config.NumberColumn("MA60", format="%.2f"),
-                    "MA120": st.column_config.NumberColumn("MA120", format="%.2f"),
-                    "MA240": st.column_config.NumberColumn("MA240", format="%.2f"),
-                    "日KD": st.column_config.TextColumn("日 KD 狀態", width="medium"),
-                    "週KD": st.column_config.TextColumn("週 KD 狀態", width="medium"),
-                    "P/E": st.column_config.TextColumn("本益比", width="small")
-                },
-                hide_index=True,
-                use_container_width=True,
-                height=450
-            )
-        else:
-            st.warning("目前無法取得技術分析資料，請稍後再試。")
-
-    st.divider()
-    
-    # 互動式技術線圖區塊
-    st.subheader("📈 個股/ETF 詳細技術線圖")
-    selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
-    
-    if selected_name:
-        sym = target_options[selected_name]
-        df_chart = get_stock_data(sym)
-        if df_chart is not None:
-            # 取近 150 個交易日作圖，畫面較乾淨
-            df_plot = df_chart.tail(150)
-            
-            # 建立子圖 (上面放K線與均線，下面放KD)
-            fig_tech = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                                     vertical_spacing=0.03, row_heights=[0.7, 0.3],
-                                     subplot_titles=(selected_name, "日 KD 指標"))
-            
-            # Row 1: K線圖
-            fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
-            # Row 1: 均線
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='orange', width=1.5), name='MA60'), row=1, col=1)
-            
-            # Row 2: KD指標
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值 (日)'), row=2, col=1)
-            
-            # 加入 80/20 超買超賣基準線
-            fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1, annotation_text="80 (高檔)")
-            fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1, annotation_text="20 (低檔)")
-            fig_tech.add_hline(y=50, line_dash="dot", line_color="gray", row=2, col=1)
-            
-            fig_tech.update_layout(xaxis_rangeslider_visible=False, height=650, margin=dict(t=40, b=0, l=0, r=0))
-            st.plotly_chart(fig_tech, use_container_width=True)
-
-# ==========================================
-# 4. 後台管理介面 (側邊欄雙分頁編輯)
-# ==========================================
-with st.sidebar:
-    st.header("📝 持股雲端管理")
-    st.markdown("直接在此編輯股數，並點擊下方按鈕同步至 Google Sheets。")
-    
-    st.subheader("🇹🇼 台股持股")
-    if not df_tw.empty:
-        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
-        if st.button("💾 儲存台股變更", use_container_width=True):
-            with st.spinner("正在寫入台股資料..."):
-                try:
-                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
-                    st.success("✅ 台股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("台股清單目前為空或未連線。")
-
-    st.divider()
-
-    st.subheader("🇺🇸 美股持股")
-    if not df_us.empty:
-        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
-        if st.button("💾 儲存美股變更", use_container_width=True):
-            with st.spinner("正在寫入美股資料..."):
-                try:
-                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
-                    st.success("✅ 美股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("美股清單目前為空或未連線。")
+            fig_fx =
