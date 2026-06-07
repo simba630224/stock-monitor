@@ -22,7 +22,7 @@ warnings.filterwarnings('ignore')
 # --- 1. 從 Google Sheet 讀取投資組合資料 ---
 
 # 👇 請在此貼上您的 Google Sheet 一般共用連結 👇
-GOOGLE_SHEET_URL = "請將網址貼在這裡，例如 https://docs.google.com/spreadsheets/d/您的ID/edit?usp=sharing"
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/16EgWvmGUPfOrDKGiefWCovNQNYf-E4RAVDGu7zx1BI4/edit?gid=0#gid=0"
 
 try:
     print("📥 正在從 Google Sheet 載入最新持股資料...")
