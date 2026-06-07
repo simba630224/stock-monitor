@@ -22,7 +22,7 @@ warnings.filterwarnings('ignore')
 # --- 1. 從 Google Sheet 讀取投資組合資料 ---
 
 # 👇 請在此貼上您的 Google Sheet 一般共用連結 👇
-GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/16EgWvmGUPfOrDKGiefWCovNQNYf-E4RAVDGu7zx1BI4/edit?gid=0#gid=0"
+GOOGLE_SHEET_URL = "請將網址貼在這裡，例如 https://docs.google.com/spreadsheets/d/您的ID/edit?usp=sharing"
 
 try:
     print("📥 正在從 Google Sheet 載入最新持股資料...")
@@ -36,6 +36,16 @@ try:
     # 讀取指定的兩個工作表 (sheet_name)，並強制 Ticker 為字串以保留 '0050' 等開頭的 0
     df_tw = pd.read_excel(export_url, sheet_name='TW_Portfolio', dtype={'Ticker': str})
     df_us = pd.read_excel(export_url, sheet_name='US_Portfolio', dtype={'Ticker': str})
+
+    # 🚀 新增邏輯：計算台股總持股 (Shares + 出借)
+    if '出借' in df_tw.columns:
+        df_tw['Shares'] = pd.to_numeric(df_tw['Shares'], errors='coerce').fillna(0) + \
+                          pd.to_numeric(df_tw['出借'], errors='coerce').fillna(0)
+
+    # 🚀 新增邏輯：計算美股總持股 (Shares + 複委託)
+    if '複委託' in df_us.columns:
+        df_us['Shares'] = pd.to_numeric(df_us['Shares'], errors='coerce').fillna(0) + \
+                          pd.to_numeric(df_us['複委託'], errors='coerce').fillna(0)
 
     # 過濾掉表格中可能不小心留下的空白行
     df_tw = df_tw.dropna(subset=['Ticker', 'Shares'])
