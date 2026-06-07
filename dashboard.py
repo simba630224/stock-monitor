@@ -16,27 +16,45 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
+# 0. 輔助函式：安全轉換數字
+# ==========================================
+def safe_float(val):
+    """安全地將資料轉換為浮點數，遇到空白或非數字則回傳 0.0"""
+    try:
+        return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
+    except:
+        return 0.0
+
+# ==========================================
 # 1. 資料庫與清單設定 (Google Sheets 雙分頁連線)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# 讀取台股
 try:
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
     df_tw = df_tw.dropna(subset=['Ticker'])
+    # 自動補齊台股所需欄位
+    if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
+    if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
     PORTFOLIO_TW = df_tw.to_dict('records')
 except Exception as e:
     st.error(f"⚠️ 無法讀取台股資料，請確認試算表內有『TW_Portfolio』工作表。錯誤: {e}")
     PORTFOLIO_TW = []
-    df_tw = pd.DataFrame(columns=["Ticker", "Shares"])
+    df_tw = pd.DataFrame(columns=["Ticker", "Shares", "出借"])
 
+# 讀取美股
 try:
     df_us = conn.read(worksheet="US_Portfolio", ttl=0)
     df_us = df_us.dropna(subset=['Ticker'])
+    # 自動補齊美股所需欄位
+    if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
+    if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
     PORTFOLIO_US = df_us.to_dict('records')
 except Exception as e:
     st.warning(f"⚠️ 無法讀取美股資料，請確認試算表內有『US_Portfolio』工作表。錯誤: {e}")
     PORTFOLIO_US = []
-    df_us = pd.DataFrame(columns=["Ticker", "Shares"])
+    df_us = pd.DataFrame(columns=["Ticker", "Shares", "複委託"])
 
 # 技術分析觀察清單
 TW_CORE = [
@@ -104,33 +122,29 @@ def get_fx_data():
 
 @st.cache_data(ttl=3600)
 def get_stock_data(sym):
-    """取得個股歷史資料並計算所需技術指標 (包含 MA, KD, MACD)"""
     df = yf.download(sym, period="3y", progress=False)
     if df.empty or len(df) < 252: return None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     df.index = df.index.tz_localize(None)
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
     
-    # 計算 MA
     df['MA10'] = df['Close'].rolling(10).mean()
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
     df['MA120'] = df['Close'].rolling(120).mean()
     df['MA240'] = df['Close'].rolling(240).mean()
     
-    # 計算日 KD
     low_min = df['Low'].rolling(9).min()
     high_max = df['High'].rolling(9).max()
     rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
     df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
     df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
     
-    # 計算日 MACD
     df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
     df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = df['EMA12'] - df['EMA26'] # DIF
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean() # DEA
-    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal'] # OSC (柱狀圖)
+    df['MACD'] = df['EMA12'] - df['EMA26']
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
     
     return df
 
@@ -141,14 +155,10 @@ def process_technical_analysis(sym, name):
         if df is None: return None
         market = '台股' if sym.endswith('.TW') or sym.endswith('.TWO') else '美股'
         
-        # 計算週線指標 (KD, MACD)
         df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-        
-        # 週 KD
         df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
         df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
         
-        # 週 MACD
         df_w['EMA12'] = df_w['Close'].ewm(span=12, adjust=False).mean()
         df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
         df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
@@ -162,7 +172,6 @@ def process_technical_analysis(sym, name):
         ma240 = float(df['MA240'].iloc[-1]) if pd.notna(df['MA240'].iloc[-1]) else 0
         high_52w = df['High'].tail(252).max()
         
-        # KD狀態判定
         k_d, d_d = float(df['K_d'].iloc[-1]), float(df['D_d'].iloc[-1])
         pk_d, pd_d = float(df['K_d'].iloc[-2]), float(df['D_d'].iloc[-2])
         k_w, d_w = float(df_w['K_w'].iloc[-1]), float(df_w['D_w'].iloc[-1])
@@ -171,7 +180,6 @@ def process_technical_analysis(sym, name):
         kd_d_status = "🟢 金叉轉強" if (k_d > d_d and pk_d <= pd_d) else ("🔴 死亡交叉" if (k_d < d_d and pk_d >= pd_d) else "趨勢延續")
         kd_w_status = "🟢 金叉轉強" if (k_w > d_w and pk_w <= pd_w) else ("🔴 死亡交叉" if (k_w < d_w and pk_w >= pd_w) else "趨勢延續")
 
-        # MACD狀態判定
         macd_d, macds_d = float(df['MACD'].iloc[-1]), float(df['MACD_Signal'].iloc[-1])
         pmacd_d, pmacds_d = float(df['MACD'].iloc[-2]), float(df['MACD_Signal'].iloc[-2])
         macd_w, macds_w = float(df_w['MACD'].iloc[-1]), float(df_w['MACD_Signal'].iloc[-1])
@@ -180,7 +188,6 @@ def process_technical_analysis(sym, name):
         macd_d_status = "🟢 金叉" if (macd_d > macds_d and pmacd_d <= pmacds_d) else ("🔴 死叉" if (macd_d < macds_d and pmacd_d >= pmacds_d) else "趨勢延續")
         macd_w_status = "🟢 金叉" if (macd_w > macds_w and pmacd_w <= pmacds_w) else ("🔴 死叉" if (macd_w < macds_w and pmacd_w >= pmacds_w) else "趨勢延續")
         
-        # 綜合狀態警示
         alerts = []
         if last_p < ma20: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
@@ -192,7 +199,6 @@ def process_technical_analysis(sym, name):
         if (k_w > d_w and pk_w <= pd_w) and k_w < 30: alerts.append("週KD低檔金叉")
         if (k_w < d_w and pk_w >= pd_w) and k_w > 70: alerts.append("週KD高檔死叉")
         
-        # MACD 零軸上下交叉警示
         if (macd_d > macds_d and pmacd_d <= pmacds_d) and macd_d < 0: alerts.append("日MACD零下金叉")
         if (macd_d < macds_d and pmacd_d >= pmacds_d) and macd_d > 0: alerts.append("日MACD零上死叉")
             
@@ -232,32 +238,50 @@ with tab1:
         asset_allocation = {}
         individual_holdings = [] 
 
+        # 處理台股加總 (Shares + 出借)
         for item in PORTFOLIO_TW:
-            if pd.notna(item.get('Ticker')) and pd.notna(item.get('Shares')):
-                ticker = get_yf_ticker_tw(str(item['Ticker']))
-                asset_type = classify_asset(str(item['Ticker']), 'TW')
+            if pd.notna(item.get('Ticker')):
+                ticker_str = str(item['Ticker']).strip()
+                if not ticker_str: continue
+                
+                ticker = get_yf_ticker_tw(ticker_str)
+                asset_type = classify_asset(ticker_str, 'TW')
                 price, div = get_basic_data(ticker)
-                shares = float(item['Shares'])
-                if price > 0:
-                    val = price * shares
-                    div_tot = div * shares
+                
+                # 安全讀取並加總
+                shares_own = safe_float(item.get('Shares'))
+                shares_lent = safe_float(item.get('出借'))
+                total_shares = shares_own + shares_lent
+                
+                if price > 0 and total_shares > 0:
+                    val = price * total_shares
+                    div_tot = div * total_shares
                     total_market_value += val
                     asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
                     total_dividends_2026 += div_tot
-                    individual_holdings.append({'標的': str(item['Ticker']), '市值': val, '股息': div_tot, '類別': '台股'})
+                    individual_holdings.append({'標的': ticker_str, '總市值': val, '股息': div_tot, '類別': '台股'})
 
+        # 處理美股加總 (Shares + 複委託)
         for item in PORTFOLIO_US:
-            if pd.notna(item.get('Ticker')) and pd.notna(item.get('Shares')):
-                asset_type = classify_asset(str(item['Ticker']), 'US')
-                price, div = get_basic_data(str(item['Ticker']))
-                shares = float(item['Shares'])
-                if price > 0:
-                    val = price * shares * usdtwd
-                    div_tot = div * shares * usdtwd
+            if pd.notna(item.get('Ticker')):
+                ticker_str = str(item['Ticker']).strip()
+                if not ticker_str: continue
+                
+                asset_type = classify_asset(ticker_str, 'US')
+                price, div = get_basic_data(ticker_str)
+                
+                # 安全讀取並加總
+                shares_own = safe_float(item.get('Shares'))
+                shares_sub = safe_float(item.get('複委託'))
+                total_shares = shares_own + shares_sub
+                
+                if price > 0 and total_shares > 0:
+                    val = price * total_shares * usdtwd
+                    div_tot = div * total_shares * usdtwd
                     total_market_value += val
                     asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
                     total_dividends_2026 += div_tot
-                    individual_holdings.append({'標的': str(item['Ticker']), '市值': val, '股息': div_tot, '類別': '美股'})
+                    individual_holdings.append({'標的': ticker_str, '總市值': val, '股息': div_tot, '類別': '美股'})
 
     col1, col2, col3 = st.columns(3)
     col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
@@ -289,13 +313,13 @@ with tab1:
 
     st.divider()
 
-    st.subheader("📊 各標的市值與股息分佈")
+    st.subheader("📊 各標的總市值與股息分佈")
     df_ind = pd.DataFrame(individual_holdings)
     if not df_ind.empty:
-        df_ind_sorted = df_ind.sort_values(by='市值', ascending=True)
+        df_ind_sorted = df_ind.sort_values(by='總市值', ascending=True)
         col_bar1, col_bar2 = st.columns(2)
         with col_bar1:
-            fig_mv_bar = px.bar(df_ind_sorted, x='市值', y='標的', orientation='h', title='各標的市值 (TWD)', color='類別', text_auto='.2s')
+            fig_mv_bar = px.bar(df_ind_sorted, x='總市值', y='標的', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s')
             fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
             st.plotly_chart(fig_mv_bar, use_container_width=True)
         with col_bar2:
@@ -336,12 +360,9 @@ with tab2:
                 use_container_width=True,
                 height=450
             )
-        else:
-            st.warning("目前無法取得技術分析資料，請稍後再試。")
 
     st.divider()
     
-    # 互動式技術線圖區塊 (K線 + KD + MACD)
     st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
     selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
     
@@ -349,27 +370,25 @@ with tab2:
         sym = target_options[selected_name]
         df_chart = get_stock_data(sym)
         if df_chart is not None:
-            df_plot = df_chart.tail(150) # 取近 150 個交易日作圖
+            df_plot = df_chart.tail(150)
             
-            # 建立三層子圖
             fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                      vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
                                      subplot_titles=(selected_name, "日 KD 指標", "MACD 指標 (12,26,9)"))
             
-            # Row 1: K線圖與均線
+            # Row 1
             fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='orange', width=1.5), name='MA60'), row=1, col=1)
             
-            # Row 2: KD指標
+            # Row 2
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值 (日)'), row=2, col=1)
             fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
             fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
             
-            # Row 3: MACD 指標
-            # 台股習慣：正值紅色(多頭動能)，負值綠色(空頭動能)
+            # Row 3
             macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
             fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC 柱狀圖'), row=3, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD (DIF)'), row=3, col=1)
