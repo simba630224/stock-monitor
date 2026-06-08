@@ -24,9 +24,16 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def load_data():
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
     df_us = conn.read(worksheet="US_Portfolio", ttl=0)
-    # 補全必要欄位
-    for col in ['Shares', '出借']: if col not in df_tw.columns: df_tw[col] = 0.0
-    for col in ['Shares', '複委託']: if col not in df_us.columns: df_us[col] = 0.0
+    
+    # 修正後的補全欄位語法
+    for col in ['Shares', '出借']:
+        if col not in df_tw.columns:
+            df_tw[col] = 0.0
+            
+    for col in ['Shares', '複委託']:
+        if col not in df_us.columns:
+            df_us[col] = 0.0
+            
     return df_tw, df_us
 
 df_tw, df_us = load_data()
@@ -36,6 +43,8 @@ st.title("📊 個人投資組合儀表板")
 if st.button("🔄 強制重新整理所有數據"):
     st.cache_data.clear()
     st.rerun()
+
+st.caption(f"數據更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # 準備批次查詢清單
 tw_symbols = [f"{s}.TW" for s in df_tw['Ticker'].astype(str)]
@@ -61,7 +70,7 @@ for _, row in df_us.iterrows():
 
 st.metric("總市值 (TWD)", f"${total_val:,.0f}")
 
-# --- 側邊欄管理 (新增/刪除功能) ---
+# --- 側邊欄管理 ---
 with st.sidebar:
     st.header("📝 持股雲端管理")
     
