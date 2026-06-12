@@ -62,6 +62,7 @@ TW_CORE = [
     {'symbol': '2330.TW', 'name': '台積電'}, {'symbol': '2317.TW', 'name': '鴻海'},
     {'symbol': '2454.TW', 'name': '聯發科'}, {'symbol': '2308.TW', 'name': '台達電'},
     {'symbol': '3008.TW', 'name': '大立光'}, {'symbol': '0050.TW', 'name': '元大台灣50'},
+    {'symbol': '006208.TW', 'name': '富邦台50'},
     {'symbol': '00878.TW', 'name': '國泰永續高股息'}, {'symbol': '00713.TW', 'name': '元大台灣高息低波'},
     {'symbol': '00919.TW', 'name': '群益台灣精選高息'}, {'symbol': '009812.TW', 'name': '野村日本東證ETF'},
     {'symbol': '00922.TW', 'name': '國泰台灣領袖50'}, {'symbol': '00923.TW', 'name': '群益台灣ESG低碳'},
@@ -72,11 +73,12 @@ TW_CORE = [
 US_WATCH = [
     {'symbol': 'NVDA', 'name': '輝達 Nvidia'}, {'symbol': 'MSFT', 'name': '微軟 Microsoft'},
     {'symbol': 'GOOGL', 'name': '谷歌 Google'}, {'symbol': 'VOO', 'name': '標普500 VOO'},
-    {'symbol': 'QQQ', 'name': '納斯達克 QQQ'}
+    {'symbol': 'QQQ', 'name': '納斯達克 QQQ'}, {'symbol': 'VT', 'name': '領航全球股票 VT'},
+    {'symbol': 'VWRA.L', 'name': '富時全球全指 VWRA'}
 ]
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (加入重試與防擋機制)
+# 2. 核心抓取與計算邏輯 (加入台美股均線分流)
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
@@ -140,6 +142,8 @@ def get_fx_data():
 
 @st.cache_data(ttl=900)
 def get_stock_data(sym):
+    """抓取股票歷史資料並計算技術指標 (包含台美股均線分流計算)"""
+    is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     for _ in range(3):
         try:
             time.sleep(0.3)
@@ -149,18 +153,27 @@ def get_stock_data(sym):
                 df.index = df.index.tz_localize(None)
                 df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
                 
+                # 均線分流計算
                 df['MA10'] = df['Close'].rolling(10).mean()
                 df['MA20'] = df['Close'].rolling(20).mean()
-                df['MA60'] = df['Close'].rolling(60).mean()
-                df['MA120'] = df['Close'].rolling(120).mean()
-                df['MA240'] = df['Close'].rolling(240).mean()
                 
+                if is_tw:
+                    df['季線'] = df['Close'].rolling(60).mean()
+                    df['半年線'] = df['Close'].rolling(120).mean()
+                    df['年線'] = df['Close'].rolling(240).mean()
+                else:
+                    df['季線'] = df['Close'].rolling(50).mean()
+                    df['半年線'] = df['Close'].rolling(100).mean()
+                    df['年線'] = df['Close'].rolling(200).mean()
+                
+                # KD 計算
                 low_min = df['Low'].rolling(9).min()
                 high_max = df['High'].rolling(9).max()
                 rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
                 df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
                 df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
                 
+                # MACD 計算
                 df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
                 df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
                 df['MACD'] = df['EMA12'] - df['EMA26']
@@ -177,8 +190,10 @@ def process_technical_analysis(sym, name):
     try:
         df = get_stock_data(sym)
         if df is None: return None
-        market = '台股' if sym.endswith('.TW') or sym.endswith('.TWO') else '美股'
+        is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
+        market = '台股' if is_tw else '美股'
         
+        # 週線資料轉置與指標計算
         df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
         df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
         df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
@@ -188,12 +203,12 @@ def process_technical_analysis(sym, name):
         df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
         df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
         
+        # 讀取最新指標值
         last_p = float(df['Close'].iloc[-1])
-        ma10 = float(df['MA10'].iloc[-1]) if pd.notna(df['MA10'].iloc[-1]) else 0
         ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0
-        ma60 = float(df['MA60'].iloc[-1]) if pd.notna(df['MA60'].iloc[-1]) else 0
-        ma120 = float(df['MA120'].iloc[-1]) if pd.notna(df['MA120'].iloc[-1]) else 0
-        ma240 = float(df['MA240'].iloc[-1]) if pd.notna(df['MA240'].iloc[-1]) else 0
+        ma_season = float(df['季線'].iloc[-1]) if pd.notna(df['季線'].iloc[-1]) else 0
+        ma_half = float(df['半年線'].iloc[-1]) if pd.notna(df['半年線'].iloc[-1]) else 0
+        ma_year = float(df['年線'].iloc[-1]) if pd.notna(df['年線'].iloc[-1]) else 0
         high_52w = df['High'].tail(252).max()
         
         k_d, d_d = float(df['K_d'].iloc[-1]), float(df['D_d'].iloc[-1])
@@ -212,6 +227,7 @@ def process_technical_analysis(sym, name):
         macd_d_status = "🟢 金叉" if (macd_d > macds_d and pmacd_d <= pmacds_d) else ("🔴 死叉" if (macd_d < macds_d and pmacd_d >= pmacds_d) else "趨勢延續")
         macd_w_status = "🟢 金叉" if (macd_w > macds_w and pmacd_w <= pmacds_w) else ("🔴 死叉" if (macd_w < macds_w and pmacd_w >= pmacds_w) else "趨勢延續")
         
+        # 警示判斷
         alerts = []
         if last_p < ma20: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
@@ -237,7 +253,7 @@ def process_technical_analysis(sym, name):
         return {
             "市場": market, "標的": f"{name} ({sym})", 
             "狀態警示": alert_str, "收盤價": last_p, "近一年高點": high_52w,
-            "MA10": ma10, "MA20": ma20, "MA60": ma60, "MA120": ma120, "MA240": ma240,
+            "MA20": ma20, "季線": ma_season, "半年線": ma_half, "年線": ma_year,
             "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
             "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})",
             "日MACD": f"DIF:{macd_d:.2f} ({macd_d_status})",
@@ -361,7 +377,7 @@ with tab1:
 
 with tab2:
     st.subheader("🎯 觀察清單技術面掃描")
-    st.markdown("自動警示跌破月線、高點回落，以及 **KD / MACD 黃金與死亡交叉**。")
+    st.markdown("自動警示跌破月線、高點回落，以及 **KD / MACD 黃金與死亡交叉**。（台股採 60/120/240日線；美股採 50/100/200日線）")
     
     with st.spinner("正在計算各標的技術指標..."):
         ta_results = []
@@ -382,7 +398,9 @@ with tab2:
                     "狀態警示": st.column_config.TextColumn("🚨 狀態警示", width="large"),
                     "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
                     "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
-                    "MA60": st.column_config.NumberColumn("MA60", format="%.2f"),
+                    "季線": st.column_config.NumberColumn("季線", format="%.2f"),
+                    "半年線": st.column_config.NumberColumn("半年線", format="%.2f"),
+                    "年線": st.column_config.NumberColumn("年線", format="%.2f"),
                     "日KD": st.column_config.TextColumn("日 KD 狀態", width="medium"),
                     "週KD": st.column_config.TextColumn("週 KD 狀態", width="medium"),
                     "日MACD": st.column_config.TextColumn("日 MACD", width="medium"),
@@ -403,24 +421,30 @@ with tab2:
         df_chart = get_stock_data(sym)
         if df_chart is not None:
             df_plot = df_chart.tail(150)
+            is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
+            
+            # 定義線圖上的均線 Label 提示
+            season_label = "MA60 (季線)" if is_tw else "MA50 (季線)"
+            half_label = "MA120 (半年線)" if is_tw else "MA100 (半年線)"
             
             fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                      vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
                                      subplot_titles=(selected_name, "日 KD 指標", "MACD 指標 (12,26,9)"))
             
-            # Row 1
+            # Row 1: K線與均線
             fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA60'], line=dict(color='orange', width=1.5), name='MA60'), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name=season_label), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['半年線'], line=dict(color='magenta', width=1.5), name=half_label), row=1, col=1)
             
-            # Row 2
+            # Row 2: KD
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值 (日)'), row=2, col=1)
             fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
             fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
             
-            # Row 3
+            # Row 3: MACD
             macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
             fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC 柱狀圖'), row=3, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD (DIF)'), row=3, col=1)
