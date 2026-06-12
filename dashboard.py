@@ -78,7 +78,7 @@ US_WATCH = [
 ]
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (加入台美股均線分流)
+# 2. 核心抓取與計算邏輯 (均線分流)
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
@@ -142,7 +142,7 @@ def get_fx_data():
 
 @st.cache_data(ttl=900)
 def get_stock_data(sym):
-    """抓取股票歷史資料並計算技術指標 (包含台美股均線分流計算)"""
+    """抓取股票歷史資料並計算技術指標 (台美股均線分流，抓取 3 年份基礎數據以支援長線觀測)"""
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     for _ in range(3):
         try:
@@ -414,29 +414,47 @@ with tab2:
     st.divider()
     
     st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
-    selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
     
+    # 🌟 關鍵新增：在圖表上方建立兩列控制選項，加入「時間範圍控制」
+    col_select_stock, col_select_period = st.columns([2, 1])
+    with col_select_stock:
+        selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
+    with col_select_period:
+        # 讓使用者可以動態切換時間長度
+        period_label = st.selectbox("請選擇 K 線圖時間軸顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
+    
+    # 依據使用者的選擇對應資料切片天數
+    if period_label == "半年 (150日)":
+        tail_days = 150
+    elif period_label == "一年 (252日)":
+        tail_days = 252
+    else:
+        tail_days = 9999  # 顯示全部 3 年內所有數據
+        
     if selected_name:
         sym = target_options[selected_name]
         df_chart = get_stock_data(sym)
         if df_chart is not None:
-            df_plot = df_chart.tail(150)
+            # 🌟 動態讀取對應的資料長度
+            df_plot = df_chart.tail(tail_days)
             is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
             
             # 定義線圖上的均線 Label 提示
             season_label = "MA60 (季線)" if is_tw else "MA50 (季線)"
             half_label = "MA120 (半年線)" if is_tw else "MA100 (半年線)"
+            year_label = "MA240 (年線)" if is_tw else "MA200 (年線)"
             
             fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                      vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
-                                     subplot_titles=(selected_name, "日 KD 指標", "MACD 指標 (12,26,9)"))
+                                     subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指標 (12,26,9)"))
             
-            # Row 1: K線與均線
+            # Row 1: K線與均線 (加入年線顯示，方便長線觀察)
             fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name=season_label), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['半年線'], line=dict(color='magenta', width=1.5), name=half_label), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['年線'], line=dict(color='cyan', width=1.5), name=year_label), row=1, col=1)
             
             # Row 2: KD
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
@@ -482,4 +500,4 @@ with st.sidebar:
                     conn.update(worksheet="US_Portfolio", data=edited_df_us)
                     st.success("✅ 美股更新成功！請重新整理網頁。")
                 except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("美股清單目前為空或未連線。")
+    else: st.info("美股清單目前為空或未連線. ")
