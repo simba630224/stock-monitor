@@ -38,11 +38,12 @@ try:
     # 自動補齊台股所需欄位
     if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
     if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
+    if '類別' not in df_tw.columns: df_tw['類別'] = '台股'  # 🌟 新增預設類別欄位
     PORTFOLIO_TW = df_tw.to_dict('records')
 except Exception as e:
     st.error(f"⚠️ 無法讀取台股資料，請確認試算表內有『TW_Portfolio』工作表。錯誤: {e}")
     PORTFOLIO_TW = []
-    df_tw = pd.DataFrame(columns=["Ticker", "Shares", "出借"])
+    df_tw = pd.DataFrame(columns=["Ticker", "Shares", "出借", "類別"])
 
 # 讀取美股
 try:
@@ -51,17 +52,19 @@ try:
     # 自動補齊美股所需欄位
     if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
     if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
+    if '類別' not in df_us.columns: df_us['類別'] = '美股'  # 🌟 新增預設類別欄位
     PORTFOLIO_US = df_us.to_dict('records')
 except Exception as e:
     st.warning(f"⚠️ 無法讀取美股資料，請確認試算表內有『US_Portfolio』工作表。錯誤: {e}")
     PORTFOLIO_US = []
-    df_us = pd.DataFrame(columns=["Ticker", "Shares", "複委託"])
+    df_us = pd.DataFrame(columns=["Ticker", "Shares", "複委託", "類別"])
 
 # 技術分析觀察清單
 TW_CORE = [
     {'symbol': '2330.TW', 'name': '台積電'}, {'symbol': '2317.TW', 'name': '鴻海'},
     {'symbol': '2454.TW', 'name': '聯發科'}, {'symbol': '2308.TW', 'name': '台達電'},
     {'symbol': '3008.TW', 'name': '大立光'}, {'symbol': '0050.TW', 'name': '元大台灣50'},
+    {'symbol': '006208.TW', 'name': '富邦台50'},
     {'symbol': '00878.TW', 'name': '國泰永續高股息'}, {'symbol': '00713.TW', 'name': '元大台灣高息低波'},
     {'symbol': '00919.TW', 'name': '群益台灣精選高息'}, {'symbol': '009812.TW', 'name': '野村日本東證ETF'},
     {'symbol': '00922.TW', 'name': '國泰台灣領袖50'}, {'symbol': '00923.TW', 'name': '群益台灣ESG低碳'},
@@ -77,27 +80,11 @@ US_WATCH = [
 ]
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (均線分流)
+# 2. 核心抓取與計算邏輯
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
     return f"{ticker}.TWO" if re.match(r'^\d+B$', ticker) else f"{ticker}.TW"
-
-def classify_asset(ticker, market):
-    ticker = str(ticker).strip().upper()
-    if ticker in ['VT', 'VWRA.L', '009812', '009812.TW']: return '全球ETF'
-    if market == 'TW':
-        if ticker.endswith('B'): return '債券ETF'
-        if ticker.startswith('00'):
-            if ticker in ['00646', '00757', '00662', '00830', '009811', '00712', '00717', '009800', '009813','009815', '00988A']: return '美股ETF與個股'
-            if ticker in ['0050', '006208', '00692', '00922', '00923']: return '台股市值型ETF'
-            if ticker in ['0056', '00878', '00919', '00713']: return '台股高股息型ETF'
-            return '台股其他ETF'
-        return '台股個股'
-    elif market == 'US':
-        if ticker in ['BND', 'BNDW', 'BNDX', 'IEF', 'TLT', 'SHY']: return '債券ETF'
-        return '美股ETF與個股'
-    return '其他'
 
 @st.cache_data(ttl=900)
 def get_basic_data(ticker):
@@ -141,7 +128,6 @@ def get_fx_data():
 
 @st.cache_data(ttl=900)
 def get_stock_data(sym):
-    """抓取股票歷史資料並計算技術指標 (台美股均線分流，抓取 3 年份基礎數據以支援長線觀測)"""
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     for _ in range(3):
         try:
@@ -152,7 +138,6 @@ def get_stock_data(sym):
                 df.index = df.index.tz_localize(None)
                 df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
                 
-                # 均線分流計算
                 df['MA10'] = df['Close'].rolling(10).mean()
                 df['MA20'] = df['Close'].rolling(20).mean()
                 
@@ -165,14 +150,12 @@ def get_stock_data(sym):
                     df['半年線'] = df['Close'].rolling(100).mean()
                     df['年線'] = df['Close'].rolling(200).mean()
                 
-                # KD 計算
                 low_min = df['Low'].rolling(9).min()
                 high_max = df['High'].rolling(9).max()
                 rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
                 df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
                 df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
                 
-                # MACD 計算
                 df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
                 df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
                 df['MACD'] = df['EMA12'] - df['EMA26']
@@ -192,7 +175,6 @@ def process_technical_analysis(sym, name):
         is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
         market = '台股' if is_tw else '美股'
         
-        # 週線資料轉置與指標計算
         df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
         df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
         df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
@@ -202,7 +184,6 @@ def process_technical_analysis(sym, name):
         df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
         df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
         
-        # 讀取最新指標值
         last_p = float(df['Close'].iloc[-1])
         ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0
         ma_season = float(df['季線'].iloc[-1]) if pd.notna(df['季線'].iloc[-1]) else 0
@@ -226,7 +207,6 @@ def process_technical_analysis(sym, name):
         macd_d_status = "🟢 金叉" if (macd_d > macds_d and pmacd_d <= pmacds_d) else ("🔴 死叉" if (macd_d < macds_d and pmacd_d >= pmacds_d) else "趨勢延續")
         macd_w_status = "🟢 金叉" if (macd_w > macds_w and pmacd_w <= pmacds_w) else ("🔴 死叉" if (macd_w < macds_w and pmacd_w >= pmacds_w) else "趨勢延續")
         
-        # 警示判斷
         alerts = []
         if last_p < ma20: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
@@ -267,7 +247,6 @@ def process_technical_analysis(sym, name):
 # ==========================================
 st.title("📊 個人投資組合與技術分析儀表板")
 
-# 加入強制更新按鈕與即時時間顯示
 col_btn, col_time = st.columns([1, 4])
 with col_btn:
     if st.button("🔄 強制刷新報價"):
@@ -285,17 +264,19 @@ with tab1:
         asset_allocation = {}
         individual_holdings = [] 
 
-        # 處理台股加總 (Shares + 出借)
+        # 🌟 處理台股加總 (改由試算表的「類別」欄位主導)
         for item in PORTFOLIO_TW:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
                 if not ticker_str: continue
                 
                 ticker = get_yf_ticker_tw(ticker_str)
-                asset_type = classify_asset(ticker_str, 'TW')
-                price, div = get_basic_data(ticker)
                 
-                # 安全讀取並加總
+                # 直接讀取試算表中的類別 (若空白則預設為台股未分類)
+                asset_type = str(item.get('類別', '台股')).strip()
+                if not asset_type or asset_type == 'nan': asset_type = '台股未分類'
+                
+                price, div = get_basic_data(ticker)
                 shares_own = safe_float(item.get('Shares'))
                 shares_lent = safe_float(item.get('出借'))
                 total_shares = shares_own + shares_lent
@@ -306,18 +287,32 @@ with tab1:
                     total_market_value += val
                     asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
                     total_dividends_2026 += div_tot
-                    individual_holdings.append({'標的': ticker_str, '總市值': val, '股息': div_tot, '類別': '台股'})
+                    
+                    # 🌟 判斷是否顯示為「張」或「股」
+                    if total_shares >= 1000 and total_shares % 1000 == 0:
+                        disp_qty = f"{int(total_shares/1000)}張"
+                    else:
+                        disp_qty = f"{total_shares:g}股"
+                        
+                    individual_holdings.append({
+                        '標的': ticker_str, 
+                        '標的與股數': f"{ticker_str} ({disp_qty})", # 顯示用標籤
+                        '總市值': val, 
+                        '股息': div_tot, 
+                        '類別': asset_type,
+                        '總股數': total_shares
+                    })
 
-        # 處理美股加總 (Shares + 複委託)
+        # 🌟 處理美股加總 (改由試算表的「類別」欄位主導)
         for item in PORTFOLIO_US:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
                 if not ticker_str: continue
                 
-                asset_type = classify_asset(ticker_str, 'US')
-                price, div = get_basic_data(ticker_str)
+                asset_type = str(item.get('類別', '美股')).strip()
+                if not asset_type or asset_type == 'nan': asset_type = '美股未分類'
                 
-                # 安全讀取並加總
+                price, div = get_basic_data(ticker_str)
                 shares_own = safe_float(item.get('Shares'))
                 shares_sub = safe_float(item.get('複委託'))
                 total_shares = shares_own + shares_sub
@@ -328,7 +323,17 @@ with tab1:
                     total_market_value += val
                     asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
                     total_dividends_2026 += div_tot
-                    individual_holdings.append({'標的': ticker_str, '總市值': val, '股息': div_tot, '類別': '美股'})
+                    
+                    disp_qty = f"{total_shares:g}股"
+                    
+                    individual_holdings.append({
+                        '標的': ticker_str, 
+                        '標的與股數': f"{ticker_str} ({disp_qty})", # 顯示用標籤
+                        '總市值': val, 
+                        '股息': div_tot, 
+                        '類別': asset_type,
+                        '總股數': total_shares
+                    })
 
     col1, col2, col3 = st.columns(3)
     col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
@@ -363,15 +368,21 @@ with tab1:
     st.subheader("📊 各標的總市值與股息分佈")
     df_ind = pd.DataFrame(individual_holdings)
     if not df_ind.empty:
+        # 以總市值排序，讓圖表更美觀
         df_ind_sorted = df_ind.sort_values(by='總市值', ascending=True)
         col_bar1, col_bar2 = st.columns(2)
+        
         with col_bar1:
-            fig_mv_bar = px.bar(df_ind_sorted, x='總市值', y='標的', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s')
+            # 🌟 Y 軸改用包含張數的「標的與股數」，並在 hover_data 內加入明確資訊
+            fig_mv_bar = px.bar(df_ind_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'])
             fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
+            fig_mv_bar.update_yaxes(title='標的 (總數量)')
             st.plotly_chart(fig_mv_bar, use_container_width=True)
+            
         with col_bar2:
-            fig_div_bar = px.bar(df_ind_sorted, x='股息', y='標的', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s')
+            fig_div_bar = px.bar(df_ind_sorted, x='股息', y='標的與股數', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'])
             fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
+            fig_div_bar.update_yaxes(title='標的 (總數量)')
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 with tab2:
@@ -393,110 +404,4 @@ with tab2:
                 df_ta, 
                 column_config={
                     "市場": st.column_config.TextColumn("市場", width="small"),
-                    "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
-                    "狀態警示": st.column_config.TextColumn("🚨 狀態警示", width="large"),
-                    "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                    "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
-                    "季線": st.column_config.NumberColumn("季線", format="%.2f"),
-                    "半年線": st.column_config.NumberColumn("半年線", format="%.2f"),
-                    "年線": st.column_config.NumberColumn("年線", format="%.2f"),
-                    "日KD": st.column_config.TextColumn("日 KD 狀態", width="medium"),
-                    "週KD": st.column_config.TextColumn("週 KD 狀態", width="medium"),
-                    "日MACD": st.column_config.TextColumn("日 MACD", width="medium"),
-                    "週MACD": st.column_config.TextColumn("週 MACD", width="medium"),
-                },
-                hide_index=True,
-                use_container_width=True,
-                height=450
-            )
-
-    st.divider()
-    
-    st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
-    
-    # 🌟 關鍵新增：在圖表上方建立兩列控制選項，加入「時間範圍控制」
-    col_select_stock, col_select_period = st.columns([2, 1])
-    with col_select_stock:
-        selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
-    with col_select_period:
-        # 讓使用者可以動態切換時間長度
-        period_label = st.selectbox("請選擇 K 線圖時間軸顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
-    
-    # 依據使用者的選擇對應資料切片天數
-    if period_label == "半年 (150日)":
-        tail_days = 150
-    elif period_label == "一年 (252日)":
-        tail_days = 252
-    else:
-        tail_days = 9999  # 顯示全部 3 年內所有數據
-        
-    if selected_name:
-        sym = target_options[selected_name]
-        df_chart = get_stock_data(sym)
-        if df_chart is not None:
-            # 🌟 動態讀取對應的資料長度
-            df_plot = df_chart.tail(tail_days)
-            is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
-            
-            # 定義線圖上的均線 Label 提示
-            season_label = "MA60 (季線)" if is_tw else "MA50 (季線)"
-            half_label = "MA120 (半年線)" if is_tw else "MA100 (半年線)"
-            year_label = "MA240 (年線)" if is_tw else "MA200 (年線)"
-            
-            fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                                     vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
-                                     subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指標 (12,26,9)"))
-            
-            # Row 1: K線與均線 (加入年線顯示，方便長線觀察)
-            fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name=season_label), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['半年線'], line=dict(color='magenta', width=1.5), name=half_label), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['年線'], line=dict(color='cyan', width=1.5), name=year_label), row=1, col=1)
-            
-            # Row 2: KD
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值 (日)'), row=2, col=1)
-            fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
-            fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
-            
-            # Row 3: MACD
-            macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
-            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC 柱狀圖'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD (DIF)'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal (DEA)'), row=3, col=1)
-            
-            fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
-            st.plotly_chart(fig_tech, use_container_width=True)
-
-# ==========================================
-# 4. 後台管理介面 (側邊欄雙分頁編輯)
-# ==========================================
-with st.sidebar:
-    st.header("📝 持股雲端管理")
-    st.markdown("直接在此編輯股數，並點擊下方按鈕同步至 Google Sheets。")
-    
-    st.subheader("🇹🇼 台股持股")
-    if not df_tw.empty:
-        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
-        if st.button("💾 儲存台股變更", use_container_width=True):
-            with st.spinner("正在寫入台股資料..."):
-                try:
-                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
-                    st.success("✅ 台股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("台股清單目前為空或未連線。")
-
-    st.divider()
-
-    st.subheader("🇺🇸 美股持股")
-    if not df_us.empty:
-        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
-        if st.button("💾 儲存美股變更", use_container_width=True):
-            with st.spinner("正在寫入美股資料..."):
-                try:
-                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
-                    st.success("✅ 美股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("美股清單目前為空或未連線. ")
+                    "標的": st.
