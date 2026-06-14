@@ -474,4 +474,40 @@ with tab2:
             fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
             
             macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
-            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'],
+            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC 柱狀圖'), row=3, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD (DIF)'), row=3, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal (DEA)'), row=3, col=1)
+            
+            fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
+            st.plotly_chart(fig_tech, use_container_width=True)
+
+# ==========================================
+# 4. 後台管理介面 (側邊欄雙分頁編輯)
+# ==========================================
+with st.sidebar:
+    st.header("📝 持股雲端管理")
+    st.markdown("直接在此編輯股數，並點擊下方按鈕同步至 Google Sheets。您也可以直接修改「類別」來自訂資產配置群組！")
+    
+    st.subheader("🇹🇼 台股持股")
+    if not df_tw.empty:
+        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
+        if st.button("💾 儲存台股變更", use_container_width=True):
+            with st.spinner("正在寫入台股資料..."):
+                try:
+                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
+                    st.success("✅ 台股更新成功！請重新整理網頁。")
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("台股清單目前為空或未連線。")
+
+    st.divider()
+
+    st.subheader("🇺🇸 美股持股")
+    if not df_us.empty:
+        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
+        if st.button("💾 儲存美股變更", use_container_width=True):
+            with st.spinner("正在寫入美股資料..."):
+                try:
+                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    st.success("✅ 美股更新成功！請重新整理網頁。")
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("美股清單目前為空或未連線。")
