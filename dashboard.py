@@ -35,7 +35,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 try:
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
     df_tw = df_tw.dropna(subset=['Ticker'])
-    # 自動補齊台股所需欄位
     if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
     if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
     if '類別' not in df_tw.columns: df_tw['類別'] = '台股'
@@ -49,7 +48,6 @@ except Exception as e:
 try:
     df_us = conn.read(worksheet="US_Portfolio", ttl=0)
     df_us = df_us.dropna(subset=['Ticker'])
-    # 自動補齊美股所需欄位
     if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
     if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
     if '類別' not in df_us.columns: df_us['類別'] = '美股'
@@ -264,7 +262,7 @@ with tab1:
         asset_allocation = {}
         individual_holdings = [] 
 
-        # 處理台股加總 (改由試算表的「類別」欄位主導)
+        # 處理台股加總
         for item in PORTFOLIO_TW:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
@@ -300,7 +298,7 @@ with tab1:
                         '總股數': total_shares
                     })
 
-        # 處理美股加總 (改由試算表的「類別」欄位主導)
+        # 處理美股加總
         for item in PORTFOLIO_US:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
@@ -339,12 +337,22 @@ with tab1:
 
     st.divider()
     
+    # 🌟 建立全域一致的類別顏色對應表 (Color Map)
+    df_ind = pd.DataFrame(individual_holdings)
+    category_color_map = {}
+    if not df_ind.empty:
+        unique_categories = df_ind['類別'].unique().tolist()
+        # 結合兩種色系確保顏色夠用且具備高對比度
+        plotly_colors = px.colors.qualitative.Safe + px.colors.qualitative.Plotly 
+        category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, cat in enumerate(unique_categories)}
+    
     col_chart, col_fx = st.columns([1, 1])
     with col_chart:
         st.subheader("資產配置佔比")
         if asset_allocation:
             df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
-            fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4)
+            # 🌟 圓餅圖套用全域顏色對應表
+            fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4, color='資產類別', color_discrete_map=category_color_map)
             fig_pie.update_traces(textposition='inside', textinfo='percent+label')
             fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
@@ -363,20 +371,25 @@ with tab1:
     st.divider()
 
     st.subheader("📊 各標的總市值與股息分佈")
-    df_ind = pd.DataFrame(individual_holdings)
     if not df_ind.empty:
-        df_ind_sorted = df_ind.sort_values(by='總市值', ascending=True)
         col_bar1, col_bar2 = st.columns(2)
         
         with col_bar1:
-            fig_mv_bar = px.bar(df_ind_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'])
-            fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
+            # 🌟 獨立為「總市值」做降冪排序 (在橫向長條圖中，設定 Ascending=True 代表畫布中由上往下是由大到小)
+            df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
+            # 套用全域顏色對應表
+            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
+            # 強制圖表 Y 軸按照我們排列好的順序顯示
+            fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
             fig_mv_bar.update_yaxes(title='標的 (總數量)')
             st.plotly_chart(fig_mv_bar, use_container_width=True)
             
         with col_bar2:
-            fig_div_bar = px.bar(df_ind_sorted, x='股息', y='標的與股數', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'])
-            fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False)
+            # 🌟 獨立為「股息」做降冪排序，確保與市值順序脫鉤
+            df_div_sorted = df_ind.sort_values(by='股息', ascending=True)
+            # 套用全域顏色對應表
+            fig_div_bar = px.bar(df_div_sorted, x='股息', y='標的與股數', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
+            fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
             fig_div_bar.update_yaxes(title='標的 (總數量)')
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
@@ -461,40 +474,4 @@ with tab2:
             fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
             
             macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
-            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC 柱狀圖'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD (DIF)'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal (DEA)'), row=3, col=1)
-            
-            fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
-            st.plotly_chart(fig_tech, use_container_width=True)
-
-# ==========================================
-# 4. 後台管理介面 (側邊欄雙分頁編輯)
-# ==========================================
-with st.sidebar:
-    st.header("📝 持股雲端管理")
-    st.markdown("直接在此編輯股數，並點擊下方按鈕同步至 Google Sheets。您也可以直接修改「類別」來自訂資產配置群組！")
-    
-    st.subheader("🇹🇼 台股持股")
-    if not df_tw.empty:
-        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
-        if st.button("💾 儲存台股變更", use_container_width=True):
-            with st.spinner("正在寫入台股資料..."):
-                try:
-                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
-                    st.success("✅ 台股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("台股清單目前為空或未連線。")
-
-    st.divider()
-
-    st.subheader("🇺🇸 美股持股")
-    if not df_us.empty:
-        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
-        if st.button("💾 儲存美股變更", use_container_width=True):
-            with st.spinner("正在寫入美股資料..."):
-                try:
-                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
-                    st.success("✅ 美股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("美股清單目前為空或未連線。")
+            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'],
