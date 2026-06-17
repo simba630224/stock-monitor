@@ -35,6 +35,8 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 try:
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
     df_tw = df_tw.dropna(subset=['Ticker'])
+    # 自動補齊所需欄位 (🌟 新增「名稱」欄位)
+    if '名稱' not in df_tw.columns: df_tw['名稱'] = ''
     if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
     if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
     if '類別' not in df_tw.columns: df_tw['類別'] = '台股'
@@ -42,12 +44,14 @@ try:
 except Exception as e:
     st.error(f"⚠️ 無法讀取台股資料，請確認試算表內有『TW_Portfolio』工作表。錯誤: {e}")
     PORTFOLIO_TW = []
-    df_tw = pd.DataFrame(columns=["Ticker", "Shares", "出借", "類別"])
+    df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
 
 # 讀取美股
 try:
     df_us = conn.read(worksheet="US_Portfolio", ttl=0)
     df_us = df_us.dropna(subset=['Ticker'])
+    # 自動補齊所需欄位 (🌟 新增「名稱」欄位)
+    if '名稱' not in df_us.columns: df_us['名稱'] = ''
     if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
     if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
     if '類別' not in df_us.columns: df_us['類別'] = '美股'
@@ -55,27 +59,7 @@ try:
 except Exception as e:
     st.warning(f"⚠️ 無法讀取美股資料，請確認試算表內有『US_Portfolio』工作表。錯誤: {e}")
     PORTFOLIO_US = []
-    df_us = pd.DataFrame(columns=["Ticker", "Shares", "複委託", "類別"])
-
-# 技術分析觀察清單
-TW_CORE = [
-    {'symbol': '2330.TW', 'name': '台積電'}, {'symbol': '2317.TW', 'name': '鴻海'},
-    {'symbol': '2454.TW', 'name': '聯發科'}, {'symbol': '2308.TW', 'name': '台達電'},
-    {'symbol': '3008.TW', 'name': '大立光'}, {'symbol': '0050.TW', 'name': '元大台灣50'},
-    {'symbol': '006208.TW', 'name': '富邦台50'},
-    {'symbol': '00878.TW', 'name': '國泰永續高股息'}, {'symbol': '00713.TW', 'name': '元大台灣高息低波'},
-    {'symbol': '00919.TW', 'name': '群益台灣精選高息'}, {'symbol': '009812.TW', 'name': '野村日本東證ETF'},
-    {'symbol': '00922.TW', 'name': '國泰台灣領袖50'}, {'symbol': '00923.TW', 'name': '群益台灣ESG低碳'},
-    {'symbol': '00830.TW', 'name': '國泰費城半導體'}, {'symbol': '00981A.TW', 'name': '主動統一台股增長'},
-    {'symbol': '00988A.TW', 'name': '主動統一全球創新'}, {'symbol': '009815.TW', 'name': '大華美國MAG7+'}
-]
-
-US_WATCH = [
-    {'symbol': 'NVDA', 'name': '輝達 Nvidia'}, {'symbol': 'MSFT', 'name': '微軟 Microsoft'},
-    {'symbol': 'GOOGL', 'name': '谷歌 Google'}, {'symbol': 'VOO', 'name': '標普500 VOO'},
-    {'symbol': 'QQQ', 'name': '納斯達克 QQQ'}, {'symbol': 'VT', 'name': '領航全球股票 VT'},
-    {'symbol': 'VWRA.L', 'name': '富時全球全指 VWRA'}
-]
+    df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
 # 2. 核心抓取與計算邏輯
@@ -277,6 +261,7 @@ with tab1:
                 shares_lent = safe_float(item.get('出借'))
                 total_shares = shares_own + shares_lent
                 
+                # 🌟 如果股數 > 0，才列入投資組合計算
                 if price > 0 and total_shares > 0:
                     val = price * total_shares
                     div_tot = div * total_shares
@@ -289,9 +274,13 @@ with tab1:
                     else:
                         disp_qty = f"{total_shares:g}股"
                         
+                    # 嘗試抓取名稱，若無則顯示代號
+                    name_str = str(item.get('名稱', '')).strip()
+                    display_name = name_str if name_str and name_str != 'nan' else ticker_str
+                        
                     individual_holdings.append({
-                        '標的': ticker_str, 
-                        '標的與股數': f"{ticker_str} ({disp_qty})", 
+                        '標的': display_name, 
+                        '標的與股數': f"{display_name} ({disp_qty})", 
                         '總市值': val, 
                         '股息': div_tot, 
                         '類別': asset_type,
@@ -312,6 +301,7 @@ with tab1:
                 shares_sub = safe_float(item.get('複委託'))
                 total_shares = shares_own + shares_sub
                 
+                # 🌟 如果股數 > 0，才列入投資組合計算
                 if price > 0 and total_shares > 0:
                     val = price * total_shares * usdtwd
                     div_tot = div * total_shares * usdtwd
@@ -321,9 +311,12 @@ with tab1:
                     
                     disp_qty = f"{total_shares:g}股"
                     
+                    name_str = str(item.get('名稱', '')).strip()
+                    display_name = name_str if name_str and name_str != 'nan' else ticker_str
+                    
                     individual_holdings.append({
-                        '標的': ticker_str, 
-                        '標的與股數': f"{ticker_str} ({disp_qty})", 
+                        '標的': display_name, 
+                        '標的與股數': f"{display_name} ({disp_qty})", 
                         '總市值': val, 
                         '股息': div_tot, 
                         '類別': asset_type,
@@ -337,12 +330,10 @@ with tab1:
 
     st.divider()
     
-    # 🌟 建立全域一致的類別顏色對應表 (Color Map)
     df_ind = pd.DataFrame(individual_holdings)
     category_color_map = {}
     if not df_ind.empty:
         unique_categories = df_ind['類別'].unique().tolist()
-        # 結合兩種色系確保顏色夠用且具備高對比度
         plotly_colors = px.colors.qualitative.Safe + px.colors.qualitative.Plotly 
         category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, cat in enumerate(unique_categories)}
     
@@ -351,7 +342,6 @@ with tab1:
         st.subheader("資產配置佔比")
         if asset_allocation:
             df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
-            # 🌟 圓餅圖套用全域顏色對應表
             fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4, color='資產類別', color_discrete_map=category_color_map)
             fig_pie.update_traces(textposition='inside', textinfo='percent+label')
             fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
@@ -375,36 +365,48 @@ with tab1:
         col_bar1, col_bar2 = st.columns(2)
         
         with col_bar1:
-            # 🌟 獨立為「總市值」做降冪排序 (在橫向長條圖中，設定 Ascending=True 代表畫布中由上往下是由大到小)
             df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
-            # 套用全域顏色對應表
             fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
-            # 強制圖表 Y 軸按照我們排列好的順序顯示
             fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
             fig_mv_bar.update_yaxes(title='標的 (總數量)')
             st.plotly_chart(fig_mv_bar, use_container_width=True)
             
         with col_bar2:
-            # 🌟 獨立為「股息」做降冪排序，確保與市值順序脫鉤
             df_div_sorted = df_ind.sort_values(by='股息', ascending=True)
-            # 套用全域顏色對應表
             fig_div_bar = px.bar(df_div_sorted, x='股息', y='標的與股數', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
             fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
             fig_div_bar.update_yaxes(title='標的 (總數量)')
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 with tab2:
-    st.subheader("🎯 觀察清單技術面掃描")
+    st.subheader("🎯 持股與觀察清單技術面掃描")
     st.markdown("自動警示跌破月線、高點回落，以及 **KD / MACD 黃金與死亡交叉**。（台股採 60/120/240日線；美股採 50/100/200日線）")
     
     with st.spinner("正在計算各標的技術指標..."):
         ta_results = []
         target_options = {} 
-        for item in TW_CORE + US_WATCH:
-            res = process_technical_analysis(item['symbol'], item['name'])
+        
+        # 🌟 直接掃描您的 Google Sheets 持股與觀察清單
+        scan_dict = {}
+        for item in PORTFOLIO_TW:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                sym = get_yf_ticker_tw(t)
+                name = str(item.get('名稱', '')).strip()
+                scan_dict[sym] = name if name and name != 'nan' else t
+                
+        for item in PORTFOLIO_US:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                name = str(item.get('名稱', '')).strip()
+                scan_dict[t] = name if name and name != 'nan' else t
+
+        # 執行技術分析計算
+        for sym, name in scan_dict.items():
+            res = process_technical_analysis(sym, name)
             if res: 
                 ta_results.append(res)
-                target_options[f"{item['name']} ({item['symbol']})"] = item['symbol']
+                target_options[f"{name} ({sym})"] = sym
             
         if ta_results:
             df_ta = pd.DataFrame(ta_results)
@@ -435,6 +437,7 @@ with tab2:
     
     col_select_stock, col_select_period = st.columns([2, 1])
     with col_select_stock:
+        # 下拉選單現在會顯示您設定的所有名稱
         selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
     with col_select_period:
         period_label = st.selectbox("請選擇 K 線圖時間軸顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
@@ -485,10 +488,10 @@ with tab2:
 # 4. 後台管理介面 (側邊欄雙分頁編輯)
 # ==========================================
 with st.sidebar:
-    st.header("📝 持股雲端管理")
-    st.markdown("直接在此編輯股數，並點擊下方按鈕同步至 Google Sheets。您也可以直接修改「類別」來自訂資產配置群組！")
+    st.header("📝 持股與觀察名單管理")
+    st.markdown("想要追蹤某檔股票嗎？**新增代號並將股數設為 0**，它就會自動加入技術分析掃描！")
     
-    st.subheader("🇹🇼 台股持股")
+    st.subheader("🇹🇼 台股清單")
     if not df_tw.empty:
         edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
         if st.button("💾 儲存台股變更", use_container_width=True):
@@ -501,7 +504,7 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("🇺🇸 美股持股")
+    st.subheader("🇺🇸 美股清單")
     if not df_us.empty:
         edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
         if st.button("💾 儲存美股變更", use_container_width=True):
