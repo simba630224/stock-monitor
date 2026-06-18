@@ -35,7 +35,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 try:
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
     df_tw = df_tw.dropna(subset=['Ticker'])
-    # 自動補齊所需欄位 (🌟 新增「名稱」欄位)
     if '名稱' not in df_tw.columns: df_tw['名稱'] = ''
     if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
     if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
@@ -50,7 +49,6 @@ except Exception as e:
 try:
     df_us = conn.read(worksheet="US_Portfolio", ttl=0)
     df_us = df_us.dropna(subset=['Ticker'])
-    # 自動補齊所需欄位 (🌟 新增「名稱」欄位)
     if '名稱' not in df_us.columns: df_us['名稱'] = ''
     if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
     if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
@@ -115,7 +113,8 @@ def get_stock_data(sym):
         try:
             time.sleep(0.3)
             df = yf.download(sym, period="3y", progress=False)
-            if not df.empty and len(df) >= 252:
+            # 🌟 解除上市一年的限制，只要有10天的資料就允許呈現！
+            if not df.empty and len(df) >= 10:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 df.index = df.index.tz_localize(None)
                 df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
@@ -158,46 +157,57 @@ def process_technical_analysis(sym, name):
         market = '台股' if is_tw else '美股'
         
         df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-        df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
-        df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
+        if not df_w.empty:
+            df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
+            df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
+            df_w['EMA12'] = df_w['Close'].ewm(span=12, adjust=False).mean()
+            df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
+            df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
+            df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
         
-        df_w['EMA12'] = df_w['Close'].ewm(span=12, adjust=False).mean()
-        df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
-        df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
-        df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
+        # 🌟 強化防呆：針對上市不到一年的標的，若均線算不出來自動補 0
+        last_p = float(df['Close'].iloc[-1]) if len(df) > 0 else 0
+        ma20 = float(df['MA20'].iloc[-1]) if len(df) > 0 and pd.notna(df['MA20'].iloc[-1]) else 0
+        ma_season = float(df['季線'].iloc[-1]) if len(df) > 0 and pd.notna(df['季線'].iloc[-1]) else 0
+        ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
+        ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
+        high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         
-        last_p = float(df['Close'].iloc[-1])
-        ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0
-        ma_season = float(df['季線'].iloc[-1]) if pd.notna(df['季線'].iloc[-1]) else 0
-        ma_half = float(df['半年線'].iloc[-1]) if pd.notna(df['半年線'].iloc[-1]) else 0
-        ma_year = float(df['年線'].iloc[-1]) if pd.notna(df['年線'].iloc[-1]) else 0
-        high_52w = df['High'].tail(252).max()
+        k_d = float(df['K_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['K_d'].iloc[-1]) else 0
+        d_d = float(df['D_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['D_d'].iloc[-1]) else 0
+        pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and pd.notna(df['K_d'].iloc[-2]) else 0
+        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and pd.notna(df['D_d'].iloc[-2]) else 0
         
-        k_d, d_d = float(df['K_d'].iloc[-1]), float(df['D_d'].iloc[-1])
-        pk_d, pd_d = float(df['K_d'].iloc[-2]), float(df['D_d'].iloc[-2])
-        k_w, d_w = float(df_w['K_w'].iloc[-1]), float(df_w['D_w'].iloc[-1])
-        pk_w, pd_w = float(df_w['K_w'].iloc[-2]), float(df_w['D_w'].iloc[-2])
+        k_w = float(df_w['K_w'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['K_w'].iloc[-1]) else 0
+        d_w = float(df_w['D_w'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['D_w'].iloc[-1]) else 0
+        pk_w = float(df_w['K_w'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['K_w'].iloc[-2]) else 0
+        pd_w = float(df_w['D_w'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['D_w'].iloc[-2]) else 0
+
+        macd_d = float(df['MACD'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD'].iloc[-1]) else 0
+        macds_d = float(df['MACD_Signal'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD_Signal'].iloc[-1]) else 0
+        pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0
+        pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0
+        
+        macd_w = float(df_w['MACD'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['MACD'].iloc[-1]) else 0
+        macds_w = float(df_w['MACD_Signal'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0
+        pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0
+        pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0
         
         kd_d_status = "🟢 金叉轉強" if (k_d > d_d and pk_d <= pd_d) else ("🔴 死亡交叉" if (k_d < d_d and pk_d >= pd_d) else "趨勢延續")
         kd_w_status = "🟢 金叉轉強" if (k_w > d_w and pk_w <= pd_w) else ("🔴 死亡交叉" if (k_w < d_w and pk_w >= pd_w) else "趨勢延續")
 
-        macd_d, macds_d = float(df['MACD'].iloc[-1]), float(df['MACD_Signal'].iloc[-1])
-        pmacd_d, pmacds_d = float(df['MACD'].iloc[-2]), float(df['MACD_Signal'].iloc[-2])
-        macd_w, macds_w = float(df_w['MACD'].iloc[-1]), float(df_w['MACD_Signal'].iloc[-1])
-        pmacd_w, pmacds_w = float(df_w['MACD'].iloc[-2]), float(df_w['MACD_Signal'].iloc[-2])
-        
         macd_d_status = "🟢 金叉" if (macd_d > macds_d and pmacd_d <= pmacds_d) else ("🔴 死叉" if (macd_d < macds_d and pmacd_d >= pmacds_d) else "趨勢延續")
         macd_w_status = "🟢 金叉" if (macd_w > macds_w and pmacd_w <= pmacds_w) else ("🔴 死叉" if (macd_w < macds_w and pmacd_w >= pmacds_w) else "趨勢延續")
         
         alerts = []
-        if last_p < ma20: alerts.append("跌破MA20")
+        if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
             alerts.append(f"回落{drop_pct:.1f}%")
             
-        if (k_d > d_d and pk_d <= pd_d) and k_d < 30: alerts.append("日KD低檔金叉")
+        if (k_d > d_d and pk_d <= pd_d) and k_d < 30 and k_d > 0: alerts.append("日KD低檔金叉")
         if (k_d < d_d and pk_d >= pd_d) and k_d > 70: alerts.append("日KD高檔死叉")
-        if (k_w > d_w and pk_w <= pd_w) and k_w < 30: alerts.append("週KD低檔金叉")
+        if (k_w > d_w and pk_w <= pd_w) and k_w < 30 and k_w > 0: alerts.append("週KD低檔金叉")
         if (k_w < d_w and pk_w >= pd_w) and k_w > 70: alerts.append("週KD高檔死叉")
         
         if (macd_d > macds_d and pmacd_d <= pmacds_d) and macd_d < 0: alerts.append("日MACD零下金叉")
@@ -246,7 +256,6 @@ with tab1:
         asset_allocation = {}
         individual_holdings = [] 
 
-        # 處理台股加總
         for item in PORTFOLIO_TW:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
@@ -261,7 +270,6 @@ with tab1:
                 shares_lent = safe_float(item.get('出借'))
                 total_shares = shares_own + shares_lent
                 
-                # 🌟 如果股數 > 0，才列入投資組合計算
                 if price > 0 and total_shares > 0:
                     val = price * total_shares
                     div_tot = div * total_shares
@@ -274,7 +282,6 @@ with tab1:
                     else:
                         disp_qty = f"{total_shares:g}股"
                         
-                    # 嘗試抓取名稱，若無則顯示代號
                     name_str = str(item.get('名稱', '')).strip()
                     display_name = name_str if name_str and name_str != 'nan' else ticker_str
                         
@@ -287,7 +294,6 @@ with tab1:
                         '總股數': total_shares
                     })
 
-        # 處理美股加總
         for item in PORTFOLIO_US:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
@@ -301,7 +307,6 @@ with tab1:
                 shares_sub = safe_float(item.get('複委託'))
                 total_shares = shares_own + shares_sub
                 
-                # 🌟 如果股數 > 0，才列入投資組合計算
                 if price > 0 and total_shares > 0:
                     val = price * total_shares * usdtwd
                     div_tot = div * total_shares * usdtwd
@@ -386,7 +391,6 @@ with tab2:
         ta_results = []
         target_options = {} 
         
-        # 🌟 直接掃描您的 Google Sheets 持股與觀察清單
         scan_dict = {}
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
@@ -401,7 +405,6 @@ with tab2:
                 name = str(item.get('名稱', '')).strip()
                 scan_dict[t] = name if name and name != 'nan' else t
 
-        # 執行技術分析計算
         for sym, name in scan_dict.items():
             res = process_technical_analysis(sym, name)
             if res: 
@@ -437,7 +440,6 @@ with tab2:
     
     col_select_stock, col_select_period = st.columns([2, 1])
     with col_select_stock:
-        # 下拉選單現在會顯示您設定的所有名稱
         selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
     with col_select_period:
         period_label = st.selectbox("請選擇 K 線圖時間軸顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
