@@ -113,7 +113,6 @@ def get_stock_data(sym):
         try:
             time.sleep(0.3)
             df = yf.download(sym, period="3y", progress=False)
-            # 🌟 解除上市一年的限制，只要有10天的資料就允許呈現！
             if not df.empty and len(df) >= 10:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 df.index = df.index.tz_localize(None)
@@ -165,13 +164,15 @@ def process_technical_analysis(sym, name):
             df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
             df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
         
-        # 🌟 強化防呆：針對上市不到一年的標的，若均線算不出來自動補 0
         last_p = float(df['Close'].iloc[-1]) if len(df) > 0 else 0
         ma20 = float(df['MA20'].iloc[-1]) if len(df) > 0 and pd.notna(df['MA20'].iloc[-1]) else 0
         ma_season = float(df['季線'].iloc[-1]) if len(df) > 0 and pd.notna(df['季線'].iloc[-1]) else 0
         ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
+        
+        # 🌟 計算各天期的高點
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
+        high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
         
         k_d = float(df['K_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['K_d'].iloc[-1]) else 0
         d_d = float(df['D_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['D_d'].iloc[-1]) else 0
@@ -199,11 +200,19 @@ def process_technical_analysis(sym, name):
         macd_d_status = "🟢 金叉" if (macd_d > macds_d and pmacd_d <= pmacds_d) else ("🔴 死叉" if (macd_d < macds_d and pmacd_d >= pmacds_d) else "趨勢延續")
         macd_w_status = "🟢 金叉" if (macd_w > macds_w and pmacd_w <= pmacds_w) else ("🔴 死叉" if (macd_w < macds_w and pmacd_w >= pmacds_w) else "趨勢延續")
         
+        # 🌟 警示判斷區
         alerts = []
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
+        
+        # 原本的年線高點回落 (10% 觸發)
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
-            alerts.append(f"回落{drop_pct:.1f}%")
+            alerts.append(f"年高點回落{drop_pct:.1f}%")
+            
+        # 🌟 新增的 20 日高點回落 (5% 觸發)
+        if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.05:
+            drop_pct_20d = ((high_20d - last_p) / high_20d) * 100
+            alerts.append(f"20日高點回落{drop_pct_20d:.1f}%")
             
         if (k_d > d_d and pk_d <= pd_d) and k_d < 30 and k_d > 0: alerts.append("日KD低檔金叉")
         if (k_d < d_d and pk_d >= pd_d) and k_d > 70: alerts.append("日KD高檔死叉")
