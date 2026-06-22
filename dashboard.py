@@ -165,13 +165,16 @@ def process_technical_analysis(sym, name):
             df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
         
         last_p = float(df['Close'].iloc[-1]) if len(df) > 0 else 0
+        ma10 = float(df['MA10'].iloc[-1]) if len(df) > 0 and pd.notna(df['MA10'].iloc[-1]) else 0
         ma20 = float(df['MA20'].iloc[-1]) if len(df) > 0 and pd.notna(df['MA20'].iloc[-1]) else 0
         ma_season = float(df['季線'].iloc[-1]) if len(df) > 0 and pd.notna(df['季線'].iloc[-1]) else 0
         ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
         
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
+        
         high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
+        low_20d = df['Low'].tail(20).min() if len(df) > 0 else 0
         
         k_d = float(df['K_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['K_d'].iloc[-1]) else 0
         d_d = float(df['D_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['D_d'].iloc[-1]) else 0
@@ -193,41 +196,48 @@ def process_technical_analysis(sym, name):
         pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0
         pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0
         
-        # 🌟 專屬的狀態判定函數：區分高低檔與一般交叉
         def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow:
                 return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD金叉"
             if curr_fast < curr_slow and prev_fast >= prev_slow:
                 return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD死叉"
-            if curr_fast >= curr_slow: return "📈 向上發散"
-            return "📉 向下發散"
+            if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
+            return "📉 已死叉，且向下發散"
             
         def eval_macd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow:
                 return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD金叉"
             if curr_fast < curr_slow and prev_fast >= prev_slow:
                 return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD死叉"
-            if curr_fast >= curr_slow: return "📈 向上發散"
-            return "📉 向下發散"
+            if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
+            return "📉 已死叉，且向下發散"
 
         kd_d_status = eval_kd_status(k_d, d_d, pk_d, pd_d)
         kd_w_status = eval_kd_status(k_w, d_w, pk_w, pd_w)
         macd_d_status = eval_macd_status(macd_d, macds_d, pmacd_d, pmacds_d)
         macd_w_status = eval_macd_status(macd_w, macds_w, pmacd_w, pmacds_w)
         
-        # 🌟 警示判斷區 (與上方狀態函數100%連動對齊)
         alerts = []
-        if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
+        if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
             alerts.append(f"年高點回落{drop_pct:.1f}%")
-            
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.05:
             drop_pct_20d = ((high_20d - last_p) / high_20d) * 100
             alerts.append(f"20日高點回落{drop_pct_20d:.1f}%")
             
-        # KD 警示
+        if high_20d > 0 and low_20d > 0:
+            amp_20d = (high_20d - low_20d) / low_20d
+            if amp_20d <= 0.07:  
+                alerts.append(f"💤 20日窄幅盤整(振幅{amp_20d*100:.1f}%)")
+                
+        if ma10 > 0 and ma20 > 0 and ma_season > 0:
+            ma_max = max(ma10, ma20, ma_season)
+            ma_min = min(ma10, ma20, ma_season)
+            if (ma_max - ma_min) / ma_min <= 0.03: 
+                alerts.append("🌀 均線糾結(醞釀表態)")
+            
         if k_d > d_d and pk_d <= pd_d and k_d > 0:
             if k_d < 30: alerts.append("日KD低檔金叉")
             else: alerts.append("日KD金叉")
@@ -242,7 +252,6 @@ def process_technical_analysis(sym, name):
             if k_w > 70: alerts.append("週KD高檔死叉")
             else: alerts.append("週KD死叉")
         
-        # MACD 警示
         if macd_d > macds_d and pmacd_d <= pmacds_d and (macd_d != 0 or macds_d != 0):
             if macd_d < 0: alerts.append("日MACD零下金叉")
             else: alerts.append("日MACD金叉")
@@ -429,7 +438,16 @@ with tab1:
 
 with tab2:
     st.subheader("🎯 持股與觀察清單技術面掃描")
-    st.markdown("自動警示跌破月線、高點回落，以及 **KD / MACD 黃金與死亡交叉**。（台股採 60/120/240日線；美股採 50/100/200日線）")
+    st.markdown("自動偵測窄幅盤整、均線糾結，以及 **KD / MACD** 的進階交叉判定。（台股採 60/120/240日線；美股採 50/100/200日線）")
+    
+    # 🌟 新增：名詞定義折疊面板
+    with st.expander("💡 狀態警示名詞定義說明", expanded=False):
+        st.markdown("""
+        * **💤 窄幅盤整 (振幅壓縮)**：過去 20 個交易日的最高價與最低價，上下振幅壓縮在 **7% 以內**，代表價格正處於狹幅箱型整理，波動極小。
+        * **🌀 均線糾結 (醞釀表態)**：短線 (10日)、中線 (20日) 與長線 (季線) 三條均線的數值差距在 **3% 以內**，代表各天期投資人的持股成本趨於一致，隨時可能爆發新方向。
+        * **高低檔交叉**：KD 於 **30 以下**發生金叉為「低檔金叉」，於 **70 以上**發生死叉為「高檔死叉」。
+        * **發散狀態**：**已金叉，且向上發散** (目前 K > D，多頭延續中) / **已死叉，且向下發散** (目前 K < D，空頭延續中)。
+        """)
     
     with st.spinner("正在計算各標的技術指標..."):
         ta_results = []
