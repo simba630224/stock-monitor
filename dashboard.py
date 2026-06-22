@@ -193,19 +193,29 @@ def process_technical_analysis(sym, name):
         pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0
         pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0
         
-        # 🌟 方案 A：明確的指標發散狀態判斷
-        def eval_status(curr_fast, curr_slow, prev_fast, prev_slow):
-            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 金叉轉強"
-            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 死亡交叉"
+        # 🌟 專屬的狀態判定函數：區分高低檔與一般交叉
+        def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
+            if curr_fast > curr_slow and prev_fast <= prev_slow:
+                return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow:
+                return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD死叉"
+            if curr_fast >= curr_slow: return "📈 向上發散"
+            return "📉 向下發散"
+            
+        def eval_macd_status(curr_fast, curr_slow, prev_fast, prev_slow):
+            if curr_fast > curr_slow and prev_fast <= prev_slow:
+                return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow:
+                return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD死叉"
             if curr_fast >= curr_slow: return "📈 向上發散"
             return "📉 向下發散"
 
-        kd_d_status = eval_status(k_d, d_d, pk_d, pd_d)
-        kd_w_status = eval_status(k_w, d_w, pk_w, pd_w)
-        macd_d_status = eval_status(macd_d, macds_d, pmacd_d, pmacds_d)
-        macd_w_status = eval_status(macd_w, macds_w, pmacd_w, pmacds_w)
+        kd_d_status = eval_kd_status(k_d, d_d, pk_d, pd_d)
+        kd_w_status = eval_kd_status(k_w, d_w, pk_w, pd_w)
+        macd_d_status = eval_macd_status(macd_d, macds_d, pmacd_d, pmacds_d)
+        macd_w_status = eval_macd_status(macd_w, macds_w, pmacd_w, pmacds_w)
         
-        # 🌟 警示判斷區
+        # 🌟 警示判斷區 (與上方狀態函數100%連動對齊)
         alerts = []
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
@@ -217,6 +227,7 @@ def process_technical_analysis(sym, name):
             drop_pct_20d = ((high_20d - last_p) / high_20d) * 100
             alerts.append(f"20日高點回落{drop_pct_20d:.1f}%")
             
+        # KD 警示
         if k_d > d_d and pk_d <= pd_d and k_d > 0:
             if k_d < 30: alerts.append("日KD低檔金叉")
             else: alerts.append("日KD金叉")
@@ -231,6 +242,7 @@ def process_technical_analysis(sym, name):
             if k_w > 70: alerts.append("週KD高檔死叉")
             else: alerts.append("週KD死叉")
         
+        # MACD 警示
         if macd_d > macds_d and pmacd_d <= pmacds_d and (macd_d != 0 or macds_d != 0):
             if macd_d < 0: alerts.append("日MACD零下金叉")
             else: alerts.append("日MACD金叉")
