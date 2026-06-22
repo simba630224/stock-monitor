@@ -170,7 +170,6 @@ def process_technical_analysis(sym, name):
         ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
         
-        # 🌟 計算各天期的高點
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
         
@@ -194,33 +193,57 @@ def process_technical_analysis(sym, name):
         pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0
         pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0
         
-        kd_d_status = "🟢 金叉轉強" if (k_d > d_d and pk_d <= pd_d) else ("🔴 死亡交叉" if (k_d < d_d and pk_d >= pd_d) else "趨勢延續")
-        kd_w_status = "🟢 金叉轉強" if (k_w > d_w and pk_w <= pd_w) else ("🔴 死亡交叉" if (k_w < d_w and pk_w >= pd_w) else "趨勢延續")
+        # 🌟 方案 A：明確的指標發散狀態判斷
+        def eval_status(curr_fast, curr_slow, prev_fast, prev_slow):
+            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 金叉轉強"
+            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 死亡交叉"
+            if curr_fast >= curr_slow: return "📈 向上發散"
+            return "📉 向下發散"
 
-        macd_d_status = "🟢 金叉" if (macd_d > macds_d and pmacd_d <= pmacds_d) else ("🔴 死叉" if (macd_d < macds_d and pmacd_d >= pmacds_d) else "趨勢延續")
-        macd_w_status = "🟢 金叉" if (macd_w > macds_w and pmacd_w <= pmacds_w) else ("🔴 死叉" if (macd_w < macds_w and pmacd_w >= pmacds_w) else "趨勢延續")
+        kd_d_status = eval_status(k_d, d_d, pk_d, pd_d)
+        kd_w_status = eval_status(k_w, d_w, pk_w, pd_w)
+        macd_d_status = eval_status(macd_d, macds_d, pmacd_d, pmacds_d)
+        macd_w_status = eval_status(macd_w, macds_w, pmacd_w, pmacds_w)
         
         # 🌟 警示判斷區
         alerts = []
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
-        # 原本的年線高點回落 (10% 觸發)
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
             alerts.append(f"年高點回落{drop_pct:.1f}%")
             
-        # 🌟 新增的 20 日高點回落 (5% 觸發)
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.05:
             drop_pct_20d = ((high_20d - last_p) / high_20d) * 100
             alerts.append(f"20日高點回落{drop_pct_20d:.1f}%")
             
-        if (k_d > d_d and pk_d <= pd_d) and k_d < 30 and k_d > 0: alerts.append("日KD低檔金叉")
-        if (k_d < d_d and pk_d >= pd_d) and k_d > 70: alerts.append("日KD高檔死叉")
-        if (k_w > d_w and pk_w <= pd_w) and k_w < 30 and k_w > 0: alerts.append("週KD低檔金叉")
-        if (k_w < d_w and pk_w >= pd_w) and k_w > 70: alerts.append("週KD高檔死叉")
+        if k_d > d_d and pk_d <= pd_d and k_d > 0:
+            if k_d < 30: alerts.append("日KD低檔金叉")
+            else: alerts.append("日KD金叉")
+        elif k_d < d_d and pk_d >= pd_d and d_d > 0:
+            if k_d > 70: alerts.append("日KD高檔死叉")
+            else: alerts.append("日KD死叉")
+            
+        if k_w > d_w and pk_w <= pd_w and k_w > 0:
+            if k_w < 30: alerts.append("週KD低檔金叉")
+            else: alerts.append("週KD金叉")
+        elif k_w < d_w and pk_w >= pd_w and d_w > 0:
+            if k_w > 70: alerts.append("週KD高檔死叉")
+            else: alerts.append("週KD死叉")
         
-        if (macd_d > macds_d and pmacd_d <= pmacds_d) and macd_d < 0: alerts.append("日MACD零下金叉")
-        if (macd_d < macds_d and pmacd_d >= pmacds_d) and macd_d > 0: alerts.append("日MACD零上死叉")
+        if macd_d > macds_d and pmacd_d <= pmacds_d and (macd_d != 0 or macds_d != 0):
+            if macd_d < 0: alerts.append("日MACD零下金叉")
+            else: alerts.append("日MACD金叉")
+        elif macd_d < macds_d and pmacd_d >= pmacds_d and (macd_d != 0 or macds_d != 0):
+            if macd_d > 0: alerts.append("日MACD零上死叉")
+            else: alerts.append("日MACD死叉")
+            
+        if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0):
+            if macd_w < 0: alerts.append("週MACD零下金叉")
+            else: alerts.append("週MACD金叉")
+        elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0):
+            if macd_w > 0: alerts.append("週MACD零上死叉")
+            else: alerts.append("週MACD死叉")
             
         alert_str = "⚠️ " + " / ".join(alerts) if alerts else "✅ 正常"
 
