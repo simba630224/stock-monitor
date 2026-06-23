@@ -274,15 +274,22 @@ def process_technical_analysis(sym, name):
             if pd.notna(pe_val): pe_str = f"{pe_val:.1f}"
         except: pass
 
+        # 🌟 重新調整字典的鍵值對順序，使欄位在 DataFrame 預設生成時即對齊期望順序
         return {
-            "市場": market, "標的": f"{name} ({sym})", 
-            "狀態警示": alert_str, "收盤價": last_p, "近一年高點": high_52w,
-            "MA20": ma20, "季線": ma_season, "半年線": ma_half, "年線": ma_year,
+            "市場": market, 
+            "標的": f"{name} ({sym})", 
+            "狀態警示": alert_str, 
             "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
             "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})",
             "日MACD": f"DIF:{macd_d:.2f} ({macd_d_status})",
             "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})",
-            "P/E": pe_str
+            "P/E": pe_str,
+            "收盤價": last_p, 
+            "近一年高點": high_52w,
+            "MA20": ma20, 
+            "季線": ma_season, 
+            "半年線": ma_half, 
+            "年線": ma_year
         }
     except Exception as e:
         return None
@@ -440,7 +447,6 @@ with tab2:
     st.subheader("🎯 持股與觀察清單技術面掃描")
     st.markdown("自動偵測窄幅盤整、均線糾結，以及 **KD / MACD** 的進階交叉判定。（台股採 60/120/240日線；美股採 50/100/200日線）")
     
-    # 🌟 新增：名詞定義折疊面板
     with st.expander("💡 狀態警示名詞定義說明", expanded=False):
         st.markdown("""
         * **💤 窄幅盤整 (振幅壓縮)**：過去 20 個交易日的最高價與最低價，上下振幅壓縮在 **7% 以內**，代表價格正處於狹幅箱型整理，波動極小。
@@ -475,21 +481,24 @@ with tab2:
             
         if ta_results:
             df_ta = pd.DataFrame(ta_results)
+            
+            # 🌟 核心修正：重新排列 columns 與 column_config，將指標欄位前移至「狀態警示」右側
             st.dataframe(
                 df_ta, 
                 column_config={
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
                     "狀態警示": st.column_config.TextColumn("🚨 狀態警示", width="large"),
+                    "日KD": st.column_config.TextColumn("日 KD 狀態", width="medium"),
+                    "週KD": st.column_config.TextColumn("週 KD 狀態", width="medium"),
+                    "日MACD": st.column_config.TextColumn("日 MACD", width="medium"),
+                    "週MACD": st.column_config.TextColumn("週 MACD", width="medium"),
+                    "P/E": st.column_config.TextColumn("P/E", width="small"),
                     "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
                     "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
                     "季線": st.column_config.NumberColumn("季線", format="%.2f"),
                     "半年線": st.column_config.NumberColumn("半年線", format="%.2f"),
                     "年線": st.column_config.NumberColumn("年線", format="%.2f"),
-                    "日KD": st.column_config.TextColumn("日 KD 狀態", width="medium"),
-                    "週KD": st.column_config.TextColumn("週 KD 狀態", width="medium"),
-                    "日MACD": st.column_config.TextColumn("日 MACD", width="medium"),
-                    "週MACD": st.column_config.TextColumn("週 MACD", width="medium"),
                 },
                 hide_index=True,
                 use_container_width=True,
