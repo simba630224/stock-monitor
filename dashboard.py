@@ -147,6 +147,62 @@ def get_stock_data(sym):
             time.sleep(1)
     return None
 
+# 🌟 新增：專門用來計算歷史報酬與股息明細的模組
+@st.cache_data(ttl=900)
+def get_perf_div_data(sym, name, market):
+    for _ in range(3):
+        try:
+            time.sleep(0.3)
+            tk = yf.Ticker(sym)
+            hist = tk.history(period="1y")
+            if not hist.empty:
+                curr_p = float(hist['Close'].dropna().iloc[-1])
+                
+                # 計算報酬率 (以交易日估算：1季約63天，半年約126天，1年為全部)
+                def calc_ret(days_back):
+                    valid_hist = hist['Close'].dropna()
+                    if len(valid_hist) > days_back:
+                        past_p = float(valid_hist.iloc[-days_back])
+                        return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else None
+                    elif len(valid_hist) > 1 and days_back >= 252:
+                        # 如果上市不滿一年，就拿最早的一天來算
+                        past_p = float(valid_hist.iloc[0])
+                        return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else None
+                    return None
+
+                ret_1q = calc_ret(63)
+                ret_6m = calc_ret(126)
+                ret_1y = calc_ret(252)
+
+                # 計算近一年配息與殖利率
+                div_records = []
+                tot_div = 0.0
+                if 'Dividends' in hist.columns:
+                    divs = hist['Dividends']
+                    divs = divs[divs > 0]
+                    for date, val in divs.items():
+                        date_str = date.strftime('%Y-%m-%d')
+                        div_records.append(f"{date_str}: ${val:.2f}")
+                        tot_div += float(val)
+
+                div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
+                yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
+
+                return {
+                    "市場": market,
+                    "標的": f"{name} ({sym})" if name else sym,
+                    "最新收盤價": curr_p,
+                    "近一季報酬": ret_1q,
+                    "近半年報酬": ret_6m,
+                    "近一年報酬": ret_1y,
+                    "近一年殖利率": yield_1y,
+                    "總配息金額": tot_div,
+                    "近一年配息明細": div_history_str
+                }
+        except:
+            time.sleep(1)
+    return None
+
 @st.cache_data(ttl=900)
 def process_technical_analysis(sym, name):
     try:
@@ -172,7 +228,6 @@ def process_technical_analysis(sym, name):
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
         
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
-        
         high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
         low_20d = df['Low'].tail(20).min() if len(df) > 0 else 0
         
@@ -274,7 +329,6 @@ def process_technical_analysis(sym, name):
             if pd.notna(pe_val): pe_str = f"{pe_val:.1f}"
         except: pass
 
-        # 🌟 重新調整字典的鍵值對順序，使欄位在 DataFrame 預設生成時即對齊期望順序
         return {
             "市場": market, 
             "標的": f"{name} ({sym})", 
@@ -307,7 +361,8 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-tab1, tab2 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描"])
+# 🌟 新增第三個分頁：績效與股息追蹤
+tab1, tab2, tab3 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🏆 績效與股息追蹤"])
 
 with tab1:
     with st.spinner("正在同步即時報價資料..."):
@@ -481,8 +536,6 @@ with tab2:
             
         if ta_results:
             df_ta = pd.DataFrame(ta_results)
-            
-            # 🌟 核心修正：重新排列 columns 與 column_config，將指標欄位前移至「狀態警示」右側
             st.dataframe(
                 df_ta, 
                 column_config={
@@ -556,6 +609,55 @@ with tab2:
             
             fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
             st.plotly_chart(fig_tech, use_container_width=True)
+
+# 🌟 新增的第三分頁：績效與股息追蹤
+with tab3:
+    st.subheader("🏆 績效與股息追蹤")
+    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**與**近一年真實配息紀錄**。")
+    
+    with st.spinner("正在計算各標的績效與配息資料..."):
+        perf_results = []
+        scan_list = []
+        
+        # 匯集所有台股與美股標的
+        for item in PORTFOLIO_TW:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                sym = get_yf_ticker_tw(t)
+                name = str(item.get('名稱', '')).strip()
+                scan_list.append((sym, name, '台股'))
+                
+        for item in PORTFOLIO_US:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                name = str(item.get('名稱', '')).strip()
+                scan_list.append((t, name, '美股'))
+                
+        for sym, name, market in scan_list:
+            res = get_perf_div_data(sym, name, market)
+            if res:
+                perf_results.append(res)
+                
+        if perf_results:
+            df_perf = pd.DataFrame(perf_results)
+            
+            st.dataframe(
+                df_perf,
+                column_config={
+                    "市場": st.column_config.TextColumn("市場", width="small"),
+                    "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
+                    "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                    "近一季報酬": st.column_config.NumberColumn("近一季報酬", format="%.2f %%"),
+                    "近半年報酬": st.column_config.NumberColumn("近半年報酬", format="%.2f %%"),
+                    "近一年報酬": st.column_config.NumberColumn("近一年報酬", format="%.2f %%"),
+                    "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
+                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
+                    "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=600
+            )
 
 # ==========================================
 # 4. 後台管理介面 (側邊欄雙分頁編輯)
