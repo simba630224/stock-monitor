@@ -147,7 +147,6 @@ def get_stock_data(sym):
             time.sleep(1)
     return None
 
-# 🌟 新增：專門用來計算歷史報酬與股息明細的模組
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, name, market):
     for _ in range(3):
@@ -158,14 +157,13 @@ def get_perf_div_data(sym, name, market):
             if not hist.empty:
                 curr_p = float(hist['Close'].dropna().iloc[-1])
                 
-                # 計算報酬率 (以交易日估算：1季約63天，半年約126天，1年為全部)
+                # 計算歷史報酬率
                 def calc_ret(days_back):
                     valid_hist = hist['Close'].dropna()
                     if len(valid_hist) > days_back:
                         past_p = float(valid_hist.iloc[-days_back])
                         return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else None
                     elif len(valid_hist) > 1 and days_back >= 252:
-                        # 如果上市不滿一年，就拿最早的一天來算
                         past_p = float(valid_hist.iloc[0])
                         return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else None
                     return None
@@ -180,7 +178,9 @@ def get_perf_div_data(sym, name, market):
                 if 'Dividends' in hist.columns:
                     divs = hist['Dividends']
                     divs = divs[divs > 0]
-                    for date, val in divs.items():
+                    # 🌟 關鍵修正：將時間軸改為倒序（最新在前），滿足看盤習慣
+                    divs_desc = divs.sort_index(ascending=False)
+                    for date, val in divs_desc.items():
                         date_str = date.strftime('%Y-%m-%d')
                         div_records.append(f"{date_str}: ${val:.2f}")
                         tot_div += float(val)
@@ -262,7 +262,7 @@ def process_technical_analysis(sym, name):
         def eval_macd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow:
                 return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD金叉"
-            if curr_fast < curr_slow and prev_fast >= prev_slow:
+            if curr_fast < curr_slow abuses and prev_fast >= prev_slow:
                 return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD死叉"
             if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
             return "📉 已死叉，且向下發散"
@@ -273,7 +273,6 @@ def process_technical_analysis(sym, name):
         macd_w_status = eval_macd_status(macd_w, macds_w, pmacd_w, pmacds_w)
         
         alerts = []
-        
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
@@ -361,7 +360,6 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 🌟 新增第三個分頁：績效與股息追蹤
 tab1, tab2, tab3 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🏆 績效與股息追蹤"])
 
 with tab1:
@@ -610,16 +608,14 @@ with tab2:
             fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
             st.plotly_chart(fig_tech, use_container_width=True)
 
-# 🌟 新增的第三分頁：績效與股息追蹤
+# 🌟 績效與股息追蹤分頁 (已移除重複 subheader)
 with tab3:
-    st.subheader("🏆 績效與股息追蹤")
     st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**與**近一年真實配息紀錄**。")
     
     with st.spinner("正在計算各標的績效與配息資料..."):
         perf_results = []
         scan_list = []
         
-        # 匯集所有台股與美股標的
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
@@ -640,7 +636,6 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            
             st.dataframe(
                 df_perf,
                 column_config={
