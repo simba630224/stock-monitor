@@ -106,6 +106,42 @@ def get_fx_data():
             time.sleep(1)
     return pd.DataFrame()
 
+# 🌟 新增：全域大盤基準快取，用來計算相對強弱度
+@st.cache_data(ttl=3600)
+def get_benchmark_returns():
+    benchmarks = {'台股': 0.0, '美股': 0.0}
+    try:
+        tw_hist = yf.Ticker("^TWII").history(period="1y").dropna(subset=['Close'])
+        if len(tw_hist) > 252:
+            benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[-252]) / tw_hist['Close'].iloc[-252]) * 100
+        elif not tw_hist.empty:
+            benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
+    except: pass
+    try:
+        us_hist = yf.Ticker("^GSPC").history(period="1y").dropna(subset=['Close'])
+        if len(us_hist) > 252:
+            benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[-252]) / us_hist['Close'].iloc[-252]) * 100
+        elif not us_hist.empty:
+            benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
+    except: pass
+    return benchmarks
+
+# 🌟 新增：基本面財務數據與 Beta 快取模組
+@st.cache_data(ttl=3600)
+def get_fundamental_info(sym):
+    try:
+        time.sleep(0.1)
+        info = yf.Ticker(sym).info
+        return {
+            'beta': info.get('beta'),
+            'grossMargins': info.get('grossMargins'),
+            'operatingMargins': info.get('operatingMargins'),
+            'profitMargins': info.get('profitMargins'),
+            'returnOnEquity': info.get('returnOnEquity')
+        }
+    except:
+        return {}
+
 @st.cache_data(ttl=900)
 def get_stock_data(sym):
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
@@ -148,7 +184,7 @@ def get_stock_data(sym):
     return None
 
 @st.cache_data(ttl=900)
-def get_perf_div_data(sym, name, market):
+def get_perf_div_data(sym, name, market, bench_returns):
     for _ in range(3):
         try:
             time.sleep(0.3)
@@ -171,6 +207,21 @@ def get_perf_div_data(sym, name, market):
                 ret_6m = calc_ret(126)
                 ret_1y = calc_ret(252)
 
+                # 🌟 新增：計算相對大盤強度 (Alpha)
+                bench_ret = bench_returns.get(market, 0.0)
+                rel_str_1y = (ret_1y - bench_ret) if ret_1y is not None else None
+
+                # 🌟 新增：獲利能力與 ROE 基本面分流抓取
+                f_info = get_fundamental_info(sym)
+                def fmt_pct(val):
+                    return f"{val * 100:.1f} %" if val is not None and pd.notna(val) else "ETF/不適用"
+
+                gross_m = fmt_pct(f_info.get('grossMargins'))
+                op_m = fmt_pct(f_info.get('operatingMargins'))
+                prof_m = fmt_pct(f_info.get('profitMargins'))
+                roe = fmt_pct(f_info.get('returnOnEquity'))
+
+                # 計算近一年配息
                 div_records = []
                 tot_div = 0.0
                 if 'Dividends' in hist.columns:
@@ -192,7 +243,12 @@ def get_perf_div_data(sym, name, market):
                     "近一季報酬": ret_1q,
                     "近半年報酬": ret_6m,
                     "近一年報酬": ret_1y,
+                    "相對大盤(1年)": rel_str_1y,
                     "近一年殖利率": yield_1y,
+                    "毛利率": gross_m,
+                    "營益率": op_m,
+                    "淨利率": prof_m,
+                    "ROE": roe,
                     "總配息金額": tot_div,
                     "近一年配息明細": div_history_str
                 }
@@ -224,7 +280,11 @@ def process_technical_analysis(sym, name):
         ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
         
+        # 🌟 52週最高/最低與高低點位置精算 (100%從K線精算，防呆不卡死)
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
+        low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
+        pos_52w = ((last_p - low_52w) / (high_52w - low_52w) * 100) if (high_52w - low_52w) > 0 else 50.0
+
         high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
         low_20d = df['Low'].tail(20).min() if len(df) > 0 else 0
         
@@ -270,7 +330,6 @@ def process_technical_analysis(sym, name):
         macd_w_status = eval_macd_status(macd_w, macds_w, pmacd_w, pmacds_w)
         
         alerts = []
-        
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
@@ -326,10 +385,17 @@ def process_technical_analysis(sym, name):
             if pd.notna(pe_val): pe_str = f"{pe_val:.1f}"
         except: pass
 
+        # 🌟 新增：獲利能力分析所需 Beta 係數
+        f_info = get_fundamental_info(sym)
+        beta_val = f_info.get('beta')
+        beta_str = f"{beta_val:.2f}" if beta_val is not None and pd.notna(beta_val) else "無"
+
         return {
             "市場": market, 
             "標的": f"{name} ({sym})", 
             "狀態警示": alert_str, 
+            "52週位置": f"{pos_52w:.1f} %",
+            "Beta": beta_str,
             "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
             "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})",
             "日MACD": f"DIF:{macd_d:.2f} ({macd_d_status})",
@@ -501,7 +567,8 @@ with tab2:
         st.markdown("""
         * **💤 窄幅盤整 (振幅壓縮)**：過去 20 個交易日的最高價與最低價，上下振幅壓縮在 **7% 以內**，代表價格正處於狹幅箱型整理，波動極小。
         * **🌀 均線糾結 (醞釀表態)**：短線 (10日)、中線 (20日) 與長線 (季線) 三條均線的數值差距在 **3% 以內**，代表各天期投資人的持股成本趨於一致，隨時可能爆發新方向。
-        * **高低檔交叉**：KD 於 **30 以下**發生金叉為「低檔金叉」，於 **70 以上**發生死叉為「高檔死叉」。
+        * **52週位置 (%)**：目前收盤價處於近 1 年最高價與最低價區間的相對百分比位置。100% 代表正處於最高點，0% 代表處於最低點。
+        * **Beta 係數**：衡量相對大盤的波動度。Beta = 1.0 代表波動與大盤同步；> 1.0 波動比大盤劇烈；< 1.0 波動比大盤穩健。
         * **發散狀態**：**已金叉，且向上發散** (目前 K > D，多頭延續中) / **已死叉，且向下發散** (目前 K < D，空頭延續中)。
         """)
     
@@ -537,6 +604,8 @@ with tab2:
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
                     "狀態警示": st.column_config.TextColumn("🚨 狀態警示", width="large"),
+                    "52週位置": st.column_config.TextColumn("52週位置", width="small"),
+                    "Beta": st.column_config.TextColumn("Beta 係數", width="small"),
                     "日KD": st.column_config.TextColumn("日 KD 狀態", width="medium"),
                     "週KD": st.column_config.TextColumn("週 KD 狀態", width="medium"),
                     "日MACD": st.column_config.TextColumn("日 MACD", width="medium"),
@@ -606,9 +675,10 @@ with tab2:
             st.plotly_chart(fig_tech, use_container_width=True)
 
 with tab3:
-    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**與**近一年真實配息紀錄**。")
+    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**超額大盤表現 (Alpha)**、**基本面財報指標**與**近一年真實配息紀錄**。")
     
     with st.spinner("正在計算各標的績效與配息資料..."):
+        bench_returns = get_benchmark_returns()
         perf_results = []
         scan_list = []
         
@@ -626,7 +696,7 @@ with tab3:
                 scan_list.append((t, name, '美股'))
                 
         for sym, name, market in scan_list:
-            res = get_perf_div_data(sym, name, market)
+            res = get_perf_div_data(sym, name, market, bench_returns)
             if res:
                 perf_results.append(res)
                 
@@ -641,7 +711,12 @@ with tab3:
                     "近一季報酬": st.column_config.NumberColumn("近一季報酬", format="%.2f %%"),
                     "近半年報酬": st.column_config.NumberColumn("近半年報酬", format="%.2f %%"),
                     "近一年報酬": st.column_config.NumberColumn("近一年報酬", format="%.2f %%"),
+                    "相對大盤(1年)": st.column_config.NumberColumn("相對大盤(1年) 🟢擊敗/🔴落後", format="%.2f %%"),
                     "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
+                    "毛利率": st.column_config.TextColumn("毛利率"),
+                    "營益率": st.column_config.TextColumn("營益率"),
+                    "淨利率": st.column_config.TextColumn("淨利率"),
+                    "ROE": st.column_config.TextColumn("ROE"),
                     "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
                     "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
                 },
