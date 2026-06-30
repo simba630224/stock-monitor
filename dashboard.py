@@ -106,7 +106,6 @@ def get_fx_data():
             time.sleep(1)
     return pd.DataFrame()
 
-# 🌟 新增：全域大盤基準快取，用來計算相對強弱度
 @st.cache_data(ttl=3600)
 def get_benchmark_returns():
     benchmarks = {'台股': 0.0, '美股': 0.0}
@@ -126,13 +125,13 @@ def get_benchmark_returns():
     except: pass
     return benchmarks
 
-# 🌟 新增：基本面財務數據與 Beta 快取模組
 @st.cache_data(ttl=3600)
 def get_fundamental_info(sym):
     try:
-        time.sleep(0.1)
+        time.sleep(0.2)
         info = yf.Ticker(sym).info
         return {
+            'quoteType': info.get('quoteType'),
             'beta': info.get('beta'),
             'grossMargins': info.get('grossMargins'),
             'operatingMargins': info.get('operatingMargins'),
@@ -184,7 +183,7 @@ def get_stock_data(sym):
     return None
 
 @st.cache_data(ttl=900)
-def get_perf_div_data(sym, name, market, bench_returns):
+def get_perf_div_data(sym, display_ticker, market, bench_returns):
     for _ in range(3):
         try:
             time.sleep(0.3)
@@ -207,14 +206,24 @@ def get_perf_div_data(sym, name, market, bench_returns):
                 ret_6m = calc_ret(126)
                 ret_1y = calc_ret(252)
 
-                # 🌟 新增：計算相對大盤強度 (Alpha)
+                # 🌟 修正：相對大盤直接在行內標記紅綠燈與正負號
                 bench_ret = bench_returns.get(market, 0.0)
-                rel_str_1y = (ret_1y - bench_ret) if ret_1y is not None else None
+                if ret_1y is not None:
+                    rel_val = ret_1y - bench_ret
+                    emoji = "🟢" if rel_val >= 0 else "🔴"
+                    sign = "+" if rel_val > 0 else ""
+                    rel_str_display = f"{emoji} {sign}{rel_val:.2f} %"
+                else:
+                    rel_str_display = "暫無資料"
 
-                # 🌟 新增：獲利能力與 ROE 基本面分流抓取
+                # 🌟 修正：精準判定是否為 ETF，防止個股因網路超時被誤判為不適用
                 f_info = get_fundamental_info(sym)
+                quote_type = str(f_info.get('quoteType', '')).upper()
+                is_etf = 'ETF' in quote_type or 'MUTUALFUND' in quote_type
+                
                 def fmt_pct(val):
-                    return f"{val * 100:.1f} %" if val is not None and pd.notna(val) else "ETF/不適用"
+                    if is_etf: return "ETF/不適用"
+                    return f"{val * 100:.1f} %" if val is not None and pd.notna(val) else "暫無資料"
 
                 gross_m = fmt_pct(f_info.get('grossMargins'))
                 op_m = fmt_pct(f_info.get('operatingMargins'))
@@ -236,21 +245,22 @@ def get_perf_div_data(sym, name, market, bench_returns):
                 div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
+                # 🌟 修正：重新排列字典欄位，將三率與 ROE 調至最後方
                 return {
                     "市場": market,
-                    "標的": f"{name} ({sym})" if name else sym,
+                    "標的": display_ticker,  # 🌟 修正：留代號即可
                     "最新收盤價": curr_p,
                     "近一季報酬": ret_1q,
                     "近半年報酬": ret_6m,
                     "近一年報酬": ret_1y,
-                    "相對大盤(1年)": rel_str_1y,
+                    "相對大盤(1年)": rel_str_display,
                     "近一年殖利率": yield_1y,
+                    "總配息金額": tot_div,
+                    "近一年配息明細": div_history_str,
                     "毛利率": gross_m,
                     "營益率": op_m,
                     "淨利率": prof_m,
-                    "ROE": roe,
-                    "總配息金額": tot_div,
-                    "近一年配息明細": div_history_str
+                    "ROE": roe
                 }
         except:
             time.sleep(1)
@@ -280,7 +290,6 @@ def process_technical_analysis(sym, name):
         ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
         
-        # 🌟 52週最高/最低與高低點位置精算 (100%從K線精算，防呆不卡死)
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w) * 100) if (high_52w - low_52w) > 0 else 50.0
@@ -385,7 +394,6 @@ def process_technical_analysis(sym, name):
             if pd.notna(pe_val): pe_str = f"{pe_val:.1f}"
         except: pass
 
-        # 🌟 新增：獲利能力分析所需 Beta 係數
         f_info = get_fundamental_info(sym)
         beta_val = f_info.get('beta')
         beta_str = f"{beta_val:.2f}" if beta_val is not None and pd.notna(beta_val) else "無"
@@ -652,7 +660,7 @@ with tab2:
             
             fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                      vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
-                                     subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指標 (12,26,9)"))
+                                     subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指測 (12,26,9)"))
             
             fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
@@ -686,17 +694,15 @@ with tab3:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
                 sym = get_yf_ticker_tw(t)
-                name = str(item.get('名稱', '')).strip()
-                scan_list.append((sym, name, '台股'))
+                scan_list.append((sym, t, '台股'))  # 🌟 傳入純代號 t
                 
         for item in PORTFOLIO_US:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
-                name = str(item.get('名稱', '')).strip()
-                scan_list.append((t, name, '美股'))
+                scan_list.append((t, t, '美股'))  # 🌟 傳入純代號 t
                 
-        for sym, name, market in scan_list:
-            res = get_perf_div_data(sym, name, market, bench_returns)
+        for sym, display_ticker, market in scan_list:
+            res = get_perf_div_data(sym, display_ticker, market, bench_returns)
             if res:
                 perf_results.append(res)
                 
@@ -706,19 +712,19 @@ with tab3:
                 df_perf,
                 column_config={
                     "市場": st.column_config.TextColumn("市場", width="small"),
-                    "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
+                    "標的": st.column_config.TextColumn("代號", width="small"),  # 🌟 欄位優化
                     "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
                     "近一季報酬": st.column_config.NumberColumn("近一季報酬", format="%.2f %%"),
                     "近半年報酬": st.column_config.NumberColumn("近半年報酬", format="%.2f %%"),
                     "近一年報酬": st.column_config.NumberColumn("近一年報酬", format="%.2f %%"),
-                    "相對大盤(1年)": st.column_config.NumberColumn("相對大盤(1年) 🟢擊敗/🔴落後", format="%.2f %%"),
+                    "相對大盤(1年)": st.column_config.TextColumn("相對大盤 (1年)", width="medium"),  # 🌟 紅綠燈文字顯示
                     "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
-                    "毛利率": st.column_config.TextColumn("毛利率"),
-                    "營益率": st.column_config.TextColumn("營益率"),
-                    "淨利率": st.column_config.TextColumn("淨利率"),
-                    "ROE": st.column_config.TextColumn("ROE"),
-                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
                     "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
+                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
+                    "毛利率": st.column_config.TextColumn("毛利率", width="small"),  # 🌟 後移四欄
+                    "營益率": st.column_config.TextColumn("營益率", width="small"),
+                    "淨利率": st.column_config.TextColumn("淨利率", width="small"),
+                    "ROE": st.column_config.TextColumn("ROE", width="small"),
                 },
                 hide_index=True,
                 use_container_width=True,
