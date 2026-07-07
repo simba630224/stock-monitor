@@ -13,21 +13,14 @@ from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
 
-# 🌟 手機版排版調整：保持寬螢幕響應式，但內部元件採直式堆疊
 st.set_page_config(page_title="行動隨身投資儀表板", layout="wide")
 
-# ==========================================
-# 0. 輔助函式
-# ==========================================
 def safe_float(val):
     try:
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
     except:
         return 0.0
 
-# ==========================================
-# 1. 資料庫連線 (與桌面版共用同一個雲端試算表)
-# ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
@@ -52,16 +45,12 @@ except:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
-# ==========================================
-# 2. 核心抓取與計算邏輯 (修正：完全對齊 PC 版運算精準度)
-# ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
     return f"{ticker}.TWO" if re.match(r'^\d+B$', ticker) else f"{ticker}.TW"
 
 @st.cache_data(ttl=600)
 def get_basic_data(ticker):
-    # 🌟 修正：恢復抓取 1y 以確保能計算全年預估股息，並加上重試機制確保網路穩定
     for _ in range(3):
         try:
             time.sleep(0.2)
@@ -188,13 +177,27 @@ def process_technical_analysis(sym, name):
 
         alerts = []
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
+        if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10: alerts.append(f"年高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.05: alerts.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%")
         if "金叉" in kd_status or "死叉" in kd_status: alerts.append(kd_status)
         
         low_20d = df['Low'].tail(20).min()
         if low_20d > 0 and ((high_20d - low_20d) / low_20d) <= 0.07: alerts.append("💤窄幅盤整")
 
-        alert_str = "/".join(alerts) if alerts else "✅正常"
+        # 🌟 手機版綜合買賣評級邏輯
+        action = "➖ 持平"
+        has_strong_sell = any(x in a for a in alerts for x in ["高檔死叉", "年高點回落"])
+        has_strong_buy = any(x in a for a in alerts for x in ["低檔金叉"])
+        has_sell = any(x in a for a in alerts for x in ["死叉", "跌破MA20", "20日回落"])
+        has_buy = any(x in a for a in alerts for x in ["金叉"])
+        
+        if has_strong_sell: action = "🛑 賣出"
+        elif has_strong_buy: action = "🚀 買進"
+        elif has_sell and not has_buy: action = "⚠️ 減碼"
+        elif has_buy and not has_sell: action = "🔼 加碼"
+        else: action = "➖ 持平"
+
+        alert_str = f"[{action}] " + ("/".join(alerts) if alerts else "趨勢延續")
 
         return {"代號": sym.split('.')[0], "🚨警示": alert_str, "價格": last_p, "52週位置": f"{pos_52w:.0f}%", "日KD": f"K:{k_d:.0f}/D:{d_d:.0f}"}
     except: return None
@@ -220,7 +223,6 @@ with tab1:
         total_market_value, total_dividends_2026 = 0, 0
         asset_allocation = {}
 
-        # 🌟 修正：拆分台股與美股迴圈，避免美股特殊代碼解析錯誤導致市值消失
         for item in PORTFOLIO_TW:
             ticker_str = str(item.get('Ticker', '')).strip()
             if not ticker_str or ticker_str == 'nan': continue
@@ -263,11 +265,20 @@ with tab1:
             st.plotly_chart(fig_pie, use_container_width=True)
 
 with tab2:
+    with st.expander("💡 狀態警示說明", expanded=False):
+        st.markdown("""
+        * **綜合買賣評級**：系統依據技術指標自動判斷。
+            * **🚀 買進**：出現低檔金叉等強烈翻多訊號。
+            * **🛑 賣出**：出現高檔死叉或年高點大幅回落等強烈翻空訊號。
+            * **🔼 加碼**：一般金叉偏多訊號。
+            * **⚠️ 減碼**：破月線或短線回落偏空訊號。
+            * **➖ 持平**：盤整或趨勢延續中。
+        """)
+        
     with st.spinner("分析指標中..."):
         ta_results = []
         target_options = {}
         
-        # 🌟 修正：拆分技術分析掃描的名稱匹配邏輯
         scan_dict = {}
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
@@ -301,7 +312,7 @@ with tab2:
         sym = target_options[selected_name]
         df_chart = get_stock_data(sym)
         if df_chart is not None:
-            df_plot = df_chart.tail(80)
+            df_plot = df_chart.tail(80) 
             fig_tech = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
             fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
@@ -316,7 +327,6 @@ with tab3:
         perf_results = []
         scan_list = []
         
-        # 🌟 修正：拆分績效追蹤的名稱匹配邏輯
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
