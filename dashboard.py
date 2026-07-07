@@ -20,7 +20,6 @@ st.set_page_config(page_title="個人投資組合與技術分析儀表板", layo
 # 0. 輔助函式：安全轉換數字
 # ==========================================
 def safe_float(val):
-    """安全地將資料轉換為浮點數，遇到空白或非數字則回傳 0.0"""
     try:
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
     except:
@@ -31,7 +30,6 @@ def safe_float(val):
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 讀取台股
 try:
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
     df_tw = df_tw.dropna(subset=['Ticker'])
@@ -45,7 +43,6 @@ except Exception as e:
     PORTFOLIO_TW = []
     df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
 
-# 讀取美股
 try:
     df_us = conn.read(worksheet="US_Portfolio", ttl=0)
     df_us = df_us.dropna(subset=['Ticker'])
@@ -206,7 +203,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 ret_6m = calc_ret(126)
                 ret_1y = calc_ret(252)
 
-                # 🌟 修正：相對大盤直接在行內標記紅綠燈與正負號
                 bench_ret = bench_returns.get(market, 0.0)
                 if ret_1y is not None:
                     rel_val = ret_1y - bench_ret
@@ -216,7 +212,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 else:
                     rel_str_display = "暫無資料"
 
-                # 🌟 修正：精準判定是否為 ETF，防止個股因網路超時被誤判為不適用
                 f_info = get_fundamental_info(sym)
                 quote_type = str(f_info.get('quoteType', '')).upper()
                 is_etf = 'ETF' in quote_type or 'MUTUALFUND' in quote_type
@@ -230,7 +225,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 prof_m = fmt_pct(f_info.get('profitMargins'))
                 roe = fmt_pct(f_info.get('returnOnEquity'))
 
-                # 計算近一年配息
                 div_records = []
                 tot_div = 0.0
                 if 'Dividends' in hist.columns:
@@ -245,10 +239,9 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
-                # 🌟 修正：重新排列字典欄位，將三率與 ROE 調至最後方
                 return {
                     "市場": market,
-                    "標的": display_ticker,  # 🌟 修正：留代號即可
+                    "標的": display_ticker,
                     "最新收盤價": curr_p,
                     "近一季報酬": ret_1q,
                     "近半年報酬": ret_6m,
@@ -311,11 +304,6 @@ def process_technical_analysis(sym, name):
         macds_d = float(df['MACD_Signal'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD_Signal'].iloc[-1]) else 0
         pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0
         pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0
-        
-        macd_w = float(df_w['MACD'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['MACD'].iloc[-1]) else 0
-        macds_w = float(df_w['MACD_Signal'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0
-        pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0
-        pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0
         
         def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow:
@@ -386,7 +374,25 @@ def process_technical_analysis(sym, name):
             if macd_w > 0: alerts.append("週MACD零上死叉")
             else: alerts.append("週MACD死叉")
             
-        alert_str = "⚠️ " + " / ".join(alerts) if alerts else "✅ 正常"
+        # 🌟 核心：綜合買賣評級判斷
+        action = "➖ 持平"
+        has_strong_sell = any(x in a for a in alerts for x in ["高檔死叉", "零上死叉", "年高點回落"])
+        has_strong_buy = any(x in a for a in alerts for x in ["低檔金叉", "零下金叉"])
+        has_sell = any(x in a for a in alerts for x in ["死叉", "跌破MA20", "20日高點回落"])
+        has_buy = any(x in a for a in alerts for x in ["金叉"])
+        
+        if has_strong_sell:
+            action = "🛑 賣出"
+        elif has_strong_buy:
+            action = "🚀 買進"
+        elif has_sell and not has_buy:
+            action = "⚠️ 減碼"
+        elif has_buy and not has_sell:
+            action = "🔼 加碼"
+        else:
+            action = "➖ 持平"
+
+        alert_str = f"[{action}] " + (" / ".join(alerts) if alerts else "趨勢延續")
 
         pe_str = "無"
         try:
@@ -573,11 +579,14 @@ with tab2:
     
     with st.expander("💡 狀態警示名詞定義說明", expanded=False):
         st.markdown("""
-        * **💤 窄幅盤整 (振幅壓縮)**：過去 20 個交易日的最高價與最低價，上下振幅壓縮在 **7% 以內**，代表價格正處於狹幅箱型整理，波動極小。
-        * **🌀 均線糾結 (醞釀表態)**：短線 (10日)、中線 (20日) 與長線 (季線) 三條均線的數值差距在 **3% 以內**，代表各天期投資人的持股成本趨於一致，隨時可能爆發新方向。
-        * **52週位置 (%)**：目前收盤價處於近 1 年最高價與最低價區間的相對百分比位置。100% 代表正處於最高點，0% 代表處於最低點。
-        * **Beta 係數**：衡量相對大盤的波動度。Beta = 1.0 代表波動與大盤同步；> 1.0 波動比大盤劇烈；< 1.0 波動比大盤穩健。
-        * **發散狀態**：**已金叉，且向上發散** (目前 K > D，多頭延續中) / **已死叉，且向下發散** (目前 K < D，空頭延續中)。
+        * **綜合買賣評級**：系統依據技術指標自動判斷的交易建議。
+            * **🚀 買進**：出現低檔金叉或零下金叉等強烈翻多訊號。
+            * **🛑 賣出**：出現高檔死叉、零上死叉或由年高點大幅回落等強烈翻空訊號。
+            * **🔼 加碼**：出現一般金叉等偏多訊號。
+            * **⚠️ 減碼**：跌破月線、20日高點回落或一般死叉等偏空訊號。
+            * **➖ 持平**：處於盤整或趨勢延續中，無明顯轉折訊號。
+        * **💤 窄幅盤整 (振幅壓縮)**：過去 20 個交易日的最高價與最低價，上下振幅壓縮在 7% 以內，代表價格正處於狹幅箱型整理。
+        * **🌀 均線糾結 (醞釀表態)**：短線 (10日)、中線 (20日) 與長線 (季線) 三條均線的數值差距在 3% 以內，隨時可能爆發新方向。
         """)
     
     with st.spinner("正在計算各標的技術指標..."):
@@ -660,7 +669,7 @@ with tab2:
             
             fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                                      vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
-                                     subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指測 (12,26,9)"))
+                                     subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指標 (12,26,9)"))
             
             fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
@@ -694,12 +703,12 @@ with tab3:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
                 sym = get_yf_ticker_tw(t)
-                scan_list.append((sym, t, '台股'))  # 🌟 傳入純代號 t
+                scan_list.append((sym, t, '台股'))
                 
         for item in PORTFOLIO_US:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
-                scan_list.append((t, t, '美股'))  # 🌟 傳入純代號 t
+                scan_list.append((t, t, '美股'))
                 
         for sym, display_ticker, market in scan_list:
             res = get_perf_div_data(sym, display_ticker, market, bench_returns)
@@ -712,16 +721,16 @@ with tab3:
                 df_perf,
                 column_config={
                     "市場": st.column_config.TextColumn("市場", width="small"),
-                    "標的": st.column_config.TextColumn("代號", width="small"),  # 🌟 欄位優化
+                    "標的": st.column_config.TextColumn("代號", width="small"),
                     "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
                     "近一季報酬": st.column_config.NumberColumn("近一季報酬", format="%.2f %%"),
                     "近半年報酬": st.column_config.NumberColumn("近半年報酬", format="%.2f %%"),
                     "近一年報酬": st.column_config.NumberColumn("近一年報酬", format="%.2f %%"),
-                    "相對大盤(1年)": st.column_config.TextColumn("相對大盤 (1年)", width="medium"),  # 🌟 紅綠燈文字顯示
+                    "相對大盤(1年)": st.column_config.TextColumn("相對大盤 (1年)", width="medium"),
                     "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
                     "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
                     "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
-                    "毛利率": st.column_config.TextColumn("毛利率", width="small"),  # 🌟 後移四欄
+                    "毛利率": st.column_config.TextColumn("毛利率", width="small"),
                     "營益率": st.column_config.TextColumn("營益率", width="small"),
                     "淨利率": st.column_config.TextColumn("淨利率", width="small"),
                     "ROE": st.column_config.TextColumn("ROE", width="small"),
