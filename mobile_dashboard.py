@@ -53,21 +53,25 @@ except:
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (手機輕量化調整)
+# 2. 核心抓取與計算邏輯 (修正：完全對齊 PC 版運算精準度)
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
     return f"{ticker}.TWO" if re.match(r'^\d+B$', ticker) else f"{ticker}.TW"
 
-@st.cache_data(ttl=600)  # 手機端縮短快取時間提高即時感
+@st.cache_data(ttl=600)
 def get_basic_data(ticker):
-    try:
-        hist = yf.Ticker(ticker).history(period="5d")
-        if not hist.empty:
-            price = float(hist['Close'].dropna().iloc[-1])
-            div_2026 = float(hist['Dividends'][hist.index.year == 2026].sum()) if 'Dividends' in hist.columns else 0.0
-            return price, div_2026
-    except: pass
+    # 🌟 修正：恢復抓取 1y 以確保能計算全年預估股息，並加上重試機制確保網路穩定
+    for _ in range(3):
+        try:
+            time.sleep(0.2)
+            hist = yf.Ticker(ticker).history(period="1y")
+            if not hist.empty:
+                price = float(hist['Close'].dropna().iloc[-1])
+                div_2026 = float(hist['Dividends'][hist.index.year == 2026].sum()) if 'Dividends' in hist.columns else 0.0
+                return price, div_2026
+        except:
+            time.sleep(0.5)
     return 0.0, 0.0
 
 @st.cache_data(ttl=600)
@@ -108,7 +112,7 @@ def get_fundamental_info(sym):
 @st.cache_data(ttl=600)
 def get_stock_data(sym):
     try:
-        df = yf.download(sym, period="1y", progress=False) # 手機端僅抓取1年數據加快速度
+        df = yf.download(sym, period="1y", progress=False)
         if not df.empty and len(df) >= 10:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             df.index = df.index.tz_localize(None)
@@ -187,7 +191,6 @@ def process_technical_analysis(sym, name):
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.05: alerts.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%")
         if "金叉" in kd_status or "死叉" in kd_status: alerts.append(kd_status)
         
-        # 30日窄幅盤整偵測
         low_20d = df['Low'].tail(20).min()
         if low_20d > 0 and ((high_20d - low_20d) / low_20d) <= 0.07: alerts.append("💤窄幅盤整")
 
@@ -201,7 +204,6 @@ def process_technical_analysis(sym, name):
 # ==========================================
 st.title("📱 行動投資隨身儀表板")
 
-# 🌟 手機網頁頂部刷新與時間整合為一橫行
 col_l, col_r = st.columns([1, 2])
 with col_l:
     if st.button("🔄 刷新"):
@@ -210,7 +212,6 @@ with col_l:
 with col_r:
     st.caption(f"更新:{datetime.now().strftime('%H:%M')}")
 
-# 🌟 核心變更：將資產、技術、績效、管理四大功能平級化為四個分頁，在手機上極易點選
 tab1, tab2, tab3, tab4 = st.tabs(["💰資產", "📈技術", "🏆績效", "📝管理"])
 
 with tab1:
@@ -218,37 +219,42 @@ with tab1:
         usdtwd = get_usdtwd()
         total_market_value, total_dividends_2026 = 0, 0
         asset_allocation = {}
-        individual_holdings = [] 
 
-        for item in PORTFOLIO_TW + PORTFOLIO_US:
-            t_str = str(item.get('Ticker', '')).strip()
-            if not t_str or t_str == 'nan': continue
+        # 🌟 修正：拆分台股與美股迴圈，避免美股特殊代碼解析錯誤導致市值消失
+        for item in PORTFOLIO_TW:
+            ticker_str = str(item.get('Ticker', '')).strip()
+            if not ticker_str or ticker_str == 'nan': continue
             
-            is_tw = not ('/' in t_str or t_str.isalpha())
-            ticker = get_yf_ticker_tw(t_str) if is_tw else t_str
-            asset_type = str(item.get('類別', '未分類')).strip()
+            ticker = get_yf_ticker_tw(ticker_str)
+            asset_type = str(item.get('類別', '台股未分類')).strip()
             
             price, div = get_basic_data(ticker)
-            
-            # 股數加總
-            s_own = safe_float(item.get('Shares'))
-            s_ext = safe_float(item.get('出借') if is_tw else item.get('複委託'))
-            tot_shares = s_own + s_ext
+            tot_shares = safe_float(item.get('Shares')) + safe_float(item.get('出借'))
             
             if price > 0 and tot_shares > 0:
-                fx = 1.0 if is_tw else usdtwd
-                val = price * tot_shares * fx
-                div_tot = div * tot_shares * fx
-                
+                val = price * tot_shares
                 total_market_value += val
-                total_dividends_2026 += div_tot
+                total_dividends_2026 += div * tot_shares
                 asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
 
-        # 🌟 行動端緊湊型數字卡片
+        for item in PORTFOLIO_US:
+            ticker_str = str(item.get('Ticker', '')).strip()
+            if not ticker_str or ticker_str == 'nan': continue
+            
+            asset_type = str(item.get('類別', '美股未分類')).strip()
+            
+            price, div = get_basic_data(ticker_str)
+            tot_shares = safe_float(item.get('Shares')) + safe_float(item.get('複委託'))
+            
+            if price > 0 and tot_shares > 0:
+                val = price * tot_shares * usdtwd
+                total_market_value += val
+                total_dividends_2026 += div * tot_shares * usdtwd
+                asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+
         st.metric("總市值", f"${total_market_value:,.0f} TWD")
         st.metric("預估股息", f"${total_dividends_2026:,.0f} TWD")
         
-        # 🌟 圖表縮小高度 (320px)，完美適配 iPhone 螢幕
         if asset_allocation:
             df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['類別', '市值'])
             fig_pie = px.pie(df_allocation, values='市值', names='類別', hole=0.4)
@@ -257,18 +263,24 @@ with tab1:
             st.plotly_chart(fig_pie, use_container_width=True)
 
 with tab2:
-    # 🌟 手機版極簡技術掃描表：只留 4 個核心欄位，徹底消滅左右滑動
     with st.spinner("分析指標中..."):
         ta_results = []
         target_options = {}
         
+        # 🌟 修正：拆分技術分析掃描的名稱匹配邏輯
         scan_dict = {}
-        for item in PORTFOLIO_TW + PORTFOLIO_US:
+        for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
-                sym = get_yf_ticker_tw(t) if not ('/' in t or t.isalpha()) else t
+                sym = get_yf_ticker_tw(t)
                 name = str(item.get('名稱', '')).strip()
                 scan_dict[sym] = name if name and name != 'nan' else t
+                
+        for item in PORTFOLIO_US:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                name = str(item.get('名稱', '')).strip()
+                scan_dict[t] = name if name and name != 'nan' else t
 
         for sym, name in scan_dict.items():
             res = process_technical_analysis(sym, name)
@@ -284,13 +296,12 @@ with tab2:
             )
 
     st.divider()
-    # 🌟 底部 K 線圖：高度降至 400px，直式螢幕單手即可無痛縮放
     selected_name = st.selectbox("查看詳細線圖：", options=list(target_options.keys()))
     if selected_name:
         sym = target_options[selected_name]
         df_chart = get_stock_data(sym)
         if df_chart is not None:
-            df_plot = df_chart.tail(80) # 手機端預閱 K 線天數縮減，視覺更清晰
+            df_plot = df_chart.tail(80)
             fig_tech = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
             fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
@@ -300,16 +311,25 @@ with tab2:
             st.plotly_chart(fig_tech, use_container_width=True)
 
 with tab3:
-    # 🌟 手機版極簡績效追蹤表：隱藏複雜長配息字串，純看短中長期數字回報
     with st.spinner("精算回報率中..."):
         bench_returns = get_benchmark_returns()
         perf_results = []
-        for item in PORTFOLIO_TW + PORTFOLIO_US:
+        scan_list = []
+        
+        # 🌟 修正：拆分績效追蹤的名稱匹配邏輯
+        for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
-                sym = get_yf_ticker_tw(t) if not ('/' in t or t.isalpha()) else t
-                res = get_perf_div_data(sym, t, '台股' if sym.endswith('.TW') or sym.endswith('.TWO') else '美股', bench_returns)
-                if res: perf_results.append(res)
+                scan_list.append((get_yf_ticker_tw(t), t, '台股'))
+                
+        for item in PORTFOLIO_US:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                scan_list.append((t, t, '美股'))
+                
+        for sym, display_ticker, market in scan_list:
+            res = get_perf_div_data(sym, display_ticker, market, bench_returns)
+            if res: perf_results.append(res)
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
@@ -319,7 +339,6 @@ with tab3:
             )
 
 with tab4:
-    # 🌟 行動版獨有：將持股管理大表格從隱藏的 Sidebar 釋放，放到獨立 Tab
     st.markdown("### ✏️ 雲端隨身記帳")
     st.caption("更改後點擊下方按鈕即可同步至雲端 Sheets。")
     
