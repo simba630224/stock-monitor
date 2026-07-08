@@ -138,15 +138,17 @@ def get_fundamental_info(sym):
     except:
         return {}
 
+# 🌟 核心升級：替換不穩定的 yf.download 為歷史數據模組
 @st.cache_data(ttl=900)
 def get_stock_data(sym):
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     for _ in range(3):
         try:
             time.sleep(0.3)
-            df = yf.download(sym, period="3y", progress=False)
+            tk = yf.Ticker(sym)
+            df = tk.history(period="3y")
+            
             if not df.empty and len(df) >= 10:
-                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 df.index = df.index.tz_localize(None)
                 df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
                 
@@ -263,7 +265,10 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 def process_technical_analysis(sym, name):
     try:
         df = get_stock_data(sym)
-        if df is None: return None
+        # 🌟 錯誤捕捉升級：如果抓不到資料，主動拋出錯誤交由 except 處理，不再無聲消失
+        if df is None:
+            raise ValueError("無法連線取得歷史 K 線資料")
+            
         is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
         market = '台股' if is_tw else '美股'
         
@@ -283,7 +288,6 @@ def process_technical_analysis(sym, name):
         ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
         
-        # 🌟 修復核心：補回 52週高低點與位階精算定義
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w) * 100) if (high_52w - low_52w) > 0 else 50.0
@@ -375,35 +379,34 @@ def process_technical_analysis(sym, name):
             if macd_w > 0: alerts.append("週MACD零上死叉")
             else: alerts.append("週MACD死叉")
             
-        # 🌟 新增：PC 版同步加入綜合買賣評級邏輯
         action = "➖ 持平"
         has_strong_sell = any(x in a for a in alerts for x in ["高檔死叉", "零上死叉", "年高點回落"])
         has_strong_buy = any(x in a for a in alerts for x in ["低檔金叉", "零下金叉"])
         has_sell = any(x in a for a in alerts for x in ["死叉", "跌破MA20", "20日高點回落"])
         has_buy = any(x in a for a in alerts for x in ["金叉"])
         
-        if has_strong_sell:
-            action = "🛑 賣出"
-        elif has_strong_buy:
-            action = "🚀 買進"
-        elif has_sell and not has_buy:
-            action = "⚠️ 減碼"
-        elif has_buy and not has_sell:
-            action = "🔼 加碼"
-        else:
-            action = "➖ 持平"
+        if has_strong_sell: action = "🛑 賣出"
+        elif has_strong_buy: action = "🚀 買進"
+        elif has_sell and not has_buy: action = "⚠️ 減碼"
+        elif has_buy and not has_sell: action = "🔼 加碼"
+        else: action = "➖ 持平"
 
         alert_str = f"[{action}] " + (" / ".join(alerts) if alerts else "趨勢延續")
 
+        # 🌟 安全捕捉與轉型保護，防止特定 ETF 基本面缺漏導致當機
         pe_str = "無"
         try:
             pe_val = yf.Ticker(sym).info.get('trailingPE')
-            if pd.notna(pe_val): pe_str = f"{pe_val:.1f}"
+            if pe_val is not None and str(pe_val).strip() != '':
+                pe_str = f"{float(pe_val):.1f}"
         except: pass
 
         f_info = get_fundamental_info(sym)
         beta_val = f_info.get('beta')
-        beta_str = f"{beta_val:.2f}" if beta_val is not None and pd.notna(beta_val) else "無"
+        try:
+            beta_str = f"{float(beta_val):.2f}" if beta_val is not None and str(beta_val).strip() != '' else "無"
+        except: 
+            beta_str = "無"
 
         return {
             "市場": market, 
@@ -417,14 +420,31 @@ def process_technical_analysis(sym, name):
             "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})",
             "P/E": pe_str,
             "收盤價": last_p, 
-            "近一年高點": high_52w,
             "MA20": ma20, 
             "季線": ma_season, 
             "半年線": ma_half, 
             "年線": ma_year
         }
+        
     except Exception as e:
-        return None
+        # 🌟 終極防護網：如果該檔股票運算失敗，會直接在表格中顯示錯誤原因，確保表格正常渲染！
+        return {
+            "市場": "⚠️ 異常",
+            "標的": f"{name} ({sym})",
+            "狀態警示": f"資料載入失敗",
+            "52週位置": "-",
+            "Beta": "-",
+            "日KD": "-",
+            "週KD": "-",
+            "日MACD": "-",
+            "週MACD": "-",
+            "P/E": "-",
+            "收盤價": 0.0,
+            "MA20": 0.0,
+            "季線": 0.0,
+            "半年線": 0.0,
+            "年線": 0.0
+        }
 
 # ==========================================
 # 3. 網頁 UI 渲染
@@ -614,7 +634,9 @@ with tab2:
             res = process_technical_analysis(sym, name)
             if res: 
                 ta_results.append(res)
-                target_options[f"{name} ({sym})"] = sym
+                # 只有在非錯誤狀況下，才加入 K 線圖的下拉選單
+                if "⚠️ 異常" not in res.get("市場", ""):
+                    target_options[f"{name} ({sym})"] = sym
             
         if ta_results:
             df_ta = pd.DataFrame(ta_results)
@@ -648,7 +670,10 @@ with tab2:
     
     col_select_stock, col_select_period = st.columns([2, 1])
     with col_select_stock:
-        selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()))
+        # 如果因為網路問題 target_options 是空的，給予預設提示避免報錯
+        options_list = list(target_options.keys()) if target_options else ["暫無可繪圖標的"]
+        selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=options_list)
+        
     with col_select_period:
         period_label = st.selectbox("請選擇 K 線圖時間軸顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
     
@@ -659,7 +684,7 @@ with tab2:
     else:
         tail_days = 9999 
         
-    if selected_name:
+    if selected_name and selected_name != "暫無可繪圖標的":
         sym = target_options[selected_name]
         df_chart = get_stock_data(sym)
         if df_chart is not None:
