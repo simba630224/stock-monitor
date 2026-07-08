@@ -283,6 +283,7 @@ def process_technical_analysis(sym, name):
         ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
         ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
         
+        # 🌟 修復核心：補回 52週高低點與位階精算定義
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w) * 100) if (high_52w - low_52w) > 0 else 50.0
@@ -374,7 +375,7 @@ def process_technical_analysis(sym, name):
             if macd_w > 0: alerts.append("週MACD零上死叉")
             else: alerts.append("週MACD死叉")
             
-        # 🌟 核心：綜合買賣評級判斷
+        # 🌟 新增：PC 版同步加入綜合買賣評級邏輯
         action = "➖ 持平"
         has_strong_sell = any(x in a for a in alerts for x in ["高檔死叉", "零上死叉", "年高點回落"])
         has_strong_buy = any(x in a for a in alerts for x in ["低檔金叉", "零下金叉"])
@@ -587,6 +588,8 @@ with tab2:
             * **➖ 持平**：處於盤整或趨勢延續中，無明顯轉折訊號。
         * **💤 窄幅盤整 (振幅壓縮)**：過去 20 個交易日的最高價與最低價，上下振幅壓縮在 7% 以內，代表價格正處於狹幅箱型整理。
         * **🌀 均線糾結 (醞釀表態)**：短線 (10日)、中線 (20日) 與長線 (季線) 三條均線的數值差距在 3% 以內，隨時可能爆發新方向。
+        * **52週位置 (%)**：目前收盤價處於近 1 年最高價與最低價區間的相對百分比位置。100% 代表正處於最高點。
+        * **Beta 係數**：衡量相對大盤的波動度。Beta = 1.0 代表波動與大盤同步。
         """)
     
     with st.spinner("正在計算各標的技術指標..."):
