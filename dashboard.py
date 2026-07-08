@@ -138,20 +138,19 @@ def get_fundamental_info(sym):
     except:
         return {}
 
-# 🌟 終極修正版：全面換用不被阻擋的 yf.Ticker().history() 引擎，並加上數學防呆保護
 @st.cache_data(ttl=900)
 def get_stock_data(sym):
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     for _ in range(3):
         try:
             time.sleep(0.3)
-            tk = yf.Ticker(sym)
-            df = tk.history(period="3y")
-            
+            df = yf.download(sym, period="3y", progress=False)
             if not df.empty and len(df) >= 10:
-                # 安全處理時區，確保後續週K線 resample 絕對不會報錯
+                if isinstance(df.columns, pd.MultiIndex): 
+                    df.columns = df.columns.get_level_values(0)
+                
                 if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-                    df.index = df.index.tz_localize(None)
+                    df.index = df.index.tz_convert(None)
                     
                 df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
                 
@@ -170,7 +169,6 @@ def get_stock_data(sym):
                 low_min = df['Low'].rolling(9).min()
                 high_max = df['High'].rolling(9).max()
                 
-                # 數學防呆：加入 1e-9 微小常數，防止高低點相同時發生「除以零」的崩潰錯誤
                 rsv = (df['Close'] - low_min) / (high_max - low_min + 1e-9) * 100
                 df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
                 df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
@@ -182,7 +180,7 @@ def get_stock_data(sym):
                 df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
                 
                 return df
-        except Exception as e:
+        except:
             time.sleep(1)
     return None
 
@@ -271,14 +269,13 @@ def process_technical_analysis(sym, name):
     try:
         df = get_stock_data(sym)
         if df is None or df.empty:
-            raise ValueError("yfinance 抓取為空")
+            raise ValueError("歷史 K 線載入失敗")
             
         is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
         market = '台股' if is_tw else '美股'
         
         df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
         if not df_w.empty:
-            # 🌟 週線指標同等加入 1e-9 防呆保護
             low_min_w = df_w['Low'].rolling(9).min()
             high_max_w = df_w['High'].rolling(9).max()
             rsv_w = (df_w['Close'] - low_min_w) / (high_max_w - low_min_w + 1e-9) * 100
@@ -298,7 +295,6 @@ def process_technical_analysis(sym, name):
         
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
-        # 🌟 位階運算防呆
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1e-9) * 100) if (high_52w - low_52w) > 0 else 50.0
 
         high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
@@ -318,6 +314,12 @@ def process_technical_analysis(sym, name):
         macds_d = float(df['MACD_Signal'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD_Signal'].iloc[-1]) else 0
         pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0
         pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0
+        
+        # 🌟 補回因為上一步修改而不小心被刪除的週 MACD 變數定義，完全解決 NameError!
+        macd_w = float(df_w['MACD'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['MACD'].iloc[-1]) else 0
+        macds_w = float(df_w['MACD_Signal'].iloc[-1]) if len(df_w) > 0 and pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0
+        pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0
+        pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0
         
         def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow:
@@ -439,7 +441,6 @@ def process_technical_analysis(sym, name):
         }
         
     except Exception as e:
-        # 🌟 錯誤透明化：如果還是遇到 Yahoo API 阻擋，會直接印出原因，不會再讓整個大表死當
         err_msg = str(e) if str(e) else "API阻擋或網路中斷"
         return {
             "市場": "⚠️ 異常",
