@@ -138,21 +138,20 @@ def get_fundamental_info(sym):
     except:
         return {}
 
-# 🌟 已恢復為最穩定的 yf.download 引擎，並加上時區防呆機制
+# 🌟 終極修正版：全面換用不被阻擋的 yf.Ticker().history() 引擎，並加上數學防呆保護
 @st.cache_data(ttl=900)
 def get_stock_data(sym):
     is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     for _ in range(3):
         try:
             time.sleep(0.3)
-            df = yf.download(sym, period="3y", progress=False)
+            tk = yf.Ticker(sym)
+            df = tk.history(period="3y")
+            
             if not df.empty and len(df) >= 10:
-                if isinstance(df.columns, pd.MultiIndex): 
-                    df.columns = df.columns.get_level_values(0)
-                
-                # 安全處理時區問題，避免 TypeError
+                # 安全處理時區，確保後續週K線 resample 絕對不會報錯
                 if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-                    df.index = df.index.tz_convert(None)
+                    df.index = df.index.tz_localize(None)
                     
                 df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
                 
@@ -170,7 +169,9 @@ def get_stock_data(sym):
                 
                 low_min = df['Low'].rolling(9).min()
                 high_max = df['High'].rolling(9).max()
-                rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
+                
+                # 數學防呆：加入 1e-9 微小常數，防止高低點相同時發生「除以零」的崩潰錯誤
+                rsv = (df['Close'] - low_min) / (high_max - low_min + 1e-9) * 100
                 df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
                 df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
                 
@@ -181,7 +182,7 @@ def get_stock_data(sym):
                 df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
                 
                 return df
-        except:
+        except Exception as e:
             time.sleep(1)
     return None
 
@@ -269,17 +270,19 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 def process_technical_analysis(sym, name):
     try:
         df = get_stock_data(sym)
-        
-        # 🌟 安全攔截：若真的抓不到資料，拋出異常進入 except 區塊渲染空白行
         if df is None or df.empty:
-            raise ValueError("歷史 K 線載入失敗")
+            raise ValueError("yfinance 抓取為空")
             
         is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
         market = '台股' if is_tw else '美股'
         
         df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
         if not df_w.empty:
-            df_w['K_w'] = ((df_w['Close'] - df_w['Low'].rolling(9).min()) / (df_w['High'].rolling(9).max() - df_w['Low'].rolling(9).min()) * 100).ewm(com=2, adjust=False).mean()
+            # 🌟 週線指標同等加入 1e-9 防呆保護
+            low_min_w = df_w['Low'].rolling(9).min()
+            high_max_w = df_w['High'].rolling(9).max()
+            rsv_w = (df_w['Close'] - low_min_w) / (high_max_w - low_min_w + 1e-9) * 100
+            df_w['K_w'] = rsv_w.ewm(com=2, adjust=False).mean()
             df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
             df_w['EMA12'] = df_w['Close'].ewm(span=12, adjust=False).mean()
             df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
@@ -295,7 +298,8 @@ def process_technical_analysis(sym, name):
         
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
-        pos_52w = ((last_p - low_52w) / (high_52w - low_52w) * 100) if (high_52w - low_52w) > 0 else 50.0
+        # 🌟 位階運算防呆
+        pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1e-9) * 100) if (high_52w - low_52w) > 0 else 50.0
 
         high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
         low_20d = df['Low'].tail(20).min() if len(df) > 0 else 0
@@ -411,7 +415,10 @@ def process_technical_analysis(sym, name):
 
         f_info = get_fundamental_info(sym)
         beta_val = f_info.get('beta')
-        beta_str = f"{beta_val:.2f}" if beta_val is not None and pd.notna(beta_val) else "無"
+        try:
+            beta_str = f"{float(beta_val):.2f}" if beta_val is not None and str(beta_val).strip() != '' else "無"
+        except: 
+            beta_str = "無"
 
         return {
             "市場": market, 
@@ -425,7 +432,6 @@ def process_technical_analysis(sym, name):
             "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})",
             "P/E": pe_str,
             "收盤價": last_p, 
-            "近一年高點": high_52w,
             "MA20": ma20, 
             "季線": ma_season, 
             "半年線": ma_half, 
@@ -433,11 +439,12 @@ def process_technical_analysis(sym, name):
         }
         
     except Exception as e:
-        # 🌟 如果單一股票發生錯誤，安全攔截並輸出空白，保證整個大表格不崩潰！
+        # 🌟 錯誤透明化：如果還是遇到 Yahoo API 阻擋，會直接印出原因，不會再讓整個大表死當
+        err_msg = str(e) if str(e) else "API阻擋或網路中斷"
         return {
             "市場": "⚠️ 異常",
             "標的": f"{name} ({sym})",
-            "狀態警示": "資料載入失敗",
+            "狀態警示": f"載入失敗: {err_msg}",
             "52週位置": "-",
             "Beta": "-",
             "日KD": "-",
