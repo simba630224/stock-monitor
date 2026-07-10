@@ -596,3 +596,105 @@ with tab2:
                     "52週位置": st.column_config.TextColumn("52週位置", width="small"),
                     "Beta": st.column_config.TextColumn("Beta", width="small"),
                     "日KD": st.column_config.TextColumn("日 KD", width="medium"),
+                    "週KD": st.column_config.TextColumn("週 KD", width="medium"),
+                    "日MACD": st.column_config.TextColumn("日 MACD", width="medium"),
+                    "週MACD": st.column_config.TextColumn("週 MACD", width="medium"),
+                    "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                    "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
+                    "季線": st.column_config.NumberColumn("季線", format="%.2f"),
+                },
+                hide_index=True, use_container_width=True, height=450
+            )
+
+    st.divider()
+    
+    st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
+    
+    col_select_stock, col_select_period = st.columns([2, 1])
+    with col_select_stock:
+        selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()) if target_options else ["暫無可繪圖標的"])
+    with col_select_period:
+        period_label = st.selectbox("請選擇顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
+    
+    tail_days = 150 if period_label == "半年 (150日)" else (252 if period_label == "一年 (252日)" else 9999)
+        
+    if selected_name and selected_name != "暫無可繪圖標的":
+        sym = target_options[selected_name]
+        df_chart = get_stock_data(sym)
+        if df_chart is not None:
+            df_plot = df_chart.tail(tail_days)
+            
+            fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25], subplot_titles=(f"{selected_name} - 走勢圖", "日 KD 指標", "MACD 指標 (12,26,9)"))
+            
+            if 'Open' in df_plot.columns and 'High' in df_plot.columns and 'Low' in df_plot.columns:
+                fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
+            else:
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['Close'], mode='lines', name='收盤價'), row=1, col=1)
+                
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name="季線"), row=1, col=1)
+            
+            if 'K_d' in df_plot.columns:
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值'), row=2, col=1)
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值'), row=2, col=1)
+            fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
+            fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
+            
+            macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
+            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC'), row=3, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD'), row=3, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal'), row=3, col=1)
+            
+            fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
+            st.plotly_chart(fig_tech, use_container_width=True)
+
+with tab3:
+    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**超額大盤表現 (Alpha)**、**基本面財報指標**與**近一年真實配息紀錄**。")
+    with st.spinner("正在計算各標的績效與配息資料..."):
+        bench_returns = get_benchmark_returns()
+        perf_results = []
+        scan_list = []
+        
+        for item in PORTFOLIO_TW:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan': scan_list.append((get_yf_ticker_tw(t), str(item.get('名稱', '')).strip() or t, '台股'))
+                
+        for item in PORTFOLIO_US:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan': scan_list.append((t, str(item.get('名稱', '')).strip() or t, '美股'))
+                
+        for sym, display_ticker, market in scan_list:
+            res = get_perf_div_data(sym, display_ticker, market, bench_returns)
+            if res: perf_results.append(res)
+                
+        if perf_results:
+            st.dataframe(pd.DataFrame(perf_results), hide_index=True, use_container_width=True, height=600)
+
+with st.sidebar:
+    st.header("📝 持股與觀察名單管理")
+    st.markdown("想要追蹤某檔股票嗎？**新增代號並將股數設為 0**，它就會自動加入技術分析掃描！")
+    
+    st.subheader("🇹🇼 台股清單")
+    if not df_tw.empty:
+        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
+        if st.button("💾 儲存台股變更", use_container_width=True):
+            with st.spinner("正在寫入台股資料..."):
+                try:
+                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
+                    st.success("✅ 台股更新成功！請重新整理網頁。")
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("台股清單目前為空。")
+
+    st.divider()
+
+    st.subheader("🇺🇸 美股清單")
+    if not df_us.empty:
+        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
+        if st.button("💾 儲存美股變更", use_container_width=True):
+            with st.spinner("正在寫入美股資料..."):
+                try:
+                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    st.success("✅ 美股更新成功！請重新整理網頁。")
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("美股清單目前為空。")
