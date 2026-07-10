@@ -154,13 +154,11 @@ def get_stock_data(sym):
                 if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
                     df.index = df.index.tz_convert(None)
                     
-                # 清洗並確保必要欄位存在
                 available_cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
                 df = df[available_cols].astype(float).dropna(subset=['Close'])
                 
                 if 'Close' not in df.columns: continue
                 
-                # 補充日 K 線均線與指標
                 df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
                 df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
                 
@@ -270,17 +268,14 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
             time.sleep(1)
     return None
 
+# 【核心修正點】精準對齊參數：只接受三個位置參數 (sym, name, market)
 @st.cache_data(ttl=900)
-def process_technical_analysis(sym, name):
+def process_technical_analysis(sym, name, market):
     try:
         df = get_stock_data(sym)
         if df is None or df.empty or 'Close' not in df.columns:
             raise ValueError("歷史 K 線數據讀取為空")
             
-        is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
-        market = '台股' if is_tw else '美股'
-        
-        # 安全重採樣週 K 線機制 (防止因特定索引或欄位漏缺而當機)
         has_enough_weekly = False
         k_w, d_w, macd_w, macds_w = 0.0, 0.0, 0.0, 0.0
         pk_w, pd_w, pmacd_w, pmacds_w = 0.0, 0.0, 0.0, 0.0
@@ -615,22 +610,25 @@ with tab2:
         ta_results = []
         target_options = {} 
         
-        scan_dict = {}
+        scan_list = []
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
                 sym = get_yf_ticker_tw(t)
                 name = str(item.get('名稱', '')).strip()
-                scan_dict[sym] = name if name and name != 'nan' else t
+                display_name = name if name and name != 'nan' else t
+                scan_list.append((sym, display_name, '台股'))
                 
         for item in PORTFOLIO_US:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
                 name = str(item.get('名稱', '')).strip()
-                scan_dict[t] = name if name and name != 'nan' else t
+                display_name = name if name and name != 'nan' else t
+                scan_list.append((t, display_name, '美股'))
 
-        for sym, name in scan_dict.items():
-            res = process_technical_analysis(sym, name)
+        # 【核心修正點】呼叫處精準傳入三個參數：(sym, name, market)
+        for sym, name, market in scan_list:
+            res = process_technical_analysis(sym, name, market)
             if res: 
                 ta_results.append(res)
                 if "⚠️ 異常" not in res.get("市場", ""):
@@ -733,12 +731,16 @@ with tab3:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
                 sym = get_yf_ticker_tw(t)
-                scan_list.append((sym, t, '台股'))
+                name = str(item.get('名稱', '')).strip()
+                display_name = name if name and name != 'nan' else t
+                scan_list.append((sym, display_name, '台股'))
                 
         for item in PORTFOLIO_US:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
-                scan_list.append((t, t, '美股'))
+                name = str(item.get('名稱', '')).strip()
+                display_name = name if name and name != 'nan' else t
+                scan_list.append((t, display_name, '美股'))
                 
         for sym, display_ticker, market in scan_list:
             res = get_perf_div_data(sym, display_ticker, market, bench_returns)
