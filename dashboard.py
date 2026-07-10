@@ -57,14 +57,12 @@ except Exception as e:
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (精準修正 4 位與 6 位數上市櫃規格)
+# 2. 核心抓取與計算邏輯
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
-    # 只有明確帶字母 'B' 的債券、或含有其他字母的櫃買權證才走 .TWO
     if re.match(r'^\d+B$', ticker) or (not ticker.isdigit() and '.' not in ticker):
         return f"{ticker}.TWO"
-    # 所有的 4 位數、6 位數純數字股票/ETF (0050, 006208, 009815 等) 一律回歸標準的 .TW
     return f"{ticker}.TW"
 
 @st.cache_data(ttl=900)
@@ -156,8 +154,13 @@ def get_stock_data(sym):
                 if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
                     df.index = df.index.tz_convert(None)
                     
-                df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
+                # 清洗並確保必要欄位存在
+                available_cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
+                df = df[available_cols].astype(float).dropna(subset=['Close'])
                 
+                if 'Close' not in df.columns: continue
+                
+                # 補充日 K 線均線與指標
                 df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
                 df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
                 
@@ -170,12 +173,15 @@ def get_stock_data(sym):
                     df['半年線'] = df['Close'].rolling(100, min_periods=1).mean()
                     df['年線'] = df['Close'].rolling(200, min_periods=1).mean()
                 
-                low_min = df['Low'].rolling(9, min_periods=1).min()
-                high_max = df['High'].rolling(9, min_periods=1).max()
-                
-                rsv = (df['Close'] - low_min) / (high_max - low_min + 1e-9) * 100
-                df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
-                df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
+                if 'High' in df.columns and 'Low' in df.columns:
+                    low_min = df['Low'].rolling(9, min_periods=1).min()
+                    high_max = df['High'].rolling(9, min_periods=1).max()
+                    rsv = (df['Close'] - low_min) / (high_max - low_min + 1e-9) * 100
+                    df['K_d'] = rsv.ewm(com=2, adjust=False).mean()
+                    df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
+                else:
+                    df['K_d'] = 50.0
+                    df['D_d'] = 50.0
                 
                 df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
                 df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
@@ -255,20 +261,10 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
                 return {
-                    "市場": market,
-                    "標的": display_ticker,
-                    "最新收盤價": curr_p,
-                    "近一季報酬": ret_1q,
-                    "近半年報酬": ret_6m,
-                    "近一年報酬": ret_1y,
-                    "相對大盤(1年)": rel_str_display,
-                    "近一年殖利率": yield_1y,
-                    "總配息金額": tot_div,
-                    "近一年配息明細": div_history_str,
-                    "毛利率": gross_m,
-                    "營益率": op_m,
-                    "淨利率": prof_m,
-                    "ROE": roe
+                    "市場": market, "標的": display_ticker, "最新收盤價": curr_p,
+                    "近一季報酬": ret_1q, "近半年報酬": ret_6m, "近一年報酬": ret_1y,
+                    "相對大盤(1年)": rel_str_display, "近一年殖利率": yield_1y, "總配息金額": tot_div,
+                    "近一年配息明細": div_history_str, "毛利率": gross_m, "營益率": op_m, "淨利率": prof_m, "ROE": roe
                 }
         except:
             time.sleep(1)
@@ -278,59 +274,79 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 def process_technical_analysis(sym, name):
     try:
         df = get_stock_data(sym)
-        if df is None or df.empty:
-            raise ValueError("歷史 K 線載入失敗")
+        if df is None or df.empty or 'Close' not in df.columns:
+            raise ValueError("歷史 K 線數據讀取為空")
             
         is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
         market = '台股' if is_tw else '美股'
         
-        df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-        has_enough_weekly = len(df_w) >= 2
+        # 安全重採樣週 K 線機制 (防止因特定索引或欄位漏缺而當機)
+        has_enough_weekly = False
+        k_w, d_w, macd_w, macds_w = 0.0, 0.0, 0.0, 0.0
+        pk_w, pd_w, pmacd_w, pmacds_w = 0.0, 0.0, 0.0, 0.0
         
-        if has_enough_weekly:
-            low_min_w = df_w['Low'].rolling(9, min_periods=1).min()
-            high_max_w = df_w['High'].rolling(9, min_periods=1).max()
-            rsv_w = (df_w['Close'] - low_min_w) / (high_max_w - low_min_w + 1e-9) * 100
-            df_w['K_w'] = rsv_w.ewm(com=2, adjust=False).mean()
-            df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
-            df_w['EMA12'] = df_w['Close'].ewm(span=12, adjust=False).mean()
-            df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
-            df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
-            df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
+        try:
+            agg_dict = {}
+            if 'Open' in df.columns: agg_dict['Open'] = 'first'
+            if 'High' in df.columns: agg_dict['High'] = 'max'
+            if 'Low' in df.columns: agg_dict['Low'] = 'min'
+            agg_dict['Close'] = 'last'
+            if 'Volume' in df.columns: agg_dict['Volume'] = 'sum'
+            
+            df_w = df.resample('W-FRI').agg(agg_dict).dropna(subset=['Close'])
+            if len(df_w) >= 2:
+                has_enough_weekly = True
+                if 'High' in df_w.columns and 'Low' in df_w.columns:
+                    low_min_w = df_w['Low'].rolling(9, min_periods=1).min()
+                    high_max_w = df_w['High'].rolling(9, min_periods=1).max()
+                    rsv_w = (df_w['Close'] - low_min_w) / (high_max_w - low_min_w + 1e-9) * 100
+                    df_w['K_w'] = rsv_w.ewm(com=2, adjust=False).mean()
+                    df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
+                else:
+                    df_w['K_w'] = 50.0
+                    df_w['D_w'] = 50.0
+                    
+                df_w['EMA12'] = df_w['Close'].ewm(span=12, adjust=False).mean()
+                df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
+                df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
+                df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
+                
+                k_w = float(df_w['K_w'].iloc[-1]) if pd.notna(df_w['K_w'].iloc[-1]) else 0.0
+                d_w = float(df_w['D_w'].iloc[-1]) if pd.notna(df_w['D_w'].iloc[-1]) else 0.0
+                macd_w = float(df_w['MACD'].iloc[-1]) if pd.notna(df_w['MACD'].iloc[-1]) else 0.0
+                macds_w = float(df_w['MACD_Signal'].iloc[-1]) if pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0.0
+                
+                if len(df_w) > 1:
+                    pk_w = float(df_w['K_w'].iloc[-2]) if pd.notna(df_w['K_w'].iloc[-2]) else 0.0
+                    pd_w = float(df_w['D_w'].iloc[-2]) if pd.notna(df_w['D_w'].iloc[-2]) else 0.0
+                    pmacd_w = float(df_w['MACD'].iloc[-2]) if pd.notna(df_w['MACD'].iloc[-2]) else 0.0
+                    pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0.0
+        except:
+            has_enough_weekly = False
         
-        last_p = float(df['Close'].iloc[-1]) if len(df) > 0 else 0
-        ma10 = float(df['MA10'].iloc[-1]) if len(df) > 0 and pd.notna(df['MA10'].iloc[-1]) else 0
-        ma20 = float(df['MA20'].iloc[-1]) if len(df) > 0 and pd.notna(df['MA20'].iloc[-1]) else 0
-        ma_season = float(df['季線'].iloc[-1]) if len(df) > 0 and pd.notna(df['季線'].iloc[-1]) else 0
-        ma_half = float(df['半年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['半年線'].iloc[-1]) else 0
-        ma_year = float(df['年線'].iloc[-1]) if len(df) > 0 and pd.notna(df['年線'].iloc[-1]) else 0
+        last_p = float(df['Close'].iloc[-1])
+        ma10 = float(df['MA10'].iloc[-1]) if pd.notna(df['MA10'].iloc[-1]) else 0.0
+        ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0.0
+        ma_season = float(df['季線'].iloc[-1]) if pd.notna(df['季線'].iloc[-1]) else 0.0
+        ma_half = float(df['半年線'].iloc[-1]) if pd.notna(df['半年線'].iloc[-1]) else 0.0
+        ma_year = float(df['年線'].iloc[-1]) if pd.notna(df['年線'].iloc[-1]) else 0.0
         
-        high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
-        low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
+        high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
+        low_52w = df['Low'].tail(252).min() if 'Low' in df.columns else 0.0
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1e-9) * 100) if (high_52w - low_52w) > 0 else 50.0
 
-        high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
-        low_20d = df['Low'].tail(20).min() if len(df) > 0 else 0
+        high_20d = df['High'].tail(20).max() if 'High' in df.columns else 0.0
+        low_20d = df['Low'].tail(20).min() if 'Low' in df.columns else 0.0
         
-        k_d = float(df['K_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['K_d'].iloc[-1]) else 0
-        d_d = float(df['D_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['D_d'].iloc[-1]) else 0
-        pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and pd.notna(df['K_d'].iloc[-2]) else 0
-        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and pd.notna(df['D_d'].iloc[-2]) else 0
+        k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-1]) else 0.0
+        d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-1]) else 0.0
+        pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 0.0
+        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-2]) else 0.0
         
-        k_w = float(df_w['K_w'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['K_w'].iloc[-1]) else 0.0
-        d_w = float(df_w['D_w'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['D_w'].iloc[-1]) else 0.0
-        pk_w = float(df_w['K_w'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['K_w'].iloc[-2]) else 0.0
-        pd_w = float(df_w['D_w'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['D_w'].iloc[-2]) else 0.0
-
-        macd_d = float(df['MACD'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD'].iloc[-1]) else 0
-        macds_d = float(df['MACD_Signal'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD_Signal'].iloc[-1]) else 0
-        pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0
-        pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0
-        
-        macd_w = float(df_w['MACD'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['MACD'].iloc[-1]) else 0.0
-        macds_w = float(df_w['MACD_Signal'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0.0
-        pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0.0
-        pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0.0
+        macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
+        macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
+        pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0.0
+        pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0.0
         
         def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow:
@@ -423,28 +439,17 @@ def process_technical_analysis(sym, name):
             beta_str = "無"
 
         return {
-            "市場": market, 
-            "標的": f"{name} ({sym})", 
-            "狀態警示": alert_str, 
-            "52週位置": f"{pos_52w:.1f} %",
-            "Beta": beta_str,
-            "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
-            "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})" if has_enough_weekly else "資料不足",
+            "市場": market, "標的": f"{name} ({sym})", "狀態警示": alert_str, "52週位置": f"{pos_52w:.1f} %",
+            "Beta": beta_str, "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
+            "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})",
             "日MACD": f"DIF:{macd_d:.2f} ({macd_d_status})",
-            "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})" if has_enough_weekly else "資料不足",
-            "P/E": pe_str,
-            "收盤價": last_p, 
-            "MA20": ma20, 
-            "季線": ma_season, 
-            "半年線": ma_half, 
-            "年線": ma_year
+            "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})",
+            "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season, "半年線": ma_half, "年線": ma_year
         }
         
     except Exception as e:
         return {
-            "市場": "⚠️ 異常",
-            "標的": f"{name} ({sym})",
-            "狀態警示": f"載入失敗: {str(e)}",
+            "市場": "⚠️ 異常", "標的": f"{name} ({sym})", "狀態警示": f"載入失敗: {str(e)}",
             "52週位置": "-", "Beta": "-", "日KD": "-", "週KD": "-", "日MACD": "-", "週MACD": "-", "P/E": "-",
             "收盤價": 0.0, "MA20": 0.0, "季線": 0.0, "半年線": 0.0, "年線": 0.0
         }
@@ -501,12 +506,8 @@ with tab1:
                     display_name = name_str if name_str and name_str != 'nan' else ticker_str
                         
                     individual_holdings.append({
-                        '標的': display_name, 
-                        '標的與股數': f"{display_name} ({disp_qty})", 
-                        '總市值': val, 
-                        '股息': div_tot, 
-                        '類別': asset_type,
-                        '總股數': total_shares
+                        '標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", 
+                        '總市值': val, '股息': div_tot, '類別': asset_type, '總股數': total_shares
                     })
 
         for item in PORTFOLIO_US:
@@ -530,17 +531,12 @@ with tab1:
                     total_dividends_2026 += div_tot
                     
                     disp_qty = f"{total_shares:g}股"
-                    
                     name_str = str(item.get('名稱', '')).strip()
                     display_name = name_str if name_str and name_str != 'nan' else ticker_str
                     
                     individual_holdings.append({
-                        '標的': display_name, 
-                        '標的與股數': f"{display_name} ({disp_qty})", 
-                        '總市值': val, 
-                        '股息': div_tot, 
-                        '類別': asset_type,
-                        '總股數': total_shares
+                        '標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", 
+                        '總市值': val, '股息': div_tot, '類別': asset_type, '總股數': total_shares
                     })
 
     col1, col2, col3 = st.columns(3)
@@ -700,15 +696,20 @@ with tab2:
                                      vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
                                      subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指標 (12,26,9)"))
             
-            fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
+            if 'Open' in df_plot.columns and 'High' in df_plot.columns and 'Low' in df_plot.columns:
+                fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
+            else:
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['Close'], mode='lines', name='收盤價線'), row=1, col=1)
+                
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name=season_label), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['半年線'], line=dict(color='magenta', width=1.5), name=half_label), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['年線'], line=dict(color='cyan', width=1.5), name=year_label), row=1, col=1)
             
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值 (日)'), row=2, col=1)
+            if 'K_d' in df_plot.columns:
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值 (日)'), row=2, col=1)
             fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
             fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
             
