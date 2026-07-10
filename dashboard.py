@@ -57,24 +57,20 @@ except Exception as e:
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (智慧型代號路由規則)
+# 2. 核心抓取與計算邏輯 (修正後的代號路由規則)
 # ==========================================
 def get_yf_ticker_tw(ticker):
-    ticker = str(ticker).strip()
-    ticker = ticker.replace('.TW', '').replace('.TWO', '')
+    ticker = str(ticker).strip().upper()
     
-    # 1. 如果包含任何英文字母 (例如 937B, 981A, 988A) 一律屬於櫃買中心商品
-    if re.search(r'[a-zA-Z]', ticker):
-        return f"{ticker}.TWO"
-    
-    # 2. 如果是 6 位數純數字，且為 0098 或是 0097 開頭的新型股票型/主動式/海外型 ETF，也在櫃買中心掛牌
-    if ticker.isdigit() and len(ticker) == 6 and (ticker.startswith("0098") or ticker.startswith("0097")):
+    # 1. 尊重使用者已明確指定的後綴 (例如手動輸入 3293.TWO)
+    if ticker.endswith('.TW') or ticker.endswith('.TWO'):
+        return ticker
+        
+    # 2. 債券型 ETF 或特定上櫃商品 (通常結尾為 B 或 C)
+    if ticker.endswith('B') or ticker.endswith('C'):
         return f"{ticker}.TWO"
         
-    # 3. 其他標準 4 位數股票、6 位數常規上市 ETF (如 0050, 006208) 走證交所規格
-    if not ticker.isdigit() and '.' not in ticker:
-        return f"{ticker}.TWO"
-        
+    # 3. 其他主動型 (結尾為 A)、一般股票與原型 ETF 預設皆為上市
     return f"{ticker}.TW"
 
 @st.cache_data(ttl=900)
@@ -248,7 +244,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 quote_type = str(f_info.get('quoteType', '')).upper()
                 is_etf = 'ETF' in quote_type or 'MUTUALFUND' in quote_type
                 
-                # 修正：將單行 Ternary Operator 改為標準的多行 if-else 結構，確保不再發生 SyntaxError
                 def fmt_pct(val):
                     if is_etf: 
                         return "ETF/不適用"
