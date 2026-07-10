@@ -308,4 +308,296 @@ def process_technical_analysis(sym, name):
         
         high_52w = df['High'].tail(252).max() if len(df) > 0 else 0
         low_52w = df['Low'].tail(252).min() if len(df) > 0 else 0
-        pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1
+        pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1e-9) * 100) if (high_52w - low_52w) > 0 else 50.0
+
+        high_20d = df['High'].tail(20).max() if len(df) > 0 else 0
+        low_20d = df['Low'].tail(20).min() if len(df) > 0 else 0
+        
+        k_d = float(df['K_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['K_d'].iloc[-1]) else 0
+        d_d = float(df['D_d'].iloc[-1]) if len(df) > 0 and pd.notna(df['D_d'].iloc[-1]) else 0
+        pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and pd.notna(df['K_d'].iloc[-2]) else 0
+        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and pd.notna(df['D_d'].iloc[-2]) else 0
+        
+        k_w = float(df_w['K_w'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['K_w'].iloc[-1]) else 0.0
+        d_w = float(df_w['D_w'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['D_w'].iloc[-1]) else 0.0
+        pk_w = float(df_w['K_w'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['K_w'].iloc[-2]) else 0.0
+        pd_w = float(df_w['D_w'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['D_w'].iloc[-2]) else 0.0
+
+        macd_d = float(df['MACD'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD'].iloc[-1]) else 0
+        macds_d = float(df['MACD_Signal'].iloc[-1]) if len(df) > 0 and pd.notna(df['MACD_Signal'].iloc[-1]) else 0
+        pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0
+        pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0
+        
+        macd_w = float(df_w['MACD'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['MACD'].iloc[-1]) else 0.0
+        macds_w = float(df_w['MACD_Signal'].iloc[-1]) if has_enough_weekly and pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0.0
+        pmacd_w = float(df_w['MACD'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD'].iloc[-2]) else 0.0
+        pmacds_w = float(df_w['MACD_Signal'].iloc[-2]) if len(df_w) > 1 and pd.notna(df_w['MACD_Signal'].iloc[-2]) else 0.0
+        
+        def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
+            if curr_fast > curr_slow and prev_fast <= prev_slow:
+                return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow:
+                return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD死叉"
+            if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
+            return "📉 已死叉，且向下發散"
+            
+        def eval_macd_status(curr_fast, curr_slow, prev_fast, prev_slow):
+            if curr_fast > curr_slow and prev_fast <= prev_slow:
+                return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow:
+                return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD死叉"
+            if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
+            return "📉 已死叉，且向下發散"
+
+        kd_d_status = eval_kd_status(k_d, d_d, pk_d, pd_d)
+        macd_d_status = eval_macd_status(macd_d, macds_d, pmacd_d, pmacds_d)
+        
+        kd_w_status = eval_kd_status(k_w, d_w, pk_w, pd_w) if has_enough_weekly else "資料不足"
+        macd_w_status = eval_macd_status(macd_w, macds_w, pmacd_w, pmacds_w) if has_enough_weekly else "資料不足"
+        
+        alerts = []
+        if len(df) >= 20 and last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
+        if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.10:
+            drop_pct = ((high_52w - last_p) / high_52w) * 100
+            alerts.append(f"近高點回落{drop_pct:.1f}%")
+        if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.05:
+            drop_pct_20d = ((high_20d - last_p) / high_20d) * 100
+            alerts.append(f"20日高點回落{drop_pct_20d:.1f}%")
+            
+        if len(df) >= 20 and high_20d > 0 and low_20d > 0:
+            amp_20d = (high_20d - low_20d) / low_20d
+            if amp_20d <= 0.07:  
+                alerts.append(f"💤 20日窄幅盤整(振幅{amp_20d*100:.1f}%)")
+                
+        if len(df) >= 60 and ma10 > 0 and ma20 > 0 and ma_season > 0:
+            ma_max = max(ma10, ma20, ma_season)
+            ma_min = min(ma10, ma20, ma_season)
+            if (ma_max - ma_min) / ma_min <= 0.03: 
+                alerts.append("🌀 均線糾結(醞釀表態)")
+            
+        if k_d > d_d and pk_d <= pd_d and k_d > 0:
+            alerts.append("日KD低檔金叉" if k_d < 30 else "日KD金叉")
+        elif k_d < d_d and pk_d >= pd_d and d_d > 0:
+            alerts.append("日KD高檔死叉" if k_d > 70 else "日KD死叉")
+            
+        if has_enough_weekly:
+            if k_w > d_w and pk_w <= pd_w and k_w > 0:
+                alerts.append("週KD低檔金叉" if k_w < 30 else "週KD金叉")
+            elif k_w < d_w and pk_w >= pd_w and d_w > 0:
+                alerts.append("週KD高檔死叉" if k_w > 70 else "週KD死叉")
+        
+        if macd_d > macds_d and pmacd_d <= pmacd_d and (macd_d != 0 or macds_d != 0):
+            alerts.append("日MACD零下金叉" if macd_d < 0 else "日MACD金叉")
+        elif macd_d < macds_d and pmacd_d >= pmacds_d and (macd_d != 0 or macds_d != 0):
+            alerts.append("日MACD零上死叉" if macd_d > 0 else "日MACD死叉")
+            
+        if has_enough_weekly:
+            if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0):
+                alerts.append("週MACD零下金叉" if macd_w < 0 else "週MACD金叉")
+            elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0):
+                alerts.append("週MACD零上死叉" if macd_w > 0 else "週MACD死叉")
+            
+        action = "➖ 持平"
+        has_strong_sell = any(x in a for a in alerts for x in ["高檔死叉", "零上死叉", "高點回落"])
+        has_strong_buy = any(x in a for a in alerts for x in ["低檔金叉", "零下金叉"])
+        has_sell = any(x in a for a in alerts for x in ["死叉", "跌破MA20", "20日高點回落"])
+        has_buy = any(x in a for a in alerts for x in ["金叉"])
+        
+        if has_strong_sell: action = "🛑 賣出"
+        elif has_strong_buy: action = "🚀 買進"
+        elif has_sell and not has_buy: action = "⚠️ 減碼"
+        elif has_buy and not has_sell: action = "🔼 加碼"
+
+        alert_str = f"[{action}] " + (" / ".join(alerts) if alerts else "趨勢延續")
+
+        pe_str = "無"
+        try:
+            pe_val = yf.Ticker(sym).info.get('trailingPE')
+            if pd.notna(pe_val): pe_str = f"{pe_val:.1f}"
+        except: pass
+
+        f_info = get_fundamental_info(sym)
+        beta_val = f_info.get('beta')
+        try:
+            beta_str = f"{float(beta_val):.2f}" if beta_val is not None and str(beta_val).strip() != '' else "無"
+        except: 
+            beta_str = "無"
+
+        return {
+            "市場": market, 
+            "標的": f"{name} ({sym})", 
+            "狀態警示": alert_str, 
+            "52週位置": f"{pos_52w:.1f} %",
+            "Beta": beta_str,
+            "日KD": f"K:{k_d:.1f}/D:{d_d:.1f} ({kd_d_status})",
+            "週KD": f"K:{k_w:.1f}/D:{d_w:.1f} ({kd_w_status})" if has_enough_weekly else "資料不足",
+            "日MACD": f"DIF:{macd_d:.2f} ({macd_d_status})",
+            "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})" if has_enough_weekly else "資料不足",
+            "P/E": pe_str,
+            "收盤價": last_p, 
+            "MA20": ma20, 
+            "季線": ma_season, 
+            "半年線": ma_half, 
+            "年線": ma_year
+        }
+        
+    except Exception as e:
+        return {
+            "市場": "⚠️ 異常",
+            "標的": f"{name} ({sym})",
+            "狀態警示": f"載入失敗: {str(e)}",
+            "52週位置": "-", "Beta": "-", "日KD": "-", "週KD": "-", "日MACD": "-", "週MACD": "-", "P/E": "-",
+            "收盤價": 0.0, "MA20": 0.0, "季線": 0.0, "半年線": 0.0, "年線": 0.0
+        }
+
+# ==========================================
+# 3. 網頁 UI 渲染
+# ==========================================
+st.title("📊 個人投資組合與技術分析儀表板")
+
+col_btn, col_time = st.columns([1, 4])
+with col_btn:
+    if st.button("🔄 強制刷新報價"):
+        st.cache_data.clear()
+        st.rerun()
+with col_time:
+    st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+tab1, tab2, tab3 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🏆 績效與股息追蹤"])
+
+with tab1:
+    with st.spinner("正在同步即時報價資料..."):
+        usdtwd = get_usdtwd()
+        total_market_value, total_dividends_2026 = 0, 0
+        asset_allocation = {}
+        individual_holdings = [] 
+
+        for item in PORTFOLIO_TW:
+            if pd.notna(item.get('Ticker')):
+                ticker_str = str(item['Ticker']).strip()
+                if not ticker_str: continue
+                
+                ticker = get_yf_ticker_tw(ticker_str)
+                asset_type = str(item.get('類別', '台股')).strip()
+                if not asset_type or asset_type == 'nan': asset_type = '台股未分類'
+                
+                price, div = get_basic_data(ticker)
+                shares_own = safe_float(item.get('Shares'))
+                shares_lent = safe_float(item.get('出借'))
+                total_shares = shares_own + shares_lent
+                
+                if price > 0 and total_shares > 0:
+                    val = price * total_shares
+                    div_tot = div * total_shares
+                    total_market_value += val
+                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                    total_dividends_2026 += div_tot
+                    
+                    if total_shares >= 1000 and total_shares % 1000 == 0:
+                        disp_qty = f"{int(total_shares/1000)}張"
+                    else:
+                        disp_qty = f"{total_shares:g}股"
+                        
+                    name_str = str(item.get('名稱', '')).strip()
+                    display_name = name_str if name_str and name_str != 'nan' else ticker_str
+                        
+                    individual_holdings.append({
+                        '標的': display_name, 
+                        '標的與股數': f"{display_name} ({disp_qty})", 
+                        '總市值': val, 
+                        '股息': div_tot, 
+                        '類別': asset_type,
+                        '總股數': total_shares
+                    })
+
+        for item in PORTFOLIO_US:
+            if pd.notna(item.get('Ticker')):
+                ticker_str = str(item['Ticker']).strip()
+                if not ticker_str: continue
+                
+                asset_type = str(item.get('類別', '美股')).strip()
+                if not asset_type or asset_type == 'nan': asset_type = '美股未分類'
+                
+                price, div = get_basic_data(ticker_str)
+                shares_own = safe_float(item.get('Shares'))
+                shares_sub = safe_float(item.get('複委託'))
+                total_shares = shares_own + shares_sub
+                
+                if price > 0 and total_shares > 0:
+                    val = price * total_shares * usdtwd
+                    div_tot = div * total_shares * usdtwd
+                    total_market_value += val
+                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                    total_dividends_2026 += div_tot
+                    
+                    disp_qty = f"{total_shares:g}股"
+                    
+                    name_str = str(item.get('名稱', '')).strip()
+                    display_name = name_str if name_str and name_str != 'nan' else ticker_str
+                    
+                    individual_holdings.append({
+                        '標的': display_name, 
+                        '標的與股數': f"{display_name} ({disp_qty})", 
+                        '總市值': val, 
+                        '股息': div_tot, 
+                        '類別': asset_type,
+                        '總股數': total_shares
+                    })
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
+    col2.metric("2026 累計股息預估 (TWD)", f"${total_dividends_2026:,.0f}")
+    col3.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
+
+    st.divider()
+    
+    df_ind = pd.DataFrame(individual_holdings)
+    category_color_map = {}
+    if not df_ind.empty:
+        unique_categories = df_ind['類別'].unique().tolist()
+        plotly_colors = px.colors.qualitative.Safe + px.colors.qualitative.Plotly 
+        category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, cat in enumerate(unique_categories)}
+    
+    col_chart, col_fx = st.columns([1, 1])
+    with col_chart:
+        st.subheader("資產配置佔比")
+        if asset_allocation:
+            df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
+            fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4, color='資產類別', color_discrete_map=category_color_map)
+            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        
+    with col_fx:
+        st.subheader("USD/TWD 匯率走勢 (1年)")
+        fx_data = get_fx_data()
+        if not fx_data.empty:
+            fig_fx = go.Figure()
+            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['Close'], mode='lines', name='USD/TWD', line=dict(color='white' if st.get_option('theme.base') == 'dark' else 'black', width=2)))
+            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA20'], mode='lines', name='MA20 (月線)', line=dict(color='#3498db', dash='dash')))
+            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA60'], mode='lines', name='MA60 (季線)', line=dict(color='#e74c3c', dash='dot')))
+            fig_fx.update_layout(margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_fx, use_container_width=True)
+
+    st.divider()
+
+    st.subheader("📊 各標的總市值與股息分佈")
+    if not df_ind.empty:
+        col_bar1, col_bar2 = st.columns(2)
+        
+        with col_bar1:
+            df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
+            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
+            fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
+            fig_mv_bar.update_yaxes(title='標的 (總數量)')
+            st.plotly_chart(fig_mv_bar, use_container_width=True)
+            
+        with col_bar2:
+            df_div_sorted = df_ind.sort_values(by='股息', ascending=True)
+            fig_div_bar = px.bar(df_div_sorted, x='股息', y='標的與股數', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
+            fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
+            fig_div_bar.update_yaxes(title='標的 (總數量)')
+            st.plotly_chart(fig_div_bar, use_container_width=True)
+
+with tab2:
+    st.markdown("自動偵測窄幅盤整、均線糾結，以及 **KD / MACD** 的進階交叉判定。（台股採 60/120/240日線；美股採 50/100/
