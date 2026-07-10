@@ -57,7 +57,7 @@ except Exception as e:
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (🌟 終極修復：導正 6 位數台股代碼分流)
+# 2. 核心抓取與計算邏輯 (精準修正 4 位與 6 位數上市櫃規格)
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
@@ -148,7 +148,6 @@ def get_stock_data(sym):
     for _ in range(3):
         try:
             time.sleep(0.3)
-            # 🌟 100% 回歸原點：使用最初運作最穩定、無衝突的 yf.download 引擎
             df = yf.download(sym, period="3y", progress=False)
             if not df.empty and len(df) >= 2:
                 if isinstance(df.columns, pd.MultiIndex): 
@@ -386,7 +385,7 @@ def process_technical_analysis(sym, name):
             elif k_w < d_w and pk_w >= pd_w and d_w > 0:
                 alerts.append("週KD高檔死叉" if k_w > 70 else "週KD死叉")
         
-        if macd_d > macds_d and pmacd_d <= pmacd_d and (macd_d != 0 or macds_d != 0):
+        if macd_d > macds_d and pmacd_d <= pmacds_d and (macd_d != 0 or macds_d != 0):
             alerts.append("日MACD零下金叉" if macd_d < 0 else "日MACD金叉")
         elif macd_d < macds_d and pmacd_d >= pmacds_d and (macd_d != 0 or macds_d != 0):
             alerts.append("日MACD零上死叉" if macd_d > 0 else "日MACD死叉")
@@ -600,4 +599,203 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 with tab2:
-    st.markdown("自動偵測窄幅盤整、均線糾結，以及 **KD / MACD** 的進階交叉判定。（台股採 60/120/240日線；美股採 50/100/
+    st.markdown("自動偵測窄幅盤整、均線糾結，以及 **KD / MACD** 的進階交叉判定。（台股採 60/120/240日線；美股採 50/100/200日線）")
+    
+    with st.expander("💡 狀態警示名詞定義說明", expanded=False):
+        st.markdown("""
+        * **綜合買賣評級**：系統依據技術指標自動判斷的交易建議。
+            * **🚀 買進**：出現低檔金叉或零下金叉等強烈翻多訊號。
+            * **🛑 賣出**：出現高檔死叉、零上死叉或由高點大幅回落等強烈翻空訊號。
+            * **🔼 加碼**：出現一般金叉等偏多訊號。
+            * **⚠️ 減碼**：跌破月線、20日高點回落或一般死叉等偏空訊號。
+            * **➖ 持平**：處於盤整或趨勢延續中，無明顯轉折訊號。
+        * **💤 窄幅盤整 (振幅壓縮)**：過去 20 個交易日的最高價與最低價，上下振幅壓縮在 7% 以內，代表價格正處於狹幅箱型整理。
+        * **🌀 均線糾結 (醞釀表態)**：短線 (10日)、中線 (20日) 與長線 (季線) 三條均線的數值差距在 3% 以內，隨時可能爆發新方向。
+        * **52週位置 (%)**：目前收盤價處於近 1 年最高價與最低價區間的相對百分比位置。100% 代表正處於最高點。
+        * **Beta 係數**：衡量相對大盤的波動度。Beta = 1.0 代表波動與大盤同步。
+        """)
+    
+    with st.spinner("正在計算各標的技術指標..."):
+        ta_results = []
+        target_options = {} 
+        
+        scan_dict = {}
+        for item in PORTFOLIO_TW:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                sym = get_yf_ticker_tw(t)
+                name = str(item.get('名稱', '')).strip()
+                scan_dict[sym] = name if name and name != 'nan' else t
+                
+        for item in PORTFOLIO_US:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                name = str(item.get('名稱', '')).strip()
+                scan_dict[t] = name if name and name != 'nan' else t
+
+        for sym, name in scan_dict.items():
+            res = process_technical_analysis(sym, name)
+            if res: 
+                ta_results.append(res)
+                if "⚠️ 異常" not in res.get("市場", ""):
+                    target_options[f"{name} ({sym})"] = sym
+            
+        if ta_results:
+            df_ta = pd.DataFrame(ta_results)
+            st.dataframe(
+                df_ta, 
+                column_config={
+                    "市場": st.column_config.TextColumn("市場", width="small"),
+                    "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
+                    "狀態警示": st.column_config.TextColumn("🚨 狀態警示", width="large"),
+                    "52週位置": st.column_config.TextColumn("52週位置", width="small"),
+                    "Beta": st.column_config.TextColumn("Beta 係數", width="small"),
+                    "日KD": st.column_config.TextColumn("日 KD 狀態", width="medium"),
+                    "週KD": st.column_config.TextColumn("週 KD 狀態", width="medium"),
+                    "日MACD": st.column_config.TextColumn("日 MACD", width="medium"),
+                    "週MACD": st.column_config.TextColumn("週 MACD", width="medium"),
+                    "P/E": st.column_config.TextColumn("P/E", width="small"),
+                    "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                    "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
+                    "季線": st.column_config.NumberColumn("季線", format="%.2f"),
+                    "半年線": st.column_config.NumberColumn("半年線", format="%.2f"),
+                    "年線": st.column_config.NumberColumn("年線", format="%.2f"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=450
+            )
+
+    st.divider()
+    
+    st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
+    
+    col_select_stock, col_select_period = st.columns([2, 1])
+    with col_select_stock:
+        options_list = list(target_options.keys()) if target_options else ["暫無可繪圖標的"]
+        selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=options_list)
+        
+    with col_select_period:
+        period_label = st.selectbox("請選擇 K 線圖時間軸顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
+    
+    if period_label == "半年 (150日)":
+        tail_days = 150
+    elif period_label == "一年 (252日)":
+        tail_days = 252
+    else:
+        tail_days = 9999 
+        
+    if selected_name and selected_name != "暫無可繪圖標的":
+        sym = target_options[selected_name]
+        df_chart = get_stock_data(sym)
+        if df_chart is not None:
+            df_plot = df_chart.tail(tail_days)
+            is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
+            
+            season_label = "MA60 (季線)" if is_tw else "MA50 (季線)"
+            half_label = "MA120 (半年線)" if is_tw else "MA100 (半年線)"
+            year_label = "MA240 (年線)" if is_tw else "MA200 (年線)"
+            
+            fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, 
+                                     vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25],
+                                     subplot_titles=(f"{selected_name} - 走勢圖 ({period_label})", "日 KD 指標", "MACD 指標 (12,26,9)"))
+            
+            fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name=season_label), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['半年線'], line=dict(color='magenta', width=1.5), name=half_label), row=1, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['年線'], line=dict(color='cyan', width=1.5), name=year_label), row=1, col=1)
+            
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值 (日)'), row=2, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值 (日)'), row=2, col=1)
+            fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
+            fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
+            
+            macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
+            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC 柱狀圖'), row=3, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD (DIF)'), row=3, col=1)
+            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal (DEA)'), row=3, col=1)
+            
+            fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
+            st.plotly_chart(fig_tech, use_container_width=True)
+
+with tab3:
+    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**超額大盤表現 (Alpha)**、**基本面財報指標**與**近一年真實配息紀錄**。")
+    
+    with st.spinner("正在計算各標的績效與配息資料..."):
+        bench_returns = get_benchmark_returns()
+        perf_results = []
+        scan_list = []
+        
+        for item in PORTFOLIO_TW:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                sym = get_yf_ticker_tw(t)
+                scan_list.append((sym, t, '台股'))
+                
+        for item in PORTFOLIO_US:
+            t = str(item.get('Ticker', '')).strip()
+            if t and t != 'nan':
+                scan_list.append((t, t, '美股'))
+                
+        for sym, display_ticker, market in scan_list:
+            res = get_perf_div_data(sym, display_ticker, market, bench_returns)
+            if res:
+                perf_results.append(res)
+                
+        if perf_results:
+            df_perf = pd.DataFrame(perf_results)
+            st.dataframe(
+                df_perf,
+                column_config={
+                    "市場": st.column_config.TextColumn("市場", width="small"),
+                    "標的": st.column_config.TextColumn("代號", width="small"),
+                    "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                    "近一季報酬": st.column_config.NumberColumn("近一季報酬", format="%.2f %%"),
+                    "近半年報酬": st.column_config.NumberColumn("近半年報酬", format="%.2f %%"),
+                    "近一年報酬": st.column_config.NumberColumn("近一年報酬", format="%.2f %%"),
+                    "相對大盤(1年)": st.column_config.TextColumn("相對大盤 (1年)", width="medium"),
+                    "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
+                    "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
+                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
+                    "毛利率": st.column_config.TextColumn("毛利率", width="small"),
+                    "營益率": st.column_config.TextColumn("營益率", width="small"),
+                    "淨利率": st.column_config.TextColumn("淨利率", width="small"),
+                    "ROE": st.column_config.TextColumn("ROE", width="small"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                height=600
+            )
+
+# ==========================================
+# 4. 後台管理介面 (側邊欄雙分頁編輯)
+# ==========================================
+with st.sidebar:
+    st.header("📝 持股與觀察名單管理")
+    st.markdown("想要追蹤某檔股票嗎？**新增代號並將股數設為 0**，它就會自動加入技術分析掃描！")
+    
+    st.subheader("🇹🇼 台股清單")
+    if not df_tw.empty:
+        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
+        if st.button("💾 儲存台股變更", use_container_width=True):
+            with st.spinner("正在寫入台股資料..."):
+                try:
+                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
+                    st.success("✅ 台股更新成功！請重新整理網頁。")
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("台股清單目前為空或未連線。")
+
+    st.divider()
+
+    st.subheader("🇺🇸 美股清單")
+    if not df_us.empty:
+        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
+        if st.button("💾 儲存美股變更", use_container_width=True):
+            with st.spinner("正在寫入美股資料..."):
+                try:
+                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    st.success("✅ 美股更新成功！請重新整理網頁。")
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("美股清單目前為空或未連線。")
