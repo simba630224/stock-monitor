@@ -48,7 +48,7 @@ except:
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith('.TW') or ticker.endswith('.TWO'): return ticker
-    if ticker.endswith('B') or ticker.endswith('C'): return f"{ticker}.TWO"
+    if ticker.endswith('B') or ticker.endswith('C') or ticker == '009815': return f"{ticker}.TWO"
     return f"{ticker}.TW"
 
 @st.cache_data(ttl=600)
@@ -102,7 +102,7 @@ def get_stock_data(sym):
         df = yf.download(sym, period="3y", progress=False)
         if not df.empty and len(df) >= 2:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            df.index = df.index.tz_localize(None) if df.index.tz else df.index
+            df.index = df.index.tz_localize(None) if df.index.tz is not None else df.index
             df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna(subset=['Close'])
             if 'Close' not in df.columns: return None
             
@@ -211,10 +211,13 @@ def process_technical_analysis(sym, name):
         alerts = []
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
-        # 🚨 更新：近高點回落改為 15%
-        if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15: alerts.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
-        # 🚨 更新：20日高點回落改為 10%
-        if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10: alerts.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%")
+        # 🚨 判定：近一年高點回落 15%
+        if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15: 
+            alerts.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
+            
+        # 🚨 判定：20日高點回落 10%
+        if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10: 
+            alerts.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%")
             
         if has_enough_weekly:
             if k_w > d_w and pk_w <= pd_w and k_w > 0: alerts.append("週KD金叉")
@@ -223,10 +226,10 @@ def process_technical_analysis(sym, name):
             if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD金叉")
             elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD死叉")
             
-        # 🌟 結合手機版的綜合買賣評級邏輯
+        # 🌟 綜合買賣評級邏輯 (手機版)
         action = "➖ 持平"
-        has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週KD低檔金叉", "週MACD金叉", "週MACD零下金叉"])
-        has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週KD高檔死叉", "週MACD死叉", "週MACD零上死叉", "近高點回落"])
+        has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週MACD金叉"])
+        has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週MACD死叉", "近高點回落"])
         has_reduce = any(x in a for a in alerts for x in ["20日回落"])
         
         if has_sell: action = "🛑 賣出"
@@ -304,9 +307,9 @@ with tab1:
 with tab2:
     with st.expander("💡 狀態警示說明", expanded=False):
         st.markdown("""
-        * **🚀 買進**：出現週 KD 或週 MACD 黃金交叉，屬中長線翻多。
-        * **🛑 賣出**：出現週 KD 或週 MACD 死亡交叉，或近一年高點回落達 15%。
-        * **⚠️ 減碼**：自 20 日高點回落達 10%，短線轉弱。
+        * **🚀 買進**：出現 **週 KD** 或 **週 MACD 黃金交叉**，屬中長線翻多。
+        * **🛑 賣出**：出現 **週 KD** 或 **週 MACD 死亡交叉**，或自 **近一年高點回落達 15%**。
+        * **⚠️ 減碼**：自 **20 日高點回落達 10%**，短線轉弱。
         * **➖ 持平**：無觸發上述轉折訊號。
         """)
         
@@ -346,11 +349,18 @@ with tab2:
         if df_chart is not None:
             df_plot = df_chart.tail(80) 
             fig_tech = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-            fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
+            
+            if 'Open' in df_plot.columns and 'High' in df_plot.columns and 'Low' in df_plot.columns:
+                fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
+            else:
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['Close'], mode='lines', name='收盤價'), row=1, col=1)
+                
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
+            
             if 'K_d' in df_plot.columns:
                 fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='yellow', width=1.2), name='K'), row=2, col=1)
                 fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.2), name='D'), row=2, col=1)
+                
             fig_tech.update_layout(xaxis_rangeslider_visible=False, height=400, margin=dict(t=20, b=10, l=10, r=10), showlegend=False)
             st.plotly_chart(fig_tech, use_container_width=True)
 
