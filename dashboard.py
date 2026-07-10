@@ -57,14 +57,12 @@ except Exception as e:
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (🌟 導正：純數字代碼一律回歸上市 .TW 規格)
+# 2. 核心抓取與計算邏輯 (導正 6 位數純數字一律走上市 .TW 規格)
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
-    # 只有明確帶字母 'B' 的公債、或純英文代碼走櫃買中心 .TWO
     if re.match(r'^\d+B$', ticker) or (not ticker.isdigit() and '.' not in ticker):
         return f"{ticker}.TWO"
-    # 其餘所有 4 位、6 位純數字代號 (0050, 006208, 009815, 00981A, 00988A) 100% 導向標準上市 .TW
     return f"{ticker}.TW"
 
 @st.cache_data(ttl=900)
@@ -271,7 +269,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
             time.sleep(1)
     return None
 
-@st.cache_data(ttl=900)
+@st.cache_data(go_to_cache=True)
 def process_technical_analysis(sym, name, market):
     try:
         df = get_stock_data(sym)
@@ -356,7 +354,7 @@ def process_technical_analysis(sym, name, market):
         def eval_macd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow:
                 return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD金叉"
-            if curr_fast < curr_slow wins prev_fast >= prev_slow:
+            if curr_fast < curr_slow and prev_fast >= prev_slow:
                 return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD死叉"
             if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
             return "📉 已死叉，且向下發散"
@@ -577,7 +575,7 @@ with tab1:
         
         with col_bar1:
             df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
-            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', title='Template市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
+            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
             fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
             fig_mv_bar.update_yaxes(title='標的 (總數量)')
             st.plotly_chart(fig_mv_bar, use_container_width=True)
