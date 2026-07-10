@@ -61,7 +61,6 @@ except Exception as e:
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip()
-    # 移除使用者可能不小心帶入的後綴
     ticker = ticker.replace('.TW', '').replace('.TWO', '')
     
     # 1. 如果包含任何英文字母 (例如 937B, 981A, 988A) 一律屬於櫃買中心商品
@@ -237,3 +236,18 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 
                 bench_ret = bench_returns.get(market, 0.0)
                 if ret_1y is not None:
+                    rel_val = ret_1y - bench_ret
+                    emoji = "🟢" if rel_val >= 0 else "🔴"
+                    sign = "+" if rel_val > 0 else ""
+                    suffix = " (上市至今)" if is_new_stock else ""
+                    rel_str_display = f"{emoji} {sign}{rel_val:.2f} %{suffix}"
+                else:
+                    rel_str_display = "暫無資料"
+
+                f_info = get_fundamental_info(sym)
+                quote_type = str(f_info.get('quoteType', '')).upper()
+                is_etf = 'ETF' in quote_type or 'MUTUALFUND' in quote_type
+                
+                def fmt_pct(val):
+                    if is_etf: return "ETF/不適用"
+                    return f"{val * 100:.1f} %" if val is not None and
