@@ -348,12 +348,10 @@ def process_technical_analysis(sym, name, market):
         alerts = []
         if len(df) >= 20 and last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
-        # 🚨 判定：近一年高點回落 15%
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
             alerts.append(f"近高點回落{drop_pct:.1f}%")
             
-        # 🚨 判定：20日高點回落 10%
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10:
             drop_pct_20d = ((high_20d - last_p) / high_20d) * 100
             alerts.append(f"20日回落{drop_pct_20d:.1f}%")
@@ -377,7 +375,6 @@ def process_technical_analysis(sym, name, market):
             if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD金叉")
             elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD死叉")
             
-        # 🌟 綜合買賣評級邏輯
         action = "➖ 持平"
         has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週MACD金叉"])
         has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週MACD死叉", "近高點回落"])
@@ -496,6 +493,53 @@ with tab1:
     col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
     col2.metric("2026 累計股息預估 (TWD)", f"${total_dividends_2026:,.0f}")
     col3.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
+
+    # ====================
+    # 寫入歷史市值紀錄 (每日趨勢)
+    # ====================
+    history_error = False
+    try:
+        df_history = conn.read(worksheet="Value_History", ttl=0)
+        if df_history is None or df_history.empty or 'Date' not in df_history.columns:
+            df_history = pd.DataFrame(columns=['Date', 'Total_Value', 'Last_Updated'])
+        else:
+            df_history['Date'] = df_history['Date'].astype(str).str.strip()
+        
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        now_time = datetime.now().strftime('%H:%M:%S')
+        needs_update = False
+        
+        if today_str in df_history['Date'].values:
+            idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
+            existing_val = safe_float(df_history.at[idx, 'Total_Value'])
+            # 數值差異大於 1 TWD 才更新以節省 API 呼叫額度
+            if abs(existing_val - total_market_value) > 1:
+                df_history.at[idx, 'Total_Value'] = total_market_value
+                df_history.at[idx, 'Last_Updated'] = now_time
+                needs_update = True
+        else:
+            new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+            df_history = pd.concat([df_history, new_row], ignore_index=True)
+            needs_update = True
+            
+        if needs_update:
+            conn.update(worksheet="Value_History", data=df_history)
+            
+    except Exception as e:
+        history_error = True
+        df_history = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value, 'Last_Updated': datetime.now().strftime('%H:%M:%S')}])
+
+    st.divider()
+
+    # 渲染歷史市值圖表
+    if history_error:
+        st.info("💡 提示：若要啟用「每日總市值趨勢追蹤」功能，請在您的 Google 試算表中手動新增一個名為 `Value_History` 的工作表（可先留空），系統將會在此為您自動紀錄並繪製每日市值變化趨勢。")
+    elif not df_history.empty:
+        st.subheader("📈 總市值每日變化趨勢")
+        fig_hist = px.line(df_history, x='Date', y='Total_Value', text='Total_Value', markers=True)
+        fig_hist.update_traces(textposition="top center", texttemplate='%{text:,.0f}')
+        fig_hist.update_layout(yaxis_title="總市值 (TWD)", xaxis_title="日期", margin=dict(t=30, b=0, l=0, r=0), height=350)
+        st.plotly_chart(fig_hist, use_container_width=True)
 
     st.divider()
     
