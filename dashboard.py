@@ -190,8 +190,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
         try:
             time.sleep(0.3)
             tk = yf.Ticker(sym)
-            # 明確強制 auto_adjust=True 保證算出真正的還原(含息)報酬率
-            hist = tk.history(period="3y", auto_adjust=True) 
+            hist = tk.history(period="2y", auto_adjust=True) 
             if not hist.empty:
                 valid_hist = hist['Close'].dropna()
                 if valid_hist.empty: return None
@@ -246,7 +245,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                         tot_div += float(val)
 
                 div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
-                # 殖利率以當前股價計算
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
                 return {
@@ -379,7 +377,7 @@ def process_technical_analysis(sym, name, market):
             if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD金叉")
             elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD死叉")
             
-        # 🚨 綜合買賣評級全面統整
+        # 🌟 綜合買賣評級邏輯
         action = "➖ 持平"
         has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週MACD金叉"])
         has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週MACD死叉", "近高點回落"])
@@ -656,13 +654,14 @@ with tab3:
         perf_results = []
         scan_list = []
         
+        # 修正：直接傳入代號 (t) 確保不會因名稱為空而顯示 nan
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
-            if t and t != 'nan': scan_list.append((get_yf_ticker_tw(t), str(item.get('名稱', '')).strip() or t, '台股'))
+            if t and t != 'nan': scan_list.append((get_yf_ticker_tw(t), t, '台股'))
                 
         for item in PORTFOLIO_US:
             t = str(item.get('Ticker', '')).strip()
-            if t and t != 'nan': scan_list.append((t, str(item.get('名稱', '')).strip() or t, '美股'))
+            if t and t != 'nan': scan_list.append((t, t, '美股'))
                 
         for sym, display_ticker, market in scan_list:
             res = get_perf_div_data(sym, display_ticker, market, bench_returns)
