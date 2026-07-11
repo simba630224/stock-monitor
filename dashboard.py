@@ -57,16 +57,14 @@ except Exception as e:
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
-# 2. 核心抓取與計算邏輯 (修正市場對應與動態長度)
+# 2. 核心抓取與計算邏輯
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith('.TW') or ticker.endswith('.TWO'):
         return ticker
-    # 債券與特定上櫃 ETF
     if ticker.endswith('B') or ticker.endswith('C') or ticker == '009815':
         return f"{ticker}.TWO"
-    # 一般股票、00981A、00988A 皆為上市
     return f"{ticker}.TW"
 
 @st.cache_data(ttl=900)
@@ -192,7 +190,8 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
         try:
             time.sleep(0.3)
             tk = yf.Ticker(sym)
-            hist = tk.history(period="3y") 
+            # 明確強制 auto_adjust=True 保證算出真正的還原(含息)報酬率
+            hist = tk.history(period="3y", auto_adjust=True) 
             if not hist.empty:
                 valid_hist = hist['Close'].dropna()
                 if valid_hist.empty: return None
@@ -247,11 +246,12 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                         tot_div += float(val)
 
                 div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
+                # 殖利率以當前股價計算
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
                 return {
-                    "市場": market, "標的": display_ticker, "最新收盤價": curr_p,
-                    "近一季報酬": ret_1q, "近半年報酬": ret_6m, "近一年報酬": ret_1y,
+                    "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
+                    "近一季含息報酬": ret_1q, "近半年含息報酬": ret_6m, "近一年含息報酬": ret_1y,
                     "相對大盤(1年)": rel_str_display, "近一年殖利率": yield_1y, "總配息金額": tot_div,
                     "近一年配息明細": div_history_str, "毛利率": gross_m, "營益率": op_m, "淨利率": prof_m, "ROE": roe
                 }
@@ -350,12 +350,12 @@ def process_technical_analysis(sym, name, market):
         alerts = []
         if len(df) >= 20 and last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
-        # 🚨 更新：近一年高點回落改為 15%
+        # 🚨 判定：近一年高點回落 15%
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15:
             drop_pct = ((high_52w - last_p) / high_52w) * 100
             alerts.append(f"近高點回落{drop_pct:.1f}%")
             
-        # 🚨 更新：20日高點回落改為 10%
+        # 🚨 判定：20日高點回落 10%
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10:
             drop_pct_20d = ((high_20d - last_p) / high_20d) * 100
             alerts.append(f"20日回落{drop_pct_20d:.1f}%")
@@ -367,7 +367,7 @@ def process_technical_analysis(sym, name, market):
         if len(df) >= 60 and ma10 > 0 and ma20 > 0 and ma_season > 0:
             ma_max = max(ma10, ma20, ma_season)
             ma_min = min(ma10, ma20, ma_season)
-            if (ma_max - ma_min) / ma_min <= 0.03: alerts.append("🌀 均線糾結(醞表態)")
+            if (ma_max - ma_min) / ma_min <= 0.03: alerts.append("🌀 均線糾結(醞釀表態)")
             
         if k_d > d_d and pk_d <= pd_d and k_d > 0: alerts.append("日KD低檔金叉" if k_d < 30 else "日KD金叉")
         elif k_d < d_d and pk_d >= pd_d and d_d > 0: alerts.append("日KD高檔死叉" if k_d > 70 else "日KD死叉")
@@ -379,7 +379,7 @@ def process_technical_analysis(sym, name, market):
             if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD金叉")
             elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD死叉")
             
-        # 🚨 綜合買賣評級全面更新
+        # 🚨 綜合買賣評級全面統整
         action = "➖ 持平"
         has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週MACD金叉"])
         has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週MACD死叉", "近高點回落"])
@@ -669,7 +669,27 @@ with tab3:
             if res: perf_results.append(res)
                 
         if perf_results:
-            st.dataframe(pd.DataFrame(perf_results), hide_index=True, use_container_width=True, height=600)
+            df_perf = pd.DataFrame(perf_results)
+            st.dataframe(
+                df_perf,
+                column_config={
+                    "市場": st.column_config.TextColumn("市場", width="small"),
+                    "代號": st.column_config.TextColumn("代號", width="small"),
+                    "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                    "近一季含息報酬": st.column_config.NumberColumn("近一季含息報酬", format="%.2f %%"),
+                    "近半年含息報酬": st.column_config.NumberColumn("近半年含息報酬", format="%.2f %%"),
+                    "近一年含息報酬": st.column_config.NumberColumn("近一年含息報酬", format="%.2f %%"),
+                    "相對大盤(1年)": st.column_config.TextColumn("相對大盤 (1年)", width="medium"),
+                    "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
+                    "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
+                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
+                    "毛利率": st.column_config.TextColumn("毛利率", width="small"),
+                    "營益率": st.column_config.TextColumn("營益率", width="small"),
+                    "淨利率": st.column_config.TextColumn("淨利率", width="small"),
+                    "ROE": st.column_config.TextColumn("ROE", width="small"),
+                },
+                hide_index=True, use_container_width=True, height=600
+            )
 
 with st.sidebar:
     st.header("📝 持股與觀察名單管理")
