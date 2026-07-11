@@ -129,13 +129,14 @@ def get_stock_data(sym):
 @st.cache_data(ttl=600)
 def get_perf_div_data(sym, display_ticker, market, bench_returns):
     try:
-        hist = yf.Ticker(sym).history(period="1y")
+        # 明確強制 auto_adjust=True 保證算出真正的還原(含息)報酬率
+        hist = yf.Ticker(sym).history(period="2y", auto_adjust=True)
         if not hist.empty:
             curr_p = float(hist['Close'].dropna().iloc[-1])
             valid_hist = hist['Close'].dropna()
             
             ret_1q = (((curr_p - valid_hist.iloc[-63]) / valid_hist.iloc[-63]) * 100) if len(valid_hist) > 63 else 0.0
-            ret_1y = (((curr_p - valid_hist.iloc[0]) / valid_hist.iloc[0]) * 100) if len(valid_hist) > 0 else 0.0
+            ret_1y = (((curr_p - valid_hist.iloc[-252]) / valid_hist.iloc[-252]) * 100) if len(valid_hist) > 252 else (((curr_p - valid_hist.iloc[0]) / valid_hist.iloc[0]) * 100)
 
             bench_ret = bench_returns.get(market, 0.0)
             rel_val = ret_1y - bench_ret
@@ -150,7 +151,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 
             return {
                 "市場": market, "代號": display_ticker, "收盤": curr_p,
-                "季報酬": f"{ret_1q:.1f}%", "年報酬": f"{ret_1y:.1f}%",
+                "季含息報酬": f"{ret_1q:.1f}%", "年含息報酬": f"{ret_1y:.1f}%",
                 "對大盤": rel_str_display, "殖利率": f"{yield_1y:.1f}%", "ROE": roe
             }
     except: pass
@@ -384,7 +385,7 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            st.dataframe(df_perf[["代號", "季報酬", "年報酬", "對大盤", "殖利率", "ROE"]], hide_index=True, use_container_width=True, height=450)
+            st.dataframe(df_perf[["代號", "季含息報酬", "年含息報酬", "對大盤", "殖利率", "ROE"]], hide_index=True, use_container_width=True, height=450)
 
 with tab4:
     st.markdown("### ✏️ 雲端隨身記帳")
