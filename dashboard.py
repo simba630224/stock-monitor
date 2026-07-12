@@ -26,7 +26,7 @@ def safe_float(val):
         return 0.0
 
 # ==========================================
-# 1. 資料庫與清單設定 (Google Sheets 雙分頁連線)
+# 1. 資料庫與清單設定 (Google Sheets 連線)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -421,7 +421,8 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-tab1, tab2, tab3 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🏆 績效與股息追蹤"])
+# 🔥 更新：加入第四個分頁「每日看盤心得」
+tab1, tab2, tab3, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🏆 績效與股息追蹤", "📖 每日看盤心得"])
 
 with tab1:
     with st.spinner("正在同步即時報價資料..."):
@@ -494,9 +495,6 @@ with tab1:
     col2.metric("2026 累計股息預估 (TWD)", f"${total_dividends_2026:,.0f}")
     col3.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
 
-    # ====================
-    # 寫入歷史市值紀錄 (每日趨勢)
-    # ====================
     history_error = False
     try:
         df_history = conn.read(worksheet="Value_History", ttl=0)
@@ -512,7 +510,6 @@ with tab1:
         if today_str in df_history['Date'].values:
             idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
             existing_val = safe_float(df_history.at[idx, 'Total_Value'])
-            # 數值差異大於 1 TWD 才更新以節省 API 呼叫額度
             if abs(existing_val - total_market_value) > 1:
                 df_history.at[idx, 'Total_Value'] = total_market_value
                 df_history.at[idx, 'Last_Updated'] = now_time
@@ -531,7 +528,6 @@ with tab1:
 
     st.divider()
 
-    # 渲染歷史市值圖表
     if history_error:
         st.info("💡 提示：若要啟用「每日總市值趨勢追蹤」功能，請在您的 Google 試算表中手動新增一個名為 `Value_History` 的工作表（可先留空），系統將會在此為您自動紀錄並繪製每日市值變化趨勢。")
     elif not df_history.empty:
@@ -698,7 +694,6 @@ with tab3:
         perf_results = []
         scan_list = []
         
-        # 修正：直接傳入代號 (t) 確保不會因名稱為空而顯示 nan
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan': scan_list.append((get_yf_ticker_tw(t), t, '台股'))
@@ -733,6 +728,64 @@ with tab3:
                 },
                 hide_index=True, use_container_width=True, height=600
             )
+
+# 🔥 更新：每日看盤心得區域
+with tab4:
+    st.subheader("📖 每日看盤心得紀錄")
+    journal_error = False
+    
+    try:
+        df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
+        if df_journal is None or df_journal.empty or 'Date' not in df_journal.columns:
+            df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
+        else:
+            df_journal['Date'] = df_journal['Date'].astype(str).str.strip()
+    except Exception:
+        journal_error = True
+        df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
+
+    if journal_error:
+        st.info("💡 提示：若要啟用「每日看盤心得」功能，請在您的 Google 試算表中手動新增一個名為 `Trading_Journal` 的工作表（可先留空），系統將會在此為您自動紀錄。")
+    else:
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        now_time = datetime.now().strftime('%H:%M:%S')
+
+        existing_note = ""
+        if today_str in df_journal['Date'].values:
+            existing_note = str(df_journal.loc[df_journal['Date'] == today_str, 'Notes'].iloc[0])
+            if existing_note == 'nan': existing_note = ""
+
+        with st.form("journal_form"):
+            note_input = st.text_area(f"撰寫 {today_str} 的看盤心得：", value=existing_note, height=150)
+            submitted = st.form_submit_button("💾 儲存心得")
+
+            if submitted:
+                with st.spinner("儲存中..."):
+                    if today_str in df_journal['Date'].values:
+                        idx = df_journal.index[df_journal['Date'] == today_str].tolist()[0]
+                        df_journal.at[idx, 'Notes'] = note_input
+                        df_journal.at[idx, 'Last_Updated'] = now_time
+                    else:
+                        new_row = pd.DataFrame([{'Date': today_str, 'Notes': note_input, 'Last_Updated': now_time}])
+                        df_journal = pd.concat([df_journal, new_row], ignore_index=True)
+                    
+                    try:
+                        conn.update(worksheet="Trading_Journal", data=df_journal)
+                        st.success("✅ 心得儲存成功！")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"寫入失敗：{e}")
+        
+        st.divider()
+        st.subheader("📚 歷史心得回顧")
+        if not df_journal.empty:
+            df_history_show = df_journal.sort_values(by='Date', ascending=False)
+            for _, row in df_history_show.iterrows():
+                with st.expander(f"📅 {row['Date']} (最後更新: {row.get('Last_Updated', '')})"):
+                    st.write(row['Notes'])
+        else:
+            st.write("尚無歷史紀錄。")
 
 with st.sidebar:
     st.header("📝 持股與觀察名單管理")
