@@ -129,7 +129,6 @@ def get_stock_data(sym):
 @st.cache_data(ttl=600)
 def get_perf_div_data(sym, display_ticker, market, bench_returns):
     try:
-        # 明確強制 auto_adjust=True 保證算出真正的還原(含息)報酬率
         hist = yf.Ticker(sym).history(period="2y", auto_adjust=True)
         if not hist.empty:
             curr_p = float(hist['Close'].dropna().iloc[-1])
@@ -212,11 +211,9 @@ def process_technical_analysis(sym, name):
         alerts = []
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
-        # 🚨 判定：近一年高點回落 15%
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15: 
             alerts.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
             
-        # 🚨 判定：20日高點回落 10%
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10: 
             alerts.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%")
             
@@ -227,7 +224,6 @@ def process_technical_analysis(sym, name):
             if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD金叉")
             elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD死叉")
             
-        # 🌟 綜合買賣評級邏輯 (手機版)
         action = "➖ 持平"
         has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週MACD金叉"])
         has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週MACD死叉", "近高點回落"])
@@ -256,7 +252,8 @@ with col_l:
 with col_r:
     st.caption(f"更新:{datetime.now().strftime('%H:%M')}")
 
-tab1, tab2, tab3, tab4 = st.tabs(["💰資產", "📈技術", "🏆績效", "📝管理"])
+# 🔥 更新：加入第五個分頁「心得」
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["💰資產", "📈技術", "🏆績效", "📖心得", "📝管理"])
 
 with tab1:
     with st.spinner("載入報價中..."):
@@ -387,7 +384,59 @@ with tab3:
             df_perf = pd.DataFrame(perf_results)
             st.dataframe(df_perf[["代號", "季含息報酬", "年含息報酬", "對大盤", "殖利率", "ROE"]], hide_index=True, use_container_width=True, height=450)
 
+# 🔥 更新：每日看盤心得區域 (手機版專用小巧版面)
 with tab4:
+    st.markdown("### 📖 每日看盤心得")
+    journal_error = False
+    
+    try:
+        df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
+        if df_journal is None or df_journal.empty or 'Date' not in df_journal.columns:
+            df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
+        else:
+            df_journal['Date'] = df_journal['Date'].astype(str).str.strip()
+    except Exception:
+        journal_error = True
+        df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
+
+    if journal_error:
+        st.info("請於試算表新增 `Trading_Journal` 工作表以啟用此功能。")
+    else:
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        now_time = datetime.now().strftime('%H:%M:%S')
+
+        existing_note = ""
+        if today_str in df_journal['Date'].values:
+            existing_note = str(df_journal.loc[df_journal['Date'] == today_str, 'Notes'].iloc[0])
+            if existing_note == 'nan': existing_note = ""
+
+        with st.form("m_journal_form"):
+            note_input = st.text_area(f"[{today_str}] 紀錄：", value=existing_note, height=150)
+            if st.form_submit_button("💾 儲存心得", use_container_width=True):
+                with st.spinner("儲存中..."):
+                    if today_str in df_journal['Date'].values:
+                        idx = df_journal.index[df_journal['Date'] == today_str].tolist()[0]
+                        df_journal.at[idx, 'Notes'] = note_input
+                        df_journal.at[idx, 'Last_Updated'] = now_time
+                    else:
+                        new_row = pd.DataFrame([{'Date': today_str, 'Notes': note_input, 'Last_Updated': now_time}])
+                        df_journal = pd.concat([df_journal, new_row], ignore_index=True)
+                    try:
+                        conn.update(worksheet="Trading_Journal", data=df_journal)
+                        st.success("儲存成功！")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error("寫入失敗")
+        
+        st.divider()
+        st.caption("📚 歷史回顧")
+        if not df_journal.empty:
+            for _, row in df_journal.sort_values(by='Date', ascending=False).iterrows():
+                with st.expander(f"📅 {row['Date']}"):
+                    st.write(row['Notes'])
+
+with tab5:
     st.markdown("### ✏️ 雲端隨身記帳")
     st.caption("更改後點擊下方按鈕即可同步至雲端 Sheets。")
     
