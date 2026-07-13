@@ -26,7 +26,7 @@ def safe_float(val):
         return 0.0
 
 # ==========================================
-# 1. 資料庫與清單設定 (Google Sheets 連線)
+# 1. 資料庫與清單設定 (Google Sheets 雙分頁連線)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -144,7 +144,8 @@ def get_stock_data(sym):
     for _ in range(3):
         try:
             time.sleep(0.3)
-            df = yf.download(sym, period="3y", progress=False)
+            # 🔴 重要修正：加入 threads=False 防止 yfinance 多執行緒導致記憶體崩潰
+            df = yf.download(sym, period="3y", progress=False, threads=False)
             if not df.empty and len(df) >= 2:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None: df.index = df.index.tz_convert(None)
@@ -197,11 +198,12 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 
                 curr_p = float(valid_hist.iloc[-1])
                 
+                # 🔴 重要修正：回傳 0.0 取代 None，避免 PyArrow 序列化崩潰
                 def calc_ret(days_back):
                     if len(valid_hist) > days_back:
                         past_p = float(valid_hist.iloc[-days_back])
-                        return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else None
-                    return None
+                        return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else 0.0
+                    return 0.0
 
                 ret_1q = calc_ret(63)
                 ret_6m = calc_ret(126)
@@ -214,14 +216,11 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                     is_new_stock = True
 
                 bench_ret = bench_returns.get(market, 0.0)
-                if ret_1y is not None:
-                    rel_val = ret_1y - bench_ret
-                    emoji = "🟢" if rel_val >= 0 else "🔴"
-                    sign = "+" if rel_val > 0 else ""
-                    suffix = " (上市至今)" if is_new_stock else ""
-                    rel_str_display = f"{emoji} {sign}{rel_val:.2f} %{suffix}"
-                else:
-                    rel_str_display = "暫無資料"
+                rel_val = ret_1y - bench_ret
+                emoji = "🟢" if rel_val >= 0 else "🔴"
+                sign = "+" if rel_val > 0 else ""
+                suffix = " (上市至今)" if is_new_stock else ""
+                rel_str_display = f"{emoji} {sign}{rel_val:.2f} %{suffix}"
 
                 f_info = get_fundamental_info(sym)
                 is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper() or 'MUTUALFUND' in str(f_info.get('quoteType', '')).upper()
@@ -421,7 +420,6 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 🔥 更新：加入第四個分頁「每日看盤心得」
 tab1, tab2, tab3, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🏆 績效與股息追蹤", "📖 每日看盤心得"])
 
 with tab1:
@@ -535,7 +533,7 @@ with tab1:
         fig_hist = px.line(df_history, x='Date', y='Total_Value', text='Total_Value', markers=True)
         fig_hist.update_traces(textposition="top center", texttemplate='%{text:,.0f}')
         fig_hist.update_layout(yaxis_title="總市值 (TWD)", xaxis_title="日期", margin=dict(t=30, b=0, l=0, r=0), height=350)
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist)
 
     st.divider()
     
@@ -554,7 +552,7 @@ with tab1:
             fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4, color='資產類別', color_discrete_map=category_color_map)
             fig_pie.update_traces(textposition='inside', textinfo='percent+label')
             fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie)
         
     with col_fx:
         st.subheader("USD/TWD 匯率走勢 (1年)")
@@ -565,7 +563,7 @@ with tab1:
             fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA20'], mode='lines', name='MA20 (月線)', line=dict(color='#3498db', dash='dash')))
             fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA60'], mode='lines', name='MA60 (季線)', line=dict(color='#e74c3c', dash='dot')))
             fig_fx.update_layout(margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            st.plotly_chart(fig_fx, use_container_width=True)
+            st.plotly_chart(fig_fx)
 
     st.divider()
 
@@ -576,13 +574,13 @@ with tab1:
             df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
             fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
             fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
-            st.plotly_chart(fig_mv_bar, use_container_width=True)
+            st.plotly_chart(fig_mv_bar)
             
         with col_bar2:
             df_div_sorted = df_ind.sort_values(by='股息', ascending=True)
             fig_div_bar = px.bar(df_div_sorted, x='股息', y='標的與股數', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
             fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
-            st.plotly_chart(fig_div_bar, use_container_width=True)
+            st.plotly_chart(fig_div_bar)
 
 with tab2:
     st.markdown("自動偵測窄幅盤整、均線糾結，以及 **KD / MACD** 的進階交叉判定。（台股採 60/120/240日線；美股採 50/100/200日線）")
@@ -627,6 +625,7 @@ with tab2:
             df_ta = pd.DataFrame(ta_results)
             st.dataframe(
                 df_ta, 
+                width="stretch",
                 column_config={
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
@@ -641,7 +640,7 @@ with tab2:
                     "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
                     "季線": st.column_config.NumberColumn("季線", format="%.2f"),
                 },
-                hide_index=True, use_container_width=True, height=450
+                hide_index=True, height=450
             )
 
     st.divider()
@@ -685,7 +684,7 @@ with tab2:
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal'), row=3, col=1)
             
             fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
-            st.plotly_chart(fig_tech, use_container_width=True)
+            st.plotly_chart(fig_tech)
 
 with tab3:
     st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**超額大盤表現 (Alpha)**、**基本面財報指標**與**近一年真實配息紀錄**。")
@@ -710,6 +709,7 @@ with tab3:
             df_perf = pd.DataFrame(perf_results)
             st.dataframe(
                 df_perf,
+                width="stretch",
                 column_config={
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "代號": st.column_config.TextColumn("代號", width="small"),
@@ -726,10 +726,9 @@ with tab3:
                     "淨利率": st.column_config.TextColumn("淨利率", width="small"),
                     "ROE": st.column_config.TextColumn("ROE", width="small"),
                 },
-                hide_index=True, use_container_width=True, height=600
+                hide_index=True, height=600
             )
 
-# 🔥 更新：每日看盤心得區域
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
     journal_error = False
@@ -793,8 +792,8 @@ with st.sidebar:
     
     st.subheader("🇹🇼 台股清單")
     if not df_tw.empty:
-        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
-        if st.button("💾 儲存台股變更", use_container_width=True):
+        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", width="stretch", key="tw_editor")
+        if st.button("💾 儲存台股變更"):
             with st.spinner("正在寫入台股資料..."):
                 try:
                     conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
@@ -806,8 +805,8 @@ with st.sidebar:
 
     st.subheader("🇺🇸 美股清單")
     if not df_us.empty:
-        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
-        if st.button("💾 儲存美股變更", use_container_width=True):
+        edited_df_us = st.data_editor(df_us, num_rows="dynamic", width="stretch", key="us_editor")
+        if st.button("💾 儲存美股變更"):
             with st.spinner("正在寫入美股資料..."):
                 try:
                     conn.update(worksheet="US_Portfolio", data=edited_df_us)
