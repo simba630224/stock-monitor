@@ -14,7 +14,7 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# --- 1. 配置 ---
+# --- 1. 配置與環境變數 ---
 TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 SHEET_CSV_TW_URL = os.getenv('SHEET_CSV_TW_URL')
@@ -28,24 +28,34 @@ def get_yf_ticker_tw(ticker):
     return f"{ticker}.TWO" if (ticker.endswith(('B', 'C')) or ticker == '009815') else f"{ticker}.TW"
 
 def load_csv_list(url, is_tw=True):
-    """讀取 CSV 並強制清理欄位"""
+    """讀取 Google Sheets CSV 並清理欄位"""
     try:
         if not url: return [] if is_tw else {}
         response = requests.get(url, timeout=30)
+        # 清理字串並讀取
         df = pd.read_csv(io.StringIO(response.text), on_bad_lines='skip')
-        df.columns = [str(c).strip().replace('\ufeff', '') for c in df.columns]
+        
+        # 強制清理欄位名稱（去除隱形符號、空白、轉小寫）
+        df.columns = [str(c).strip().replace('\ufeff', '').lower() for c in df.columns]
         
         data = [] if is_tw else {}
         for _, row in df.iterrows():
-            ticker = str(row.get('Ticker', '')).strip()
-            if not ticker or ticker == 'nan': continue
-            name = str(row.get('名稱', '')).strip()
+            # 建立小寫對應的 row 字典，方便模糊比對
+            row_dict = {str(k).strip().lower(): v for k, v in row.items()}
+            
+            # 從 CSV 中取得 Ticker 與 名稱 (支援多種常見欄位名)
+            ticker = str(row_dict.get('ticker') or '').strip()
+            name = str(row_dict.get('名稱') or row_dict.get('name') or '').strip()
+            
+            if not ticker or ticker.lower() == 'nan': continue
             display_name = name if name and name != 'nan' and name != '' else ticker
             
             if is_tw:
                 data.append({'symbol': get_yf_ticker_tw(ticker), 'name': display_name})
             else:
                 data[ticker] = display_name
+        
+        print(f"DEBUG: 成功載入 {len(data)} 筆資料 (TW={is_tw})")
         return data
     except Exception as e:
         print(f"❌ 讀取 CSV 發生嚴重錯誤: {e}")
@@ -55,7 +65,6 @@ def process_target(sym, name):
     try:
         df = yf.download(sym, period="3y", progress=False, threads=False) 
         if df.empty: return None
-        # yfinance 舊版與新版 DataFrame 結構相容處理
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df = df[['Close']].dropna()
         if len(df) < 2: return None
@@ -70,17 +79,18 @@ def send_tg_text(msg):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     requests.post(url, data={'chat_id':TG_CHAT_ID, 'text':msg, 'parse_mode':'HTML'})
 
+# --- 3. 主程式 ---
 def main():
     print(f"DEBUG: Token: {bool(TG_TOKEN)}, ChatID: {bool(TG_CHAT_ID)}")
     
-    # 在 main 裡面初始化清單，確保變數一定存在
+    # 執行讀取
     TW_CORE = load_csv_list(SHEET_CSV_TW_URL, True)
     US_WATCH = load_csv_list(SHEET_CSV_US_URL, False)
     
     print(f"DEBUG: 清單長度 - TW: {len(TW_CORE)}, US: {len(US_WATCH)}")
     
     if not TW_CORE and not US_WATCH:
-        print("❌ 警告：所有清單皆為空，請檢查 GitHub Secrets 的 URL 是否正確。")
+        print("❌ 警告：所有清單皆為空，請檢查 CSV 連結設定與欄位名稱（確認是否為 'Ticker' 與 '名稱'）。")
         return
 
     grouped_results = {'台股': [], '美股': []}
