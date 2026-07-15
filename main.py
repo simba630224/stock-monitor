@@ -28,37 +28,39 @@ def get_yf_ticker_tw(ticker):
     return f"{ticker}.TWO" if (ticker.endswith(('B', 'C')) or ticker == '009815') else f"{ticker}.TW"
 
 def load_csv_list(url, is_tw=True):
-    """讀取 Google Sheets CSV 並清理欄位"""
     try:
         if not url: return [] if is_tw else {}
         response = requests.get(url, timeout=30)
-        # 清理字串並讀取
         df = pd.read_csv(io.StringIO(response.text), on_bad_lines='skip')
         
-        # 強制清理欄位名稱（去除隱形符號、空白、轉小寫）
+        # --- 診斷用：印出前 5 行資料與欄位 ---
+        print(f"DEBUG: 欄位名稱: {df.columns.tolist()}")
+        print(f"DEBUG: 前 5 行內容:\n{df.head(5).to_string()}")
+        # -----------------------------------
+
         df.columns = [str(c).strip().replace('\ufeff', '').lower() for c in df.columns]
         
         data = [] if is_tw else {}
         for _, row in df.iterrows():
-            # 建立小寫對應的 row 字典，方便模糊比對
             row_dict = {str(k).strip().lower(): v for k, v in row.items()}
             
-            # 從 CSV 中取得 Ticker 與 名稱 (支援多種常見欄位名)
-            ticker = str(row_dict.get('ticker') or '').strip()
+            # 使用更寬鬆的比對，確保能抓到 Ticker
+            ticker = str(row_dict.get('ticker') or row_dict.get('a') or '').strip()
             name = str(row_dict.get('名稱') or row_dict.get('name') or '').strip()
             
-            if not ticker or ticker.lower() == 'nan': continue
-            display_name = name if name and name != 'nan' and name != '' else ticker
+            # 這裡把 print 拿掉，檢查是否是因為 ticker 為空導致被略過
+            if not ticker or ticker.lower() == 'nan': 
+                continue
             
             if is_tw:
-                data.append({'symbol': get_yf_ticker_tw(ticker), 'name': display_name})
+                data.append({'symbol': get_yf_ticker_tw(ticker), 'name': name if name and name != 'nan' else ticker})
             else:
-                data[ticker] = display_name
+                data[ticker] = name if name and name != 'nan' else ticker
         
-        print(f"DEBUG: 成功載入 {len(data)} 筆資料 (TW={is_tw})")
+        print(f"DEBUG: 最終成功載入 {len(data)} 筆資料")
         return data
     except Exception as e:
-        print(f"❌ 讀取 CSV 發生嚴重錯誤: {e}")
+        print(f"❌ 讀取 CSV 失敗: {e}")
         return [] if is_tw else {}
 
 def process_target(sym, name):
