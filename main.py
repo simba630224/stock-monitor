@@ -22,8 +22,16 @@ SHEET_CSV_US_URL = os.getenv('SHEET_CSV_US_URL')
 # --- 2. 輔助讀取清單 ---
 def load_csv_list(url, is_tw=True):
     try:
-        if not url: return [] if is_tw else {}
+        if not url: 
+            print(f"DEBUG: URL 為空，is_tw={is_tw}")
+            return [] if is_tw else {}
+            
+        print(f"DEBUG: 正在嘗試讀取連結: {url}")
         df = pd.read_csv(url, on_bad_lines='skip')
+        
+        # 偵錯：印出抓到的欄位名稱，確認是否正確
+        print(f"DEBUG: CSV 欄位名稱: {df.columns.tolist()}")
+        
         data = [] if is_tw else {}
         for _, row in df.iterrows():
             ticker = str(row.get('Ticker', '')).strip()
@@ -33,13 +41,12 @@ def load_csv_list(url, is_tw=True):
                 data.append({'symbol': ticker, 'name': name if name and name != 'nan' else ticker})
             else:
                 data[ticker] = name if name and name != 'nan' else ticker
+        
+        print(f"DEBUG: 成功載入 {len(data)} 筆資料")
         return data
     except Exception as e:
-        print(f"❌ 讀取 CSV 發生錯誤: {e}")
+        print(f"❌ 讀取 CSV 失敗: {e}")
         return [] if is_tw else {}
-
-TW_CORE = load_csv_list(SHEET_CSV_TW_URL, True)
-US_WATCH = load_csv_list(SHEET_CSV_US_URL, False)
 
 # --- 3. 分析函式 ---
 def get_yf_ticker_tw(ticker):
