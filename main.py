@@ -5,7 +5,6 @@ import requests
 import os
 import time
 import json
-import traceback
 import matplotlib
 matplotlib.use('Agg') # 避免無頭伺服器繪圖報錯
 import mplfinance as mpf
@@ -18,78 +17,89 @@ warnings.filterwarnings('ignore')
 TG_TOKEN = os.getenv('TELEGRAM_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# --- 2. 觀察清單更新 (依據您的最新需求) ---
-TW_CORE = [
-    # 台股權值股 (精簡至您指定的 5 檔)
-    {'symbol': '2330.TW', 'name': '台積電'},
-    {'symbol': '2317.TW', 'name': '鴻海'},
-    {'symbol': '2454.TW', 'name': '聯發科'},
-    {'symbol': '2308.TW', 'name': '台達電'},
-    {'symbol': '3008.TW', 'name': '大立光'},
-    
-    # 台股 ETF 
-    {'symbol': '0050.TW', 'name': '元大台灣50'},
-    {'symbol': '00878.TW', 'name': '國泰永續高股息'},
-    {'symbol': '00713.TW', 'name': '元大台灣高息低波'},
-    {'symbol': '00919.TW', 'name': '群益台灣精選高息'},
-    {'symbol': '009812.TW', 'name': '野村日本東證ETF'},
-    {'symbol': '00922.TW', 'name': '國泰台灣領袖50'},
-    {'symbol': '00923.TW', 'name': '群益台灣ESG低碳'},
-    {'symbol': '00830.TW', 'name': '國泰費城半導體'},
-    {'symbol': '00981A.TW', 'name': '主動統一台股增長'},
-    {'symbol': '00988A.TW', 'name': '主動統一全球創新'},
-    {'symbol': '009815.TW', 'name': '大華美國MAG7+'}
-]
+# 從 GitHub Secrets 取得 Google Sheets 發布的 CSV 連結
+SHEET_CSV_TW_URL = os.getenv('SHEET_CSV_TW_URL')
+SHEET_CSV_US_URL = os.getenv('SHEET_CSV_US_URL')
 
-US_WATCH = {
-    'NVDA': '輝達 Nvidia',
-    'MSFT': '微軟 Microsoft',
-    'GOOGL': '谷歌 Google',
-    'VOO': '標普500 VOO',
-    'QQQ': '納斯達克 QQQ'
-}
+# --- 2. 觀察清單更新 (動態讀取儀表板最新清單) ---
+TW_CORE = []
+US_WATCH = {}
+
+print("正在從 Google Sheets 獲取最新觀察清單...")
+try:
+    if SHEET_CSV_TW_URL:
+        df_tw = pd.read_csv(SHEET_CSV_TW_URL)
+        for _, row in df_tw.iterrows():
+            if pd.notna(row.get('Ticker')):
+                name = str(row.get('名稱', '')).strip()
+                t = str(row['Ticker']).strip()
+                TW_CORE.append({'symbol': t, 'name': name if name and name != 'nan' else t})
+except Exception as e:
+    print(f"❌ 讀取台股清單失敗: {e}")
+
+try:
+    if SHEET_CSV_US_URL:
+        df_us = pd.read_csv(SHEET_CSV_US_URL)
+        for _, row in df_us.iterrows():
+            if pd.notna(row.get('Ticker')):
+                name = str(row.get('名稱', '')).strip()
+                t = str(row['Ticker']).strip()
+                US_WATCH[t] = name if name and name != 'nan' else t
+except Exception as e:
+    print(f"❌ 讀取美股清單失敗: {e}")
+
+if not TW_CORE and not US_WATCH:
+    print("⚠️ 警告：讀取到的觀察清單為空，請檢查 CSV 連結設定。")
 
 # --- 3. 輔助功能 ---
+def get_yf_ticker_tw(ticker):
+    ticker = str(ticker).strip().upper()
+    if ticker.endswith('.TW') or ticker.endswith('.TWO'): return ticker
+    if ticker.endswith('B') or ticker.endswith('C') or ticker == '009815': return f"{ticker}.TWO"
+    return f"{ticker}.TW"
+
 def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2, market):
-    short_term_name = "月/季線"
+    short_term_name = "月/季線" if pd.notna(ma_s1) and ma_s2 != ma_l1 else "短中線"
     status = ""
-    if pd.notna(ma_s1) and pd.notna(ma_s2):
-        if price > ma_s1 and price > ma_s2: status += f"🟢 站穩 {short_term_name} (強勢)"
-        elif price < ma_s1 and price < ma_s2: status += f"🔴 位於 {short_term_name} 之下 (偏空)"
-        elif price > ma_s2 and price < ma_s1: status += f"🟡 守住季線，受月線壓制"
-        elif price > ma_s1 and price < ma_s2: status += f"🔵 站上月線，臨季線挑戰"
+    if pd.notna(ma_s1) and pd.notna(ma_s2) and ma_s1 > 0 and ma_s2 > 0:
+        if price > ma_s1 and price > ma_s2: status += f"🟢 站穩 {short_term_name}"
+        elif price < ma_s1 and price < ma_s2: status += f"🔴 {short_term_name} 之下"
+        elif price > ma_s2 and price < ma_s1: status += f"🟡 守季線，受月線壓"
+        elif price > ma_s1 and price < ma_s2: status += f"🔵 站月線，臨季線壓"
     else:
         status += "中短均線資料不足"
     status += " | "
-    if pd.notna(ma_l1) and pd.notna(ma_l2):
+    if pd.notna(ma_l1) and pd.notna(ma_l2) and ma_l1 > 0 and ma_l2 > 0:
         if price > ma_l1 and price > ma_l2: status += f"🟢 長線多頭"
         elif price < ma_l1 and price < ma_l2: status += f"🔴 長線空頭"
-        elif price > ma_l2 and price < ma_l1: status += f"🟡 守年線，受半年線壓"
-        elif price > ma_l1 and price < ma_l2: status += f"🔵 站半年線，臨年線壓"
+        elif price > ma_l2 and price < ma_l1: status += f"🟡 守年線"
+        elif price > ma_l1 and price < ma_l2: status += f"🔵 臨年線壓"
     else:
         status += "長線均線資料不足"
     return status
 
 def calculate_indicators(df, market):
     if market == '台股':
-        df['MA_S1'] = df['Close'].rolling(20).mean()
-        df['MA_S2'] = df['Close'].rolling(60).mean()
-        df['MA_L1'] = df['Close'].rolling(120).mean()
-        df['MA_L2'] = df['Close'].rolling(240).mean()
+        df['MA_S1'] = df['Close'].rolling(20, min_periods=1).mean()
+        df['MA_S2'] = df['Close'].rolling(60, min_periods=1).mean()
+        df['MA_L1'] = df['Close'].rolling(120, min_periods=1).mean()
+        df['MA_L2'] = df['Close'].rolling(240, min_periods=1).mean()
     else:
-        df['MA_S1'] = df['Close'].rolling(20).mean()
-        df['MA_S2'] = df['Close'].rolling(50).mean()
-        df['MA_L1'] = df['Close'].rolling(100).mean()
-        df['MA_L2'] = df['Close'].rolling(200).mean()
-    ln_d = df['Low'].rolling(9).min()
-    hn_d = df['High'].rolling(9).max()
-    rsv_d = (df['Close'] - ln_d) / (hn_d - ln_d) * 100
+        df['MA_S1'] = df['Close'].rolling(20, min_periods=1).mean()
+        df['MA_S2'] = df['Close'].rolling(50, min_periods=1).mean()
+        df['MA_L1'] = df['Close'].rolling(100, min_periods=1).mean()
+        df['MA_L2'] = df['Close'].rolling(200, min_periods=1).mean()
+        
+    ln_d = df['Low'].rolling(9, min_periods=1).min()
+    hn_d = df['High'].rolling(9, min_periods=1).max()
+    rsv_d = (df['Close'] - ln_d) / (hn_d - ln_d + 1e-9) * 100
     df['K_d'] = rsv_d.ewm(com=2, adjust=False).mean()
     df['D_d'] = df['K_d'].ewm(com=2, adjust=False).mean()
+    
     df_w = df.resample('W-FRI').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
-    ln_w = df_w['Low'].rolling(9).min()
-    hn_w = df_w['High'].rolling(9).max()
-    rsv_w = (df_w['Close'] - ln_w) / (hn_w - ln_w) * 100
+    ln_w = df_w['Low'].rolling(9, min_periods=1).min()
+    hn_w = df_w['High'].rolling(9, min_periods=1).max()
+    rsv_w = (df_w['Close'] - ln_w) / (hn_w - ln_w + 1e-9) * 100
     df_w['K_w'] = rsv_w.ewm(com=2, adjust=False).mean()
     df_w['D_w'] = df_w['K_w'].ewm(com=2, adjust=False).mean()
     return df, df_w
@@ -150,14 +160,15 @@ def classify_target(sym):
 
 def process_target(sym, name):
     try:
-        df_raw = yf.download(sym, period="3y", progress=False) 
+        df_raw = yf.download(sym, period="3y", progress=False, threads=False) 
         if df_raw.empty: return None
         if isinstance(df_raw.columns, pd.MultiIndex): 
             df_raw.columns = df_raw.columns.get_level_values(0)
-        df_raw.index = df_raw.index.tz_localize(None)
+        df_raw.index = df_raw.index.tz_localize(None) if df_raw.index.tz is not None else df_raw.index
         df_raw.index.name = 'Date'
-        df = df_raw[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna()
-        if len(df) < 60: return None
+        df = df_raw[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float).dropna(subset=['Close'])
+        if len(df) < 2: return None
+        
         market = classify_target(sym)
         df, df_w = calculate_indicators(df, market)
         if len(df_w) < 2: return None
@@ -173,10 +184,13 @@ def process_target(sym, name):
         except: pass 
         
         last_p = df['Close'].iloc[-1]
-        prev_p = df['Close'].iloc[-2]
-        ma_s1, ma_s2 = df['MA_S1'].iloc[-1], df['MA_S2'].iloc[-1]
-        prev_ma_s1, prev_ma_s2 = df['MA_S1'].iloc[-2], df['MA_S2'].iloc[-2]
-        ma_l1, ma_l2 = df['MA_L1'].iloc[-1], df['MA_L2'].iloc[-1]
+        prev_p = df['Close'].iloc[-2] if len(df) > 1 else last_p
+        ma_s1 = df['MA_S1'].iloc[-1] if pd.notna(df['MA_S1'].iloc[-1]) else 0.0
+        ma_s2 = df['MA_S2'].iloc[-1] if pd.notna(df['MA_S2'].iloc[-1]) else 0.0
+        prev_ma_s1 = df['MA_S1'].iloc[-2] if len(df) > 1 and pd.notna(df['MA_S1'].iloc[-2]) else 0.0
+        prev_ma_s2 = df['MA_S2'].iloc[-2] if len(df) > 1 and pd.notna(df['MA_S2'].iloc[-2]) else 0.0
+        ma_l1 = df['MA_L1'].iloc[-1] if pd.notna(df['MA_L1'].iloc[-1]) else 0.0
+        ma_l2 = df['MA_L2'].iloc[-1] if pd.notna(df['MA_L2'].iloc[-1]) else 0.0
         
         # 判斷是否跌破
         is_break_ma20 = (last_p < ma_s1 and prev_p >= prev_ma_s1)
@@ -211,10 +225,10 @@ def process_target(sym, name):
             fn = f"chart_{sym.replace('^','').replace('.','_')}.png"
             pdf = df.tail(120)
             ap = []
-            if pd.notna(pdf['MA_S1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S1'], color='blue', width=1.0))
-            if pd.notna(pdf['MA_S2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_S2'], color='orange', width=1.0))
-            if pd.notna(pdf['MA_L1'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L1'], color='green', width=1.2, linestyle='--'))
-            if pd.notna(pdf['MA_L2'].iloc[-1]): ap.append(mpf.make_addplot(pdf['MA_L2'], color='red', width=1.2, linestyle='--'))
+            if pd.notna(pdf['MA_S1'].iloc[-1]) and pdf['MA_S1'].iloc[-1] > 0: ap.append(mpf.make_addplot(pdf['MA_S1'], color='blue', width=1.0))
+            if pd.notna(pdf['MA_S2'].iloc[-1]) and pdf['MA_S2'].iloc[-1] > 0: ap.append(mpf.make_addplot(pdf['MA_S2'], color='orange', width=1.0))
+            if pd.notna(pdf['MA_L1'].iloc[-1]) and pdf['MA_L1'].iloc[-1] > 0: ap.append(mpf.make_addplot(pdf['MA_L1'], color='green', width=1.2, linestyle='--'))
+            if pd.notna(pdf['MA_L2'].iloc[-1]) and pdf['MA_L2'].iloc[-1] > 0: ap.append(mpf.make_addplot(pdf['MA_L2'], color='red', width=1.2, linestyle='--'))
             mpf.plot(pdf, type='candle', style='charles', addplot=ap, title=f"{name} ({sym})", savefig=fn)
         
         msg = (f"📊 <b>{name} ({sym})</b>\n"
@@ -242,7 +256,8 @@ def main():
     summary_ma_break = []
     summary_low_pe = []
     grouped_results = {'台股': [], '美股': []}
-    all_targets = [(item['symbol'], item['name']) for item in TW_CORE] + list(US_WATCH.items())
+    
+    all_targets = [(get_yf_ticker_tw(item['symbol']), item['name']) for item in TW_CORE] + list(US_WATCH.items())
 
     for sym, name in all_targets:
         res = process_target(sym, name)
