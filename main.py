@@ -27,27 +27,28 @@ def load_csv_list(url, is_tw=True):
         response = requests.get(url, timeout=30)
         df = pd.read_csv(io.StringIO(response.text), on_bad_lines='skip')
         
-        # 關鍵除錯：印出所有欄位名稱
-        print(f"DEBUG: 原始欄位清單: {df.columns.tolist()}")
-        
-        # 將欄位名稱自動去除空白，並轉為小寫以便比對
-        df.columns = [c.strip() for c in df.columns]
+        # 強制清理所有欄位名稱，避免隱形符號
+        df.columns = [str(c).strip().replace('\ufeff', '') for c in df.columns]
         
         data = [] if is_tw else {}
         for _, row in df.iterrows():
-            # 這裡我們放寬檢查，嘗試用最常見的幾個標題去抓資料
-            ticker = str(row.get('Ticker') or row.get('ticker') or row.get('代號') or '').strip()
-            name = str(row.get('名稱') or row.get('Name') or row.get('名稱') or '').strip()
-            
+            # 強制讀取 Ticker 欄位，並補上 .TW 後綴 (如果是台股)
+            ticker = str(row.get('Ticker', '')).strip()
             if not ticker or ticker == 'nan': continue
             
+            # 處理名稱，如果該欄位為空，則直接用 Ticker 代替
+            name = str(row.get('名稱', '')).strip()
+            display_name = name if name and name != 'nan' and name != '' else ticker
+            
             if is_tw:
-                data.append({'symbol': ticker, 'name': name if name and name != 'nan' else ticker})
+                # 自動補齊台股後綴
+                final_ticker = get_yf_ticker_tw(ticker)
+                data.append({'symbol': final_ticker, 'name': display_name})
             else:
-                data[ticker] = name if name and name != 'nan' else ticker
+                data[ticker] = display_name
         return data
     except Exception as e:
-        print(f"❌ 讀取 CSV 發生錯誤: {e}")
+        print(f"❌ 讀取 CSV 失敗: {e}")
         return [] if is_tw else {}
 
 # --- 3. 其他功能 (保持不變) ---
