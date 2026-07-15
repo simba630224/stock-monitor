@@ -20,6 +20,8 @@ jobs:
           pip install yfinance pandas requests mplfinance
       - name: 執行分析與新聞
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHEET_CSV_TW_URL: ${{ secrets.SHEET_CSV_TW_URL }}
+          SHEET_CSV_US_URL: ${{ secrets.SHEET_CSV_US_URL }}
         run: python main.py
