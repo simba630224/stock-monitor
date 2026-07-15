@@ -14,7 +14,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- 1. 配置與環境變數 ---
-TG_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 SHEET_CSV_TW_URL = os.getenv('SHEET_CSV_TW_URL')
 SHEET_CSV_US_URL = os.getenv('SHEET_CSV_US_URL')
