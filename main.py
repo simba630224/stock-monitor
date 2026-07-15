@@ -24,30 +24,31 @@ SHEET_CSV_US_URL = os.getenv('SHEET_CSV_US_URL')
 def load_csv_list(url, is_tw=True):
     try:
         if not url: return [] if is_tw else {}
-        print(f"DEBUG: 正在嘗試透過 requests 下載: {url}")
-        # 使用 requests 模擬瀏覽器下載 CSV，比直接用 pandas 更穩定
         response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        
         df = pd.read_csv(io.StringIO(response.text), on_bad_lines='skip')
-        print(f"DEBUG: 成功取得資料，共 {len(df)} 行")
+        
+        # 關鍵除錯：印出所有欄位名稱
+        print(f"DEBUG: 原始欄位清單: {df.columns.tolist()}")
+        
+        # 將欄位名稱自動去除空白，並轉為小寫以便比對
+        df.columns = [c.strip() for c in df.columns]
         
         data = [] if is_tw else {}
         for _, row in df.iterrows():
-            ticker = str(row.get('Ticker', '')).strip()
+            # 這裡我們放寬檢查，嘗試用最常見的幾個標題去抓資料
+            ticker = str(row.get('Ticker') or row.get('ticker') or row.get('代號') or '').strip()
+            name = str(row.get('名稱') or row.get('Name') or row.get('名稱') or '').strip()
+            
             if not ticker or ticker == 'nan': continue
-            name = str(row.get('名稱', '')).strip()
+            
             if is_tw:
                 data.append({'symbol': ticker, 'name': name if name and name != 'nan' else ticker})
             else:
                 data[ticker] = name if name and name != 'nan' else ticker
         return data
     except Exception as e:
-        print(f"❌ 讀取 CSV 失敗: {e}")
+        print(f"❌ 讀取 CSV 發生錯誤: {e}")
         return [] if is_tw else {}
-
-TW_CORE = load_csv_list(SHEET_CSV_TW_URL, True)
-US_WATCH = load_csv_list(SHEET_CSV_US_URL, False)
 
 # --- 3. 其他功能 (保持不變) ---
 def get_yf_ticker_tw(ticker):
