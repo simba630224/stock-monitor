@@ -13,7 +13,6 @@ from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
 
-# 設定網頁標題與排版 (寬螢幕模式)
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
@@ -294,7 +293,7 @@ def process_technical_analysis(sym, name, market):
             if 'Volume' in df.columns: agg_dict['Volume'] = 'sum'
             
             df_w = df.resample('W-FRI').agg(agg_dict).dropna(subset=['Close'])
-            if len(df_w) >= 2:
+            if len(df_w) >= 15: # 確保週線有足夠資料
                 has_enough_weekly = True
                 if 'High' in df_w.columns and 'Low' in df_w.columns:
                     low_min_w = df_w['Low'].rolling(9, min_periods=1).min()
@@ -334,10 +333,8 @@ def process_technical_analysis(sym, name, market):
         prev_ma20 = float(df['MA20'].iloc[-2]) if len(df) > 1 and pd.notna(df['MA20'].iloc[-2]) else 0.0
         prev_ma_season = float(df['季線'].iloc[-2]) if len(df) > 1 and pd.notna(df['季線'].iloc[-2]) else 0.0
 
-        # 新增均線位階判定
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
         
-        # 跌破判斷
         is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
         
         high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
@@ -357,15 +354,16 @@ def process_technical_analysis(sym, name, market):
         pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0.0
         pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0.0
         
+        # 嚴格篩選版狀態判定 (供亮點摘要比對)
         def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
-            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD金叉"
-            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD死叉"
+            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD一般金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD一般死叉"
             if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
             return "📉 已死叉，且向下發散"
             
         def eval_macd_status(curr_fast, curr_slow, prev_fast, prev_slow):
-            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD金叉"
-            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD死叉"
+            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD一般金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD一般死叉"
             if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
             return "📉 已死叉，且向下發散"
 
@@ -388,26 +386,11 @@ def process_technical_analysis(sym, name, market):
         if len(df) >= 20 and high_20d > 0 and low_20d > 0:
             amp_20d = (high_20d - low_20d) / low_20d
             if amp_20d <= 0.07: alerts.append(f"💤 20日窄幅盤整(振幅{amp_20d*100:.1f}%)")
-                
-        if len(df) >= 60 and ma10 > 0 and ma20 > 0 and ma_season > 0:
-            ma_max = max(ma10, ma20, ma_season)
-            ma_min = min(ma10, ma20, ma_season)
-            if (ma_max - ma_min) / ma_min <= 0.03: alerts.append("🌀 均線糾結")
-            
-        if "金叉" in kd_d_status: alerts.append(kd_d_status[2:])
-        elif "死叉" in kd_d_status: alerts.append(kd_d_status[2:])
-            
-        if has_enough_weekly:
-            if "金叉" in kd_w_status: alerts.append(kd_w_status.replace("🟢 ", "週"))
-            elif "死叉" in kd_w_status: alerts.append(kd_w_status.replace("🔴 ", "週"))
-            
-            if "金叉" in macd_w_status: alerts.append(macd_w_status.replace("🟢 ", "週"))
-            elif "死叉" in macd_w_status: alerts.append(macd_w_status.replace("🔴 ", "週"))
             
         action = "➖ 持平"
-        has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週MACD金叉"])
-        has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週MACD死叉", "近高點回落"])
-        has_reduce = any(x in a for a in alerts for x in ["20日回落"])
+        has_buy = any(x in kd_w_status or x in macd_w_status for x in ["低檔金叉", "零下金叉"])
+        has_sell = any(x in kd_w_status or x in macd_w_status for x in ["高檔死叉", "零上死叉"]) or "近高點回落" in " ".join(alerts)
+        has_reduce = "20日回落" in " ".join(alerts)
         
         if has_sell: action = "🛑 賣出"
         elif has_buy: action = "🚀 買進"
@@ -617,10 +600,9 @@ with tab2:
         ta_results = []
         target_options = {} 
         
-        # 新的精簡分類清單
-        bullish_strong = [] # 週線金叉 (長線波段)
-        bullish_daily = []  # 日線金叉 (短線轉折)
-        bearish_alerts = [] # 空方警示 (死叉/破線)
+        bullish_strong = [] 
+        bullish_daily = []  
+        bearish_alerts = [] 
         
         scan_list = []
         for item in PORTFOLIO_TW:
@@ -642,84 +624,76 @@ with tab2:
                 ta_results.append(res)
                 target_options[f"{name} ({sym})"] = sym
                 
-                # 1. 取得本益比 (PE) 作為顯示與排序參考
                 pe_val = res.get('_raw_pe')
                 if pd.isna(pe_val) or pe_val is None: pe_val = 999
                 pe_str = f"PE:{pe_val:.1f}" if pe_val != 999 else "無PE"
                 name_disp = f"{name} ({pe_str})"
                 
-                # 2. 解析原始指標結果
                 kd_d = res.get('_raw_kd_d', '')
                 kd_w = res.get('_raw_kd_w', '')
                 macd_d = res.get('_raw_macd_d', '')
                 macd_w = res.get('_raw_macd_w', '')
                 
-                w_macd_gold = "金叉" in macd_w
-                w_kd_gold = "金叉" in kd_w
-                d_macd_gold = "金叉" in macd_d
-                d_kd_gold = "金叉" in kd_d
+                # 嚴格校驗特定狀態字串
+                w_macd_gold = "🟢 MACD零下金叉" in macd_w
+                w_kd_gold = "🟢 KD低檔金叉" in kd_w
+                d_macd_gold = "🟢 MACD零下金叉" in macd_d
+                d_kd_gold = "🟢 KD低檔金叉" in kd_d
 
-                w_macd_death = "死叉" in macd_w
-                w_kd_death = "死叉" in kd_w
-                d_macd_death = "死叉" in macd_d
-                d_kd_death = "死叉" in kd_d
+                w_macd_death = "🔴 MACD零上死叉" in macd_w
+                w_kd_death = "🔴 KD高檔死叉" in kd_w
+                d_macd_death = "🔴 MACD零上死叉" in macd_d
+                d_kd_death = "🔴 KD高檔死叉" in kd_d
                 
                 is_break = res.get('_is_break_ma', False)
 
-                # 3. 判斷精確的標籤 (Tags)
                 tags = []
-                if w_macd_gold: tags.append("週MACD金叉")
-                if w_kd_gold: tags.append("週KD金叉")
-                if d_macd_gold: tags.append("日MACD金叉")
-                if d_kd_gold: tags.append("日KD金叉")
+                if w_macd_gold: tags.append("週MACD零下金叉")
+                if w_kd_gold: tags.append("週KD低檔金叉")
+                if d_macd_gold: tags.append("日MACD零下金叉")
+                if d_kd_gold: tags.append("日KD低檔金叉")
                 
-                if w_macd_death: tags.append("週MACD死叉")
-                if w_kd_death: tags.append("週KD死叉")
-                if d_macd_death: tags.append("日MACD死叉")
-                if d_kd_death: tags.append("日KD死叉")
+                if w_macd_death: tags.append("週MACD零上死叉")
+                if w_kd_death: tags.append("週KD高檔死叉")
+                if d_macd_death: tags.append("日MACD零上死叉")
+                if d_kd_death: tags.append("日KD高檔死叉")
                 
-                if is_break: tags.append("破均線")
+                if is_break: tags.append("跌破季線")
 
-                # 計算分數以利排序 (技術面優先，週線權重 > 日線)
                 bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1)
                 bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1)
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score}
                 
-                # 4. 互斥分類邏輯 (避免同一個股出現在多方與空方)
+                # 互斥分類
                 if bear_score >= 3: 
-                    # 有週死叉或強烈日死叉組合，優先視為空方
                     bearish_alerts.append(item_data)
                 elif bull_score >= 3: 
-                    # 有週金叉
                     bullish_strong.append(item_data)
                 elif bear_score > 0: 
-                    # 有日死叉或破均線
                     bearish_alerts.append(item_data)
                 elif bull_score > 0: 
-                    # 只有日金叉
                     bullish_daily.append(item_data)
 
-        # 5. 核心排序邏輯：技術分數(降冪)優先，本益比(PE)(升冪)其次，並只取 Top 5
-        bullish_strong = sorted(bullish_strong, key=lambda x: (-x['bull_score'], x['pe']))[:5]
-        bullish_daily = sorted(bullish_daily, key=lambda x: (-x['bull_score'], x['pe']))[:5]
-        bearish_alerts = sorted(bearish_alerts, key=lambda x: (-x['bear_score'], x['pe']))[:5]
+        # 排序：技術分數(降冪)優先，本益比(PE)(升冪)其次，取 Top 10
+        bullish_strong = sorted(bullish_strong, key=lambda x: (-x['bull_score'], x['pe']))[:10]
+        bullish_daily = sorted(bullish_daily, key=lambda x: (-x['bull_score'], x['pe']))[:10]
+        bearish_alerts = sorted(bearish_alerts, key=lambda x: (-x['bear_score'], x['pe']))[:10]
 
         def format_items(items):
             if not items: return "無"
             return "\n".join([f"• **{x['name']}** `[{', '.join(x['tags'])}]`" for x in items])
 
-    # 🔥 精簡版：盤後亮點摘要區塊 (Top 5)
-    st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 5)")
-    st.caption("篩選邏輯：以技術指標強度排序 (週級別優先於日級別)，強度相同時 **本益比 (PE) 低者優先**。各區塊最多顯示 5 檔，且訊號互斥不重複。")
+    st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 10)")
+    st.caption("篩選邏輯：嚴格限定「零上/零下、高檔/低檔」交叉。依技術強度排序 (週級別優先)，強度相同時 **本益比 (PE) 低者優先**。")
     
     col_sum1, col_sum2 = st.columns(2)
     with col_sum1:
         st.success(f"**☀️ 多方強勢區 (訊號發動)**\n\n"
-                   f"🔥 **週線級別 (波段啟動 Top 5)**：\n{format_items(bullish_strong)}\n\n"
-                   f"📈 **日線級別 (短線轉折 Top 5)**：\n{format_items(bullish_daily)}")
+                   f"🔥 **週線級別 (波段啟動 Top 10)**：\n{format_items(bullish_strong)}\n\n"
+                   f"📈 **日線級別 (短線轉折 Top 10)**：\n{format_items(bullish_daily)}")
     with col_sum2:
-        st.error(f"**⛈️ 空方風險區 (破線/死叉 Top 5)**\n\n"
+        st.error(f"**⛈️ 空方風險區 (破線/死叉 Top 10)**\n\n"
                  f"⚠️ **趨勢轉弱警示**：\n{format_items(bearish_alerts)}")
 
     st.divider()
@@ -732,7 +706,6 @@ with tab2:
         
     if ta_results:
         df_ta = pd.DataFrame(ta_results)
-        # 移除內部運算用欄位
         df_ta = df_ta.drop(columns=['_raw_kd_d', '_raw_kd_w', '_raw_pe', '_is_break_ma', '_raw_macd_d', '_raw_macd_w'], errors='ignore')
         st.dataframe(
             df_ta, 
