@@ -430,7 +430,8 @@ def process_technical_analysis(sym, name, market):
             "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})",
             "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
             # 儲存供亮點摘要使用的原始資料
-            "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma
+            "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma,
+            "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status
         }
         
     except Exception as e:
@@ -615,9 +616,11 @@ with tab2:
     with st.spinner("正在掃描與運算所有標的指標..."):
         ta_results = []
         target_options = {} 
-        summary_golden_d, summary_death_d = [], []
-        summary_golden_w, summary_death_w = [], []
-        summary_ma_break, summary_low_pe = [], []
+        
+        # 新的精簡分類清單
+        bullish_strong = [] # 週線金叉 (長線波段)
+        bullish_daily = []  # 日線金叉 (短線轉折)
+        bearish_alerts = [] # 空方警示 (死叉/破線)
         
         scan_list = []
         for item in PORTFOLIO_TW:
@@ -639,31 +642,62 @@ with tab2:
                 ta_results.append(res)
                 target_options[f"{name} ({sym})"] = sym
                 
-                # 分類至盤後摘要
+                # 1. 取得本益比 (PE) 作為排序權重
                 pe_val = res.get('_raw_pe')
-                pe_str = f"P/E: {pe_val:.1f}" if pd.notna(pe_val) else "無 P/E"
-                name_pe = f"{name} ({pe_str})"
+                if pd.isna(pe_val) or pe_val is None: pe_val = 999
+                pe_str = f"PE:{pe_val:.1f}" if pe_val != 999 else "無PE"
+                name_disp = f"{name} ({pe_str})"
                 
-                if "低檔金叉" in res['_raw_kd_d']: summary_golden_d.append(name_pe)
-                if "高檔死叉" in res['_raw_kd_d']: summary_death_d.append(name_pe)
-                if "低檔金叉" in res['_raw_kd_w']: summary_golden_w.append(name_pe)
-                if "高檔死叉" in res['_raw_kd_w']: summary_death_w.append(name_pe)
-                if res['_is_break_ma']: summary_ma_break.append(name)
-                if pd.notna(pe_val) and pe_val < 25: summary_low_pe.append(name_pe)
+                # 2. 判斷多空狀態 (涵蓋 KD 與 MACD)
+                kd_d = res.get('_raw_kd_d', '')
+                kd_w = res.get('_raw_kd_w', '')
+                macd_d = res.get('_raw_macd_d', '')
+                macd_w = res.get('_raw_macd_w', '')
+                
+                is_w_gold = "金叉" in kd_w or "金叉" in macd_w
+                is_d_gold = "金叉" in kd_d or "金叉" in macd_d
+                is_death = "死叉" in kd_d or "死叉" in kd_w or "死叉" in macd_d or "死叉" in macd_w
+                is_break = res.get('_is_break_ma', False)
 
-    # 🔥 盤後亮點摘要區塊
-    st.markdown("### 📊 盤後亮點摘要")
+                # 3. 建立標的資料物件
+                item_data = {'name': name_disp, 'pe': pe_val, 'tags': []}
+                
+                if is_w_gold:
+                    if "金叉" in macd_w: item_data['tags'].append("MACD")
+                    if "金叉" in kd_w: item_data['tags'].append("KD")
+                    bullish_strong.append(item_data)
+                elif is_d_gold:
+                    if "金叉" in macd_d: item_data['tags'].append("MACD")
+                    if "金叉" in kd_d: item_data['tags'].append("KD")
+                    bullish_daily.append(item_data)
+                    
+                if is_death or is_break:
+                    if "死叉" in macd_w or "死叉" in kd_w: item_data['tags'].append("週死叉")
+                    if "死叉" in macd_d or "死叉" in kd_d: item_data['tags'].append("日死叉")
+                    if is_break: item_data['tags'].append("破均線")
+                    bearish_alerts.append(item_data)
+
+        # 4. 核心排序邏輯：依照本益比(PE)由低至高排序
+        bullish_strong = sorted(bullish_strong, key=lambda x: x['pe'])
+        bullish_daily = sorted(bullish_daily, key=lambda x: x['pe'])
+        bearish_alerts = sorted(bearish_alerts, key=lambda x: x['pe'])
+
+        def format_items(items):
+            if not items: return "無"
+            return ", ".join([f"{x['name']} [{'+'.join(x['tags'])}]" for x in items])
+
+    # 🔥 精簡版：盤後亮點摘要區塊
+    st.markdown("### 📊 盤後技術亮點與警示摘要")
+    st.caption("篩選邏輯：以 KD / MACD 金叉與死叉為基準，同級別內 **本益比 (PE) 低者優先顯示**。")
+    
     col_sum1, col_sum2 = st.columns(2)
     with col_sum1:
-        st.success(f"**☀️ 多方訊號**\n\n"
-                   f"**日KD低檔金叉**：{', '.join(summary_golden_d) if summary_golden_d else '無'}\n\n"
-                   f"**週KD低檔金叉**：{', '.join(summary_golden_w) if summary_golden_w else '無'}\n\n"
-                   f"**低本益比 (<25)**：{', '.join(summary_low_pe) if summary_low_pe else '無'}")
+        st.success(f"**☀️ 多方強勢區 (訊號發動)**\n\n"
+                   f"🔥 **週線級別 (波段啟動)**：\n{format_items(bullish_strong)}\n\n"
+                   f"📈 **日線級別 (短線轉折)**：\n{format_items(bullish_daily)}")
     with col_sum2:
-        st.error(f"**⛈️ 空方警示**\n\n"
-                 f"**日KD高檔死叉**：{', '.join(summary_death_d) if summary_death_d else '無'}\n\n"
-                 f"**週KD高檔死叉**：{', '.join(summary_death_w) if summary_death_w else '無'}\n\n"
-                 f"**跌破月/季線**：{', '.join(summary_ma_break) if summary_ma_break else '無'}")
+        st.error(f"**⛈️ 空方風險區 (破線/死叉)**\n\n"
+                 f"⚠️ **趨勢轉弱警示**：\n{format_items(bearish_alerts)}")
 
     st.divider()
     st.markdown("### 📋 完整技術分析清單")
@@ -676,7 +710,7 @@ with tab2:
     if ta_results:
         df_ta = pd.DataFrame(ta_results)
         # 移除內部運算用欄位
-        df_ta = df_ta.drop(columns=['_raw_kd_d', '_raw_kd_w', '_raw_pe', '_is_break_ma'], errors='ignore')
+        df_ta = df_ta.drop(columns=['_raw_kd_d', '_raw_kd_w', '_raw_pe', '_is_break_ma', '_raw_macd_d', '_raw_macd_w'], errors='ignore')
         st.dataframe(
             df_ta, 
             width="stretch",
