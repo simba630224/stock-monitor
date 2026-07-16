@@ -92,14 +92,15 @@ def get_fundamental_info(sym):
         info = yf.Ticker(sym).info
         return {
             'quoteType': info.get('quoteType'),
-            'returnOnEquity': info.get('returnOnEquity')
+            'returnOnEquity': info.get('returnOnEquity'),
+            'trailingPE': info.get('trailingPE'),
+            'forwardPE': info.get('forwardPE')
         }
     except: return {}
 
 @st.cache_data(ttl=600)
 def get_stock_data(sym):
     try:
-        # 🔴 重要修正：加入 threads=False 防止記憶體崩潰
         df = yf.download(sym, period="3y", progress=False, threads=False)
         if not df.empty and len(df) >= 2:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
@@ -109,6 +110,10 @@ def get_stock_data(sym):
             
             df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
             df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
+            
+            is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
+            season_len = 60 if is_tw else 50
+            df['MA_season'] = df['Close'].rolling(season_len, min_periods=1).mean()
             
             if 'High' in df.columns and 'Low' in df.columns:
                 low_min = df['Low'].rolling(9, min_periods=1).min()
@@ -135,7 +140,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
             curr_p = float(hist['Close'].dropna().iloc[-1])
             valid_hist = hist['Close'].dropna()
             
-            # 🔴 重要修正：防禦空值，避免導致前端編譯當機
             ret_1q = (((curr_p - valid_hist.iloc[-63]) / valid_hist.iloc[-63]) * 100) if len(valid_hist) > 63 else 0.0
             ret_1y = (((curr_p - valid_hist.iloc[-252]) / valid_hist.iloc[-252]) * 100) if len(valid_hist) > 252 else (((curr_p - valid_hist.iloc[0]) / valid_hist.iloc[0]) * 100)
 
@@ -162,7 +166,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 def process_technical_analysis(sym, name):
     try:
         df = get_stock_data(sym)
-        if df is None or df.empty: return None
+        if df is None or df.empty or len(df) < 35: return None
         
         has_enough_weekly = False
         k_w, d_w, macd_w, macds_w = 0.0, 0.0, 0.0, 0.0
@@ -174,7 +178,7 @@ def process_technical_analysis(sym, name):
             if 'High' in df.columns: agg_dict['High'] = 'max'
             if 'Low' in df.columns: agg_dict['Low'] = 'min'
             df_w = df.resample('W-FRI').agg(agg_dict).dropna(subset=['Close'])
-            if len(df_w) >= 2:
+            if len(df_w) >= 15:
                 has_enough_weekly = True
                 if 'High' in df_w.columns and 'Low' in df_w.columns:
                     low_min_w = df_w['Low'].rolling(9, min_periods=1).min()
@@ -203,6 +207,10 @@ def process_technical_analysis(sym, name):
         
         last_p = float(df['Close'].iloc[-1])
         ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0
+        ma_season = float(df['MA_season'].iloc[-1]) if pd.notna(df['MA_season'].iloc[-1]) else 0
+        prev_ma_season = float(df['MA_season'].iloc[-2]) if len(df) > 1 and pd.notna(df['MA_season'].iloc[-2]) else 0
+        
+        is_break_ma = (last_p < ma_season and df['Close'].iloc[-2] >= prev_ma_season)
         
         high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
         low_52w = df['Low'].tail(252).min() if 'Low' in df.columns else 0.0
@@ -210,6 +218,34 @@ def process_technical_analysis(sym, name):
 
         high_20d = df['High'].tail(20).max() if 'High' in df.columns else 0.0
         
+        k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns else 50.0
+        d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns else 50.0
+        pk_d = float(df['K_d'].iloc[-2]) if len(df)>1 and 'K_d' in df.columns else 50.0
+        pd_d = float(df['D_d'].iloc[-2]) if len(df)>1 and 'D_d' in df.columns else 50.0
+        
+        macd_d = float(df['MACD'].iloc[-1]) if 'MACD' in df.columns else 0.0
+        macds_d = float(df['MACD_Signal'].iloc[-1]) if 'MACD_Signal' in df.columns else 0.0
+        pmacd_d = float(df['MACD'].iloc[-2]) if len(df)>1 and 'MACD' in df.columns else 0.0
+        pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df)>1 and 'MACD_Signal' in df.columns else 0.0
+
+        # --- 嚴格狀態判定 (與電腦版、推播版一致) ---
+        def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
+            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD一般金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD一般死叉"
+            if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
+            return "📉 已死叉，且向下發散"
+            
+        def eval_macd_status(curr_fast, curr_slow, prev_fast, prev_slow):
+            if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 MACD零下金叉" if curr_fast < 0 else "🟢 MACD一般金叉"
+            if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 MACD零上死叉" if curr_fast > 0 else "🔴 MACD一般死叉"
+            if curr_fast >= curr_slow: return "📈 已金叉，且向上發散"
+            return "📉 已死叉，且向下發散"
+
+        kd_d_status = eval_kd_status(k_d, d_d, pk_d, pd_d)
+        macd_d_status = eval_macd_status(macd_d, macds_d, pmacd_d, pmacds_d)
+        kd_w_status = eval_kd_status(k_w, d_w, pk_w, pd_w) if has_enough_weekly else "資料不足"
+        macd_w_status = eval_macd_status(macd_w, macds_w, pmacd_w, pmacds_w) if has_enough_weekly else "資料不足"
+
         alerts = []
         if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
         
@@ -219,26 +255,27 @@ def process_technical_analysis(sym, name):
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10: 
             alerts.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%")
             
-        if has_enough_weekly:
-            if k_w > d_w and pk_w <= pd_w and k_w > 0: alerts.append("週KD金叉")
-            elif k_w < d_w and pk_w >= pd_w and d_w > 0: alerts.append("週KD死叉")
-            
-            if macd_w > macds_w and pmacd_w <= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD金叉")
-            elif macd_w < macds_w and pmacd_w >= pmacds_w and (macd_w != 0 or macds_w != 0): alerts.append("週MACD死叉")
-            
         action = "➖ 持平"
-        has_buy = any(x in a for a in alerts for x in ["週KD金叉", "週MACD金叉"])
-        has_sell = any(x in a for a in alerts for x in ["週KD死叉", "週MACD死叉", "近高點回落"])
-        has_reduce = any(x in a for a in alerts for x in ["20日回落"])
+        has_buy = any(x in kd_w_status or x in macd_w_status for x in ["低檔金叉", "零下金叉"])
+        has_sell = any(x in kd_w_status or x in macd_w_status for x in ["高檔死叉", "零上死叉"]) or "近高點回落" in " ".join(alerts)
+        has_reduce = "20日回落" in " ".join(alerts)
         
         if has_sell: action = "🛑 賣出"
         elif has_buy: action = "🚀 買進"
         elif has_reduce: action = "⚠️ 減碼"
 
         alert_str = f"[{action}] " + ("/".join(alerts) if alerts else "趨勢延續")
-        kd_display = f"K:{float(df['K_d'].iloc[-1]):.0f}/D:{float(df['D_d'].iloc[-1]):.0f}" if 'K_d' in df.columns else "-"
+        kd_display = f"K:{k_d:.0f}/D:{d_d:.0f}"
 
-        return {"代號": sym.split('.')[0], "🚨警示": alert_str, "價格": last_p, "52週位置": f"{pos_52w:.0f}%", "日KD": kd_display}
+        # 獲取本益比
+        f_info = get_fundamental_info(sym)
+        pe_val = f_info.get('trailingPE') or f_info.get('forwardPE', 999)
+
+        return {
+            "代號": sym.split('.')[0], "🚨警示": alert_str, "價格": last_p, "52週位置": f"{pos_52w:.0f}%", "日KD": kd_display,
+            "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma,
+            "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status, "_name": name, "_sym": sym
+        }
     except: return None
 
 # ==========================================
@@ -254,7 +291,8 @@ with col_l:
 with col_r:
     st.caption(f"更新:{datetime.now().strftime('%H:%M')}")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["💰資產", "📈技術", "🏆績效", "📖心得", "📝管理"])
+# 🔥 新增 "🎯亮點" Tab
+tab1, tab_hl, tab2, tab3, tab4, tab5 = st.tabs(["💰資產", "🎯亮點", "📈技術", "🏆績效", "📖心得", "📝管理"])
 
 with tab1:
     with st.spinner("載入報價中..."):
@@ -303,18 +341,17 @@ with tab1:
             fig_pie.update_layout(height=320, margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
             st.plotly_chart(fig_pie)
 
-with tab2:
-    with st.expander("💡 狀態警示說明", expanded=False):
-        st.markdown("""
-        * **🚀 買進**：出現 **週 KD** 或 **週 MACD 黃金交叉**，屬中長線翻多。
-        * **🛑 賣出**：出現 **週 KD** 或 **週 MACD 死亡交叉**，或自 **近一年高點回落達 15%**。
-        * **⚠️ 減碼**：自 **20 日高點回落達 10%**，短線轉弱。
-        * **➖ 持平**：無觸發上述轉折訊號。
-        """)
-        
-    with st.spinner("分析指標中..."):
+# -----------------
+# 🎯 盤後技術亮點與警示摘要 (手機優化版)
+# -----------------
+with tab_hl:
+    with st.spinner("掃描技術訊號中..."):
         ta_results = []
         target_options = {}
+        
+        bullish_strong = [] 
+        bullish_daily = []  
+        bearish_alerts = [] 
         
         scan_dict = {}
         for item in PORTFOLIO_TW:
@@ -336,12 +373,92 @@ with tab2:
                 ta_results.append(res)
                 target_options[f"{name}({sym.split('.')[0]})"] = sym
                 
-        if ta_results:
-            df_ta = pd.DataFrame(ta_results)
-            st.dataframe(df_ta[["代號", "🚨警示", "價格", "52週位置"]], width="stretch", hide_index=True, height=350)
+                # 亮點分析邏輯
+                pe_val = res.get('_raw_pe')
+                if pd.isna(pe_val) or pe_val is None: pe_val = 999
+                pe_str = f"{pe_val:.1f}" if pe_val != 999 else "無PE"
+                name_disp = f"{name}({sym.split('.')[0]})"
+                
+                kd_d = res.get('_raw_kd_d', '')
+                kd_w = res.get('_raw_kd_w', '')
+                macd_d = res.get('_raw_macd_d', '')
+                macd_w = res.get('_raw_macd_w', '')
+                
+                w_macd_gold = "🟢 MACD零下金叉" in macd_w
+                w_kd_gold = "🟢 KD低檔金叉" in kd_w
+                d_macd_gold = "🟢 MACD零下金叉" in macd_d
+                d_kd_gold = "🟢 KD低檔金叉" in kd_d
+
+                w_macd_death = "🔴 MACD零上死叉" in macd_w
+                w_kd_death = "🔴 KD高檔死叉" in kd_w
+                d_macd_death = "🔴 MACD零上死叉" in macd_d
+                d_kd_death = "🔴 KD高檔死叉" in kd_d
+                
+                is_break = res.get('_is_break_ma', False)
+
+                tags = []
+                if w_macd_gold: tags.append("週MACD零下金叉")
+                if w_kd_gold: tags.append("週KD低檔金叉")
+                if d_macd_gold: tags.append("日MACD零下金叉")
+                if d_kd_gold: tags.append("日KD低檔金叉")
+                if w_macd_death: tags.append("週MACD零上死叉")
+                if w_kd_death: tags.append("週KD高檔死叉")
+                if d_macd_death: tags.append("日MACD零上死叉")
+                if d_kd_death: tags.append("日KD高檔死叉")
+                if is_break: tags.append("跌破季線")
+
+                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1)
+                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1)
+                
+                item_data = {'name': name_disp, 'pe': pe_val, 'pe_str': pe_str, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score, 'price': res['價格']}
+                
+                # 互斥分類
+                if bear_score >= 3: 
+                    bearish_alerts.append(item_data)
+                elif bull_score >= 3: 
+                    bullish_strong.append(item_data)
+                elif bear_score > 0: 
+                    bearish_alerts.append(item_data)
+                elif bull_score > 0: 
+                    bullish_daily.append(item_data)
+
+        # 排序：技術分數(降冪)優先，本益比(PE)(升冪)其次，取 Top 10
+        bullish_strong = sorted(bullish_strong, key=lambda x: (-x['bull_score'], x['pe']))[:10]
+        bullish_daily = sorted(bullish_daily, key=lambda x: (-x['bull_score'], x['pe']))[:10]
+        bearish_alerts = sorted(bearish_alerts, key=lambda x: (-x['bear_score'], x['pe']))[:10]
+        
+    def format_mobile_items(items):
+        if not items: return "> 目前無符合條件標的"
+        res_str = ""
+        for x in items:
+            tags_str = ", ".join(x['tags'])
+            res_str += f"- **{x['name']}** (PE:{x['pe_str']})\n  - `[{tags_str}]`\n"
+        return res_str
+
+    st.markdown("### 📊 盤後技術摘要 (Top 10)")
+    st.caption("依技術強度優先，同級別低本益比優先顯示。")
+    
+    # 使用 container 包裝，在手機上以單欄垂直堆疊顯示，提升閱讀體驗
+    with st.container():
+        st.success(f"🔥 **週線強勢區 (波段)**\n\n{format_mobile_items(bullish_strong)}")
+        st.info(f"📈 **日線強勢區 (短線)**\n\n{format_mobile_items(bullish_daily)}")
+        st.error(f"⚠️ **空方風險區 (破線/死叉)**\n\n{format_mobile_items(bearish_alerts)}")
+
+with tab2:
+    with st.expander("💡 狀態警示說明", expanded=False):
+        st.markdown("""
+        * **🚀 買進**：出現 **週 KD** 或 **週 MACD 黃金交叉**，屬中長線翻多。
+        * **🛑 賣出**：出現 **週 KD** 或 **週 MACD 死亡交叉**，或自 **近一年高點回落達 15%**。
+        * **⚠️ 減碼**：自 **20 日高點回落達 10%**，短線轉弱。
+        * **➖ 持平**：無觸發上述轉折訊號。
+        """)
+        
+    if ta_results: # 使用剛才 tab_hl 已經算好的快取資料
+        df_ta = pd.DataFrame(ta_results)
+        st.dataframe(df_ta[["代號", "🚨警示", "價格", "52週位置"]], width="stretch", hide_index=True, height=350)
 
     st.divider()
-    selected_name = st.selectbox("查看詳細線圖：", options=list(target_options.keys()))
+    selected_name = st.selectbox("查看詳細線圖：", options=list(target_options.keys()) if target_options else [])
     if selected_name:
         sym = target_options[selected_name]
         df_chart = get_stock_data(sym)
