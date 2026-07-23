@@ -154,7 +154,8 @@ def get_fundamental_info(sym):
             'operatingMargins': info.get('operatingMargins'),
             'profitMargins': info.get('profitMargins'),
             'returnOnEquity': info.get('returnOnEquity'),
-            'trailingPE': info.get('trailingPE')
+            'trailingPE': info.get('trailingPE'),
+            'forwardPE': info.get('forwardPE')
         }
     except: return {}
 
@@ -278,8 +279,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 def process_technical_analysis(sym, name, market):
     try:
         df = get_stock_data(sym)
-        if df is None or df.empty or 'Close' not in df.columns:
-            raise ValueError("歷史 K 線數據讀取為空")
+        if df is None or df.empty or len(df) < 35: return None
             
         has_enough_weekly = False
         k_w, d_w, macd_w, macds_w = 0.0, 0.0, 0.0, 0.0
@@ -293,7 +293,7 @@ def process_technical_analysis(sym, name, market):
             if 'Volume' in df.columns: agg_dict['Volume'] = 'sum'
             
             df_w = df.resample('W-FRI').agg(agg_dict).dropna(subset=['Close'])
-            if len(df_w) >= 15: # 確保週線有足夠資料
+            if len(df_w) >= 15: # 防呆：確保週線有足夠資料，避免新股失真
                 has_enough_weekly = True
                 if 'High' in df_w.columns and 'Low' in df_w.columns:
                     low_min_w = df_w['Low'].rolling(9, min_periods=1).min()
@@ -334,7 +334,6 @@ def process_technical_analysis(sym, name, market):
         prev_ma_season = float(df['季線'].iloc[-2]) if len(df) > 1 and pd.notna(df['季線'].iloc[-2]) else 0.0
 
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
-        
         is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
         
         high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
@@ -354,7 +353,6 @@ def process_technical_analysis(sym, name, market):
         pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0.0
         pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0.0
         
-        # 嚴格篩選版狀態判定 (供亮點摘要比對)
         def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD一般金叉"
             if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD一般死叉"
@@ -399,8 +397,8 @@ def process_technical_analysis(sym, name, market):
         alert_str = f"[{action}] " + (" / ".join(alerts) if alerts else "趨勢延續")
 
         f_info = get_fundamental_info(sym)
-        pe_val = f_info.get('trailingPE')
-        pe_str = f"{float(pe_val):.1f}" if pe_val is not None and pd.notna(pe_val) else "無"
+        pe_val = f_info.get('trailingPE') or f_info.get('forwardPE', 999)
+        pe_str = f"{float(pe_val):.1f}" if pe_val != 999 else "無"
         beta_val = f_info.get('beta')
         beta_str = f"{float(beta_val):.2f}" if beta_val is not None and pd.notna(beta_val) else "無"
 
@@ -412,7 +410,6 @@ def process_technical_analysis(sym, name, market):
             "日MACD": f"DIF:{macd_d:.2f} ({macd_d_status})",
             "週MACD": f"DIF:{macd_w:.2f} ({macd_w_status})",
             "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
-            # 儲存供亮點摘要使用的原始資料
             "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma,
             "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status
         }
@@ -506,35 +503,52 @@ with tab1:
     col2.metric("2026 累計股息預估 (TWD)", f"${total_dividends_2026:,.0f}")
     col3.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
 
+    # ==========================================
+    # 🔥 重大更新：Value_History 三重防呆保護機制
+    # ==========================================
     history_error = False
     try:
         df_history = conn.read(worksheet="Value_History", ttl=0)
-        if df_history is None or df_history.empty or 'Date' not in df_history.columns:
-            df_history = pd.DataFrame(columns=['Date', 'Total_Value', 'Last_Updated'])
-        else:
-            df_history['Date'] = df_history['Date'].astype(str).str.strip()
-        
         today_str = datetime.now().strftime('%Y-%m-%d')
         now_time = datetime.now().strftime('%H:%M:%S')
         needs_update = False
         
-        if today_str in df_history['Date'].values:
-            idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
-            existing_val = safe_float(df_history.at[idx, 'Total_Value'])
-            if abs(existing_val - total_market_value) > 1:
-                df_history.at[idx, 'Total_Value'] = total_market_value
-                df_history.at[idx, 'Last_Updated'] = now_time
-                needs_update = True
-        else:
-            new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
-            df_history = pd.concat([df_history, new_row], ignore_index=True)
+        # 1. 判斷是否為真實空表
+        is_empty_sheet = df_history is None or df_history.empty or len(df_history.columns) < 2
+        
+        if is_empty_sheet:
+            df_history = pd.DataFrame(columns=['Date', 'Total_Value', 'Last_Updated'])
             needs_update = True
+        elif 'Date' in df_history.columns:
+            # 2. 強制轉換日期格式為字串，防止 Pandas 解析錯亂
+            df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            # 3. 清理殘留空行
+            df_history = df_history.dropna(subset=['Date']) 
+        else:
+            st.error("⚠️ 讀取歷史紀錄格式異常，為保護雲端資料已暫停寫入功能。請確認工作表格式。")
+            df_history = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+            needs_update = False 
             
+        if needs_update or 'Date' in df_history.columns:
+            if today_str in df_history['Date'].values:
+                idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
+                existing_val = safe_float(df_history.at[idx, 'Total_Value'])
+                
+                if abs(existing_val - total_market_value) > 1:
+                    df_history.at[idx, 'Total_Value'] = total_market_value
+                    df_history.at[idx, 'Last_Updated'] = now_time
+                    needs_update = True
+            else:
+                new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+                df_history = pd.concat([df_history, new_row], ignore_index=True)
+                needs_update = True
+                
         if needs_update:
             conn.update(worksheet="Value_History", data=df_history)
             
     except Exception as e:
         history_error = True
+        # 發生異常絕對不覆蓋雲端，僅於前端繪製今日點位
         df_history = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value, 'Last_Updated': datetime.now().strftime('%H:%M:%S')}])
 
     st.divider()
@@ -634,7 +648,6 @@ with tab2:
                 macd_d = res.get('_raw_macd_d', '')
                 macd_w = res.get('_raw_macd_w', '')
                 
-                # 嚴格校驗特定狀態字串
                 w_macd_gold = "🟢 MACD零下金叉" in macd_w
                 w_kd_gold = "🟢 KD低檔金叉" in kd_w
                 d_macd_gold = "🟢 MACD零下金叉" in macd_d
@@ -665,7 +678,6 @@ with tab2:
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score}
                 
-                # 互斥分類
                 if bear_score >= 3: 
                     bearish_alerts.append(item_data)
                 elif bull_score >= 3: 
@@ -675,7 +687,6 @@ with tab2:
                 elif bull_score > 0: 
                     bullish_daily.append(item_data)
 
-        # 排序：技術分數(降冪)優先，本益比(PE)(升冪)其次，取 Top 10
         bullish_strong = sorted(bullish_strong, key=lambda x: (-x['bull_score'], x['pe']))[:10]
         bullish_daily = sorted(bullish_daily, key=lambda x: (-x['bull_score'], x['pe']))[:10]
         bearish_alerts = sorted(bearish_alerts, key=lambda x: (-x['bear_score'], x['pe']))[:10]
@@ -809,19 +820,30 @@ with tab3:
 
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
+    # ==========================================
+    # 🔥 重大更新：Trading_Journal 三重防呆保護機制
+    # ==========================================
     journal_error = False
-    
     try:
         df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
-        if df_journal is None or df_journal.empty or 'Date' not in df_journal.columns:
+        is_empty_journal = df_journal is None or df_journal.empty or len(df_journal.columns) < 2
+        
+        if is_empty_journal:
             df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
+        elif 'Date' in df_journal.columns:
+            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_journal = df_journal.dropna(subset=['Date'])
         else:
-            df_journal['Date'] = df_journal['Date'].astype(str).str.strip()
+            st.error("⚠️ 讀取心得紀錄格式異常，為保護雲端資料已暫停寫入功能。請確認工作表格式。")
+            journal_error = True
+            df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
     except Exception:
         journal_error = True
         df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
 
-    if journal_error:
+    if journal_error and not is_empty_journal:
+        pass # 已經顯示 error
+    elif is_empty_journal and journal_error:
         st.info("💡 提示：若要啟用「每日看盤心得」功能，請在您的 Google 試算表中手動新增一個名為 `Trading_Journal` 的工作表（可先留空）。")
     else:
         today_str = datetime.now().strftime('%Y-%m-%d')
