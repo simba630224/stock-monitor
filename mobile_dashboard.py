@@ -228,7 +228,6 @@ def process_technical_analysis(sym, name):
         pmacd_d = float(df['MACD'].iloc[-2]) if len(df)>1 and 'MACD' in df.columns else 0.0
         pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df)>1 and 'MACD_Signal' in df.columns else 0.0
 
-        # --- 嚴格狀態判定 (與電腦版、推播版一致) ---
         def eval_kd_status(curr_fast, curr_slow, prev_fast, prev_slow):
             if curr_fast > curr_slow and prev_fast <= prev_slow: return "🟢 KD低檔金叉" if curr_fast < 30 else "🟢 KD一般金叉"
             if curr_fast < curr_slow and prev_fast >= prev_slow: return "🔴 KD高檔死叉" if curr_fast > 70 else "🔴 KD一般死叉"
@@ -267,7 +266,6 @@ def process_technical_analysis(sym, name):
         alert_str = f"[{action}] " + ("/".join(alerts) if alerts else "趨勢延續")
         kd_display = f"K:{k_d:.0f}/D:{d_d:.0f}"
 
-        # 獲取本益比
         f_info = get_fundamental_info(sym)
         pe_val = f_info.get('trailingPE') or f_info.get('forwardPE', 999)
 
@@ -291,14 +289,14 @@ with col_l:
 with col_r:
     st.caption(f"更新:{datetime.now().strftime('%H:%M')}")
 
-# 🔥 新增 "🎯亮點" Tab
 tab1, tab_hl, tab2, tab3, tab4, tab5 = st.tabs(["💰資產", "🎯亮點", "📈技術", "🏆績效", "📖心得", "📝管理"])
 
 with tab1:
-    with st.spinner("載入報價中..."):
+    with st.spinner("載入報價與算資產中..."):
         usdtwd = get_usdtwd()
         total_market_value, total_dividends_2026 = 0, 0
         asset_allocation = {}
+        individual_holdings = [] # 儲存個別標的數據
 
         for item in PORTFOLIO_TW:
             ticker_str = str(item.get('Ticker', '')).strip()
@@ -312,9 +310,15 @@ with tab1:
             
             if price > 0 and tot_shares > 0:
                 val = price * tot_shares
+                div_tot = div * tot_shares
                 total_market_value += val
-                total_dividends_2026 += div * tot_shares
+                total_dividends_2026 += div_tot
                 asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                
+                disp_qty = f"{int(tot_shares/1000)}張" if tot_shares >= 1000 and tot_shares % 1000 == 0 else f"{tot_shares:g}股"
+                name_str = str(item.get('名稱', '')).strip()
+                display_name = name_str if name_str and name_str != 'nan' else ticker_str
+                individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '預估股息': div_tot, '類別': asset_type})
 
         for item in PORTFOLIO_US:
             ticker_str = str(item.get('Ticker', '')).strip()
@@ -327,23 +331,101 @@ with tab1:
             
             if price > 0 and tot_shares > 0:
                 val = price * tot_shares * usdtwd
+                div_tot = div * tot_shares * usdtwd
                 total_market_value += val
-                total_dividends_2026 += div * tot_shares * usdtwd
+                total_dividends_2026 += div_tot
                 asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                
+                disp_qty = f"{tot_shares:g}股"
+                name_str = str(item.get('名稱', '')).strip()
+                display_name = name_str if name_str and name_str != 'nan' else ticker_str
+                individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '預估股息': div_tot, '類別': asset_type})
 
-        st.metric("總市值", f"${total_market_value:,.0f} TWD")
-        st.metric("預估股息", f"${total_dividends_2026:,.0f} TWD")
-        
+        col_m1, col_m2 = st.columns(2)
+        col_m1.metric("總市值", f"${total_market_value:,.0f}")
+        col_m2.metric("預估股息", f"${total_dividends_2026:,.0f}")
+
+        # ==========================================
+        # 🔥 新增 1：總市值趨勢 (含防呆寫入機制)
+        # ==========================================
+        history_error = False
+        try:
+            df_history = conn.read(worksheet="Value_History", ttl=0)
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            now_time = datetime.now().strftime('%H:%M:%S')
+            needs_update = False
+            
+            is_empty_sheet = df_history is None or df_history.empty or len(df_history.columns) < 2
+            
+            if is_empty_sheet:
+                df_history = pd.DataFrame(columns=['Date', 'Total_Value', 'Last_Updated'])
+                needs_update = True
+            elif 'Date' in df_history.columns:
+                df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+                df_history = df_history.dropna(subset=['Date'])
+            else:
+                st.error("⚠️ 讀取歷史格式異常，已保護雲端數據。")
+                df_history = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+                needs_update = False
+                
+            if needs_update or 'Date' in df_history.columns:
+                if today_str in df_history['Date'].values:
+                    idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
+                    existing_val = safe_float(df_history.at[idx, 'Total_Value'])
+                    if abs(existing_val - total_market_value) > 1:
+                        df_history.at[idx, 'Total_Value'] = total_market_value
+                        df_history.at[idx, 'Last_Updated'] = now_time
+                        needs_update = True
+                else:
+                    new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+                    df_history = pd.concat([df_history, new_row], ignore_index=True)
+                    needs_update = True
+                    
+            if needs_update:
+                conn.update(worksheet="Value_History", data=df_history)
+                
+        except Exception:
+            history_error = True
+            df_history = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value, 'Last_Updated': datetime.now().strftime('%H:%M:%S')}])
+
+        if not history_error and not df_history.empty:
+            st.divider()
+            st.caption("📈 總市值每日變化趨勢")
+            fig_hist = px.line(df_history, x='Date', y='Total_Value', markers=True)
+            fig_hist.update_layout(height=260, margin=dict(t=10, b=10, l=10, r=10), yaxis_title=None, xaxis_title=None)
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+        # 資產類別圓餅圖
         if asset_allocation:
+            st.divider()
+            st.caption("📊 資產類別佔比")
             df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['類別', '市值'])
             fig_pie = px.pie(df_allocation, values='市值', names='類別', hole=0.4)
             fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-            fig_pie.update_layout(height=320, margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
-            st.plotly_chart(fig_pie)
+            fig_pie.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
+            st.plotly_chart(fig_pie, use_container_width=True)
 
-# -----------------
-# 🎯 盤後技術亮點與警示摘要 (手機優化版)
-# -----------------
+        # ==========================================
+        # 🔥 新增 2：各標的市值與股息圖表 (行動垂直版)
+        # ==========================================
+        df_ind = pd.DataFrame(individual_holdings)
+        if not df_ind.empty:
+            st.divider()
+            st.caption("📊 各標的總市值分佈 (TWD)")
+            df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
+            # 依據標的數量動態調整高度，確保手機上文字清晰不擁擠
+            dynamic_height = max(300, len(df_mv_sorted) * 35)
+            
+            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', color='類別', text_auto='.2s')
+            fig_mv_bar.update_layout(height=dynamic_height, margin=dict(l=10, r=10, t=10, b=10), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
+            st.plotly_chart(fig_mv_bar, use_container_width=True)
+
+            st.caption("📊 各標的預估股息分佈 (TWD)")
+            df_div_sorted = df_ind.sort_values(by='預估股息', ascending=True)
+            fig_div_bar = px.bar(df_div_sorted, x='預估股息', y='標的與股數', orientation='h', color='類別', text_auto='.2s')
+            fig_div_bar.update_layout(height=dynamic_height, margin=dict(l=10, r=10, t=10, b=10), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
+            st.plotly_chart(fig_div_bar, use_container_width=True)
+
 with tab_hl:
     with st.spinner("掃描技術訊號中..."):
         ta_results = []
@@ -373,7 +455,6 @@ with tab_hl:
                 ta_results.append(res)
                 target_options[f"{name}({sym.split('.')[0]})"] = sym
                 
-                # 亮點分析邏輯
                 pe_val = res.get('_raw_pe')
                 if pd.isna(pe_val) or pe_val is None: pe_val = 999
                 pe_str = f"{pe_val:.1f}" if pe_val != 999 else "無PE"
@@ -412,7 +493,6 @@ with tab_hl:
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'pe_str': pe_str, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score, 'price': res['價格']}
                 
-                # 互斥分類
                 if bear_score >= 3: 
                     bearish_alerts.append(item_data)
                 elif bull_score >= 3: 
@@ -422,7 +502,6 @@ with tab_hl:
                 elif bull_score > 0: 
                     bullish_daily.append(item_data)
 
-        # 排序：技術分數(降冪)優先，本益比(PE)(升冪)其次，取 Top 10
         bullish_strong = sorted(bullish_strong, key=lambda x: (-x['bull_score'], x['pe']))[:10]
         bullish_daily = sorted(bullish_daily, key=lambda x: (-x['bull_score'], x['pe']))[:10]
         bearish_alerts = sorted(bearish_alerts, key=lambda x: (-x['bear_score'], x['pe']))[:10]
@@ -438,7 +517,6 @@ with tab_hl:
     st.markdown("### 📊 盤後技術摘要 (Top 10)")
     st.caption("依技術強度優先，同級別低本益比優先顯示。")
     
-    # 使用 container 包裝，在手機上以單欄垂直堆疊顯示，提升閱讀體驗
     with st.container():
         st.success(f"🔥 **週線強勢區 (波段)**\n\n{format_mobile_items(bullish_strong)}")
         st.info(f"📈 **日線強勢區 (短線)**\n\n{format_mobile_items(bullish_daily)}")
@@ -453,7 +531,7 @@ with tab2:
         * **➖ 持平**：無觸發上述轉折訊號。
         """)
         
-    if ta_results: # 使用剛才 tab_hl 已經算好的快取資料
+    if ta_results: 
         df_ta = pd.DataFrame(ta_results)
         st.dataframe(df_ta[["代號", "🚨警示", "價格", "52週位置"]], width="stretch", hide_index=True, height=350)
 
@@ -505,18 +583,26 @@ with tab3:
 with tab4:
     st.markdown("### 📖 每日看盤心得")
     journal_error = False
-    
     try:
         df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
-        if df_journal is None or df_journal.empty or 'Date' not in df_journal.columns:
+        is_empty_journal = df_journal is None or df_journal.empty or len(df_journal.columns) < 2
+        
+        if is_empty_journal:
             df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
+        elif 'Date' in df_journal.columns:
+            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_journal = df_journal.dropna(subset=['Date'])
         else:
-            df_journal['Date'] = df_journal['Date'].astype(str).str.strip()
+            st.error("⚠️ 讀取心得紀錄格式異常，已暫停寫入保護雲端資料。")
+            journal_error = True
+            df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
     except Exception:
         journal_error = True
         df_journal = pd.DataFrame(columns=['Date', 'Notes', 'Last_Updated'])
 
-    if journal_error:
+    if journal_error and not is_empty_journal:
+        pass 
+    elif is_empty_journal and journal_error:
         st.info("請於試算表新增 `Trading_Journal` 工作表以啟用此功能。")
     else:
         today_str = datetime.now().strftime('%Y-%m-%d')
