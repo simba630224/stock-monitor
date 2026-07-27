@@ -14,13 +14,11 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# --- 1. 配置與環境變數 ---
 TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TG_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 SHEET_CSV_TW_URL = os.getenv('SHEET_CSV_TW_URL')
 SHEET_CSV_US_URL = os.getenv('SHEET_CSV_US_URL')
 
-# --- 2. 輔助與技術指標函式 ---
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith(('.TW', '.TWO')): return ticker
@@ -32,7 +30,6 @@ def load_csv_list(url, is_tw=True):
         response = requests.get(url, timeout=30)
         df = pd.read_csv(io.StringIO(response.text), on_bad_lines='skip')
         df.columns = [str(c).strip().replace('\ufeff', '').lower() for c in df.columns]
-        
         data = [] if is_tw else {}
         for _, row in df.iterrows():
             row_dict = {str(k).strip().lower(): v for k, v in row.items()}
@@ -40,27 +37,25 @@ def load_csv_list(url, is_tw=True):
             name = str(row_dict.get('名稱') or row_dict.get('name') or '').strip()
             if not ticker or ticker.lower() == 'nan': continue
             display_name = name if name and name != 'nan' else ticker
-            
-            if is_tw:
-                data.append({'symbol': get_yf_ticker_tw(ticker), 'name': display_name})
-            else:
-                data[ticker] = display_name
+            if is_tw: data.append({'symbol': get_yf_ticker_tw(ticker), 'name': display_name})
+            else: data[ticker] = display_name
         return data
-    except Exception as e:
-        return [] if is_tw else {}
+    except Exception as e: return [] if is_tw else {}
 
 def process_target(sym, name, category):
     try:
-        # 統一抓取最長 3 年資料以確保週線準確，若上市不滿三年 yfinance 會自動回傳現有資料
         df = yf.download(sym, period="3y", progress=False, threads=False) 
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df = df[['Open', 'High', 'Low', 'Close']].dropna()
-        if len(df) < 35: return None # 資料過短無法計算指標
+        if len(df) < 35: return None 
         
         last_p = df['Close'].iloc[-1]
         
-        # --- 日線指標 ---
+        df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
+        season_len = 60 if category == '台股' else 50
+        df['MA_season'] = df['Close'].rolling(season_len, min_periods=1).mean()
+        
         low_min = df['Low'].rolling(9, min_periods=1).min()
         high_max = df['High'].rolling(9, min_periods=1).max()
         rsv = (df['Close'] - low_min) / (high_max - low_min + 1e-9) * 100
@@ -72,9 +67,8 @@ def process_target(sym, name, category):
         df['MACD'] = df['EMA12'] - df['EMA26']
         df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         
-        # --- 週線指標 ---
         df_w = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last'}).dropna()
-        has_enough_weekly = len(df_w) >= 15 # 若上市時間不足15週，捨棄週線指標避免失真
+        has_enough_weekly = len(df_w) >= 15 
         
         if has_enough_weekly:
             low_min_w = df_w['Low'].rolling(9, min_periods=1).min()
@@ -90,7 +84,6 @@ def process_target(sym, name, category):
         else:
             df_w = pd.DataFrame()
             
-        # --- 嚴格的高低檔金/死叉判斷函式 ---
         def is_gold_low(fast, slow, is_macd=False):
             if len(fast) < 2: return False
             cross_up = (fast.iloc[-1] > slow.iloc[-1]) and (fast.iloc[-2] <= slow.iloc[-2])
@@ -113,26 +106,31 @@ def process_target(sym, name, category):
         d_macd_death = is_death_high(df['MACD'], df['MACD_Signal'], True)
         d_kd_death = is_death_high(df['K_d'], df['D_d'], False)
         
-        # --- 判斷跌破季線 ---
-        season_len = 60 if category == '台股' else 50
-        df['MA_season'] = df['Close'].rolling(season_len).mean()
         is_break = False
         if len(df) >= 2 and pd.notna(df['MA_season'].iloc[-2]):
             is_break = (df['Close'].iloc[-1] < df['MA_season'].iloc[-1]) and (df['Close'].iloc[-2] >= df['MA_season'].iloc[-2])
 
-        # --- 取得本益比 ---
+        ma20_up_3d = False
+        ma_s_up_3d = False
+        if len(df) >= 4 and pd.notna(df['MA_season'].iloc[-4]):
+            ma20_up_3d = (df['MA20'].iloc[-1] > df['MA20'].iloc[-2]) and (df['MA20'].iloc[-2] > df['MA20'].iloc[-3]) and (df['MA20'].iloc[-3] > df['MA20'].iloc[-4])
+            ma_s_up_3d = (df['MA_season'].iloc[-1] > df['MA_season'].iloc[-2]) and (df['MA_season'].iloc[-2] > df['MA_season'].iloc[-3]) and (df['MA_season'].iloc[-3] > df['MA_season'].iloc[-4])
+
         try:
             info = yf.Ticker(sym).info
             pe = info.get('trailingPE') or info.get('forwardPE', 999)
         except:
             pe = 999
             
-        # --- 生成精準標籤 ---
         tags = []
         if w_macd_gold: tags.append("週MACD零下金叉")
         if w_kd_gold: tags.append("週KD低檔金叉")
         if d_macd_gold: tags.append("日MACD零下金叉")
         if d_kd_gold: tags.append("日KD低檔金叉")
+        
+        if ma20_up_3d and ma_s_up_3d: tags.append("月季線雙上彎")
+        elif ma20_up_3d: tags.append("月線上彎")
+        elif ma_s_up_3d: tags.append("季線上彎")
         
         if w_macd_death: tags.append("週MACD零上死叉")
         if w_kd_death: tags.append("週KD高檔死叉")
@@ -140,8 +138,8 @@ def process_target(sym, name, category):
         if d_kd_death: tags.append("日KD高檔死叉")
         if is_break: tags.append("跌破季線")
 
-        # --- 技術面評分 (權重：週>日, MACD>KD) ---
-        bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1)
+        # 技術分數(上彎額外加分)
+        bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up_3d * 1) + (ma_s_up_3d * 1)
         bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1)
         
         return {
@@ -149,16 +147,13 @@ def process_target(sym, name, category):
             'pe': pe, 'pe_str': f"{pe:.1f}" if pe != 999 else "無PE",
             'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score,
             'last_p': last_p,
-            'df': df.tail(150) # 儲存供繪圖的歷史資料
+            'df': df.tail(150)
         }
-    except Exception:
-        return None
+    except Exception: return None
 
-# --- 3. Telegram 傳送與相簿繪製模組 ---
 def send_tg_text(msg):
     if not TG_TOKEN or not TG_CHAT_ID: return
-    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
-                  data={'chat_id': TG_CHAT_ID, 'text': msg, 'parse_mode': 'HTML'})
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data={'chat_id': TG_CHAT_ID, 'text': msg, 'parse_mode': 'HTML'})
 
 def send_tg_album(buffers, caption=""):
     if not TG_TOKEN or not TG_CHAT_ID or not buffers: return
@@ -179,7 +174,6 @@ def send_tg_album(buffers, caption=""):
             media_dict["parse_mode"] = "HTML"
         media.append(media_dict)
         files[filename] = (filename, buf.getvalue(), 'image/png')
-    
     requests.post(url, data={"chat_id": TG_CHAT_ID, "media": json.dumps(media)}, files=files)
 
 def generate_chart(item):
@@ -202,7 +196,7 @@ def generate_chart(item):
         macd_colors = ['r' if val >= 0 else 'g' for val in hist]
         
         apds = [
-            mpf.make_addplot(df['Close'].rolling(20).mean(), color='blue', width=1),
+            mpf.make_addplot(df['MA20'], color='blue', width=1),
             mpf.make_addplot(k, panel=1, color='blue', ylabel='KD'),
             mpf.make_addplot(d, panel=1, color='orange'),
             mpf.make_addplot(macd, panel=2, color='blue', ylabel='MACD'),
@@ -212,14 +206,11 @@ def generate_chart(item):
         
         buf = io.BytesIO()
         title = f"{item['name']} ({item['sym']}) - {'+'.join(item['tags'])}"
-        mpf.plot(df, type='candle', addplot=apds, figscale=1.0, figratio=(10, 8), 
-                 title=title, style=s, savefig=dict(fname=buf, dpi=120, bbox_inches='tight'))
+        mpf.plot(df, type='candle', addplot=apds, figscale=1.0, figratio=(10, 8), title=title, style=s, savefig=dict(fname=buf, dpi=120, bbox_inches='tight'))
         buf.seek(0)
         return buf
-    except Exception:
-        return None
+    except Exception: return None
 
-# --- 4. 主程式 ---
 def main():
     TW_CORE = load_csv_list(SHEET_CSV_TW_URL, True)
     US_WATCH = load_csv_list(SHEET_CSV_US_URL, False)
@@ -233,15 +224,12 @@ def main():
         res = process_target(sym, name, cat)
         if not res: continue
         
-        # 互斥分流
-        if res['bear_score'] >= 3:
-            categorized[cat]['bear'].append(res)
-        elif res['bull_score'] >= 3:
+        if res['bear_score'] >= 3: categorized[cat]['bear'].append(res)
+        elif res['bull_score'] >= 3: 
             categorized[cat]['bull_strong'].append(res)
             top_chart_candidates.append(res)
-        elif res['bear_score'] > 0:
-            categorized[cat]['bear'].append(res)
-        elif res['bull_score'] > 0:
+        elif res['bear_score'] > 0: categorized[cat]['bear'].append(res)
+        elif res['bull_score'] > 0: 
             categorized[cat]['bull_daily'].append(res)
             top_chart_candidates.append(res)
         time.sleep(0.5) 
@@ -264,10 +252,8 @@ def main():
         if b_strong: msg += f"🔥 <b>週線級別 (波段強勢區)</b>\n{format_items(b_strong)}\n\n"
         if b_daily: msg += f"📈 <b>日線級別 (短線轉折區)</b>\n{format_items(b_daily)}\n\n"
         if bear: msg += f"⚠️ <b>空方風險警示 (破線/死叉)</b>\n{format_items(bear)}\n"
-        
         send_tg_text(msg)
 
-    # 繪製 Top 3 相簿
     top_chart_candidates = sorted(top_chart_candidates, key=lambda x: (-x['bull_score'], x['pe']))[:3]
     if top_chart_candidates:
         image_buffers = []
@@ -284,5 +270,4 @@ def main():
 
     send_tg_text(f"🏁 <b>每日掃描完成 ({datetime.now().strftime('%Y/%m/%d')})</b>")
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
