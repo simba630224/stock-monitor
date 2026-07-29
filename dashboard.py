@@ -83,9 +83,10 @@ def get_basic_data(ticker):
             if not hist.empty:
                 price = float(hist['Close'].dropna().iloc[-1])
                 div_2026 = float(hist['Dividends'][hist.index.year == 2026].sum()) if 'Dividends' in hist.columns else 0.0
-                return price, div_2026
+                div_1y = float(hist['Dividends'].sum()) if 'Dividends' in hist.columns else 0.0
+                return price, div_2026, div_1y
         except: time.sleep(1)
-    return 0.0, 0.0
+    return 0.0, 0.0, 0.0
 
 @st.cache_data(ttl=900)
 def get_usdtwd():
@@ -317,7 +318,6 @@ def process_technical_analysis(sym, name, market):
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
         is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
 
-        # 🚀 新增：判斷月線與季線是否連續上彎 >= 3日
         ma20_up_3d = False
         ma_s_up_3d = False
         if len(df) >= 4 and pd.notna(df['季線'].iloc[-4]):
@@ -421,7 +421,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析�
 with tab1:
     with st.spinner("正在同步即時報價資料..."):
         usdtwd = get_usdtwd()
-        total_market_value, total_dividends_2026 = 0, 0
+        total_market_value, total_dividends_2026, total_dividends_1y = 0, 0, 0
         asset_allocation = {}
         individual_holdings = [] 
 
@@ -433,22 +433,24 @@ with tab1:
                 asset_type = str(item.get('類別', '台股')).strip()
                 if not asset_type or asset_type == 'nan': asset_type = '台股未分類'
                 
-                price, div = get_basic_data(ticker)
+                price, div_2026, div_1y = get_basic_data(ticker)
                 shares_own = safe_float(item.get('Shares'))
                 shares_lent = safe_float(item.get('出借'))
                 total_shares = shares_own + shares_lent
                 
                 if price > 0 and total_shares > 0:
                     val = price * total_shares
-                    div_tot = div * total_shares
+                    div_tot_2026 = div_2026 * total_shares
+                    div_tot_1y = div_1y * total_shares
                     total_market_value += val
                     asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                    total_dividends_2026 += div_tot
+                    total_dividends_2026 += div_tot_2026
+                    total_dividends_1y += div_tot_1y
                     
                     disp_qty = f"{int(total_shares/1000)}張" if total_shares >= 1000 and total_shares % 1000 == 0 else f"{total_shares:g}股"
                     name_str = str(item.get('名稱', '')).strip()
                     display_name = name_str if name_str and name_str != 'nan' else ticker_str
-                    individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '股息': div_tot, '類別': asset_type, '總股數': total_shares})
+                    individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '股息': div_tot_2026, '類別': asset_type, '總股數': total_shares})
 
         for item in PORTFOLIO_US:
             if pd.notna(item.get('Ticker')):
@@ -457,37 +459,35 @@ with tab1:
                 asset_type = str(item.get('類別', '美股')).strip()
                 if not asset_type or asset_type == 'nan': asset_type = '美股未分類'
                 
-                price, div = get_basic_data(ticker_str)
+                price, div_2026, div_1y = get_basic_data(ticker_str)
                 shares_own = safe_float(item.get('Shares'))
                 shares_sub = safe_float(item.get('複委託'))
                 total_shares = shares_own + shares_sub
                 
                 if price > 0 and total_shares > 0:
                     val = price * total_shares * usdtwd
-                    div_tot = div * total_shares * usdtwd
+                    div_tot_2026 = div_2026 * total_shares * usdtwd
+                    div_tot_1y = div_1y * total_shares * usdtwd
                     total_market_value += val
                     asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                    total_dividends_2026 += div_tot
+                    total_dividends_2026 += div_tot_2026
+                    total_dividends_1y += div_tot_1y
                     
                     disp_qty = f"{total_shares:g}股"
                     name_str = str(item.get('名稱', '')).strip()
                     display_name = name_str if name_str and name_str != 'nan' else ticker_str
-                    individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '股息': div_tot, '類別': asset_type, '總股數': total_shares})
+                    individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '股息': div_tot_2026, '類別': asset_type, '總股數': total_shares})
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
-    col2.metric("2026 累計股息預估 (TWD)", f"${total_dividends_2026:,.0f}")
-    col3.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
+    col2.metric("2026 預估股息 (TWD)", f"${total_dividends_2026:,.0f}")
+    col3.metric("近一年累計股息 (TWD)", f"${total_dividends_1y:,.0f}")
+    col4.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
 
-    # ==========================================
-    # 🔥 強化：Value_History 防呆絕對保護機制
-    # ==========================================
     history_error = False
     df_history_to_display = pd.DataFrame()
     try:
         df_history = conn.read(worksheet="Value_History", ttl=0)
-        
-        # 必須確保確實讀取到資料，才允許寫入
         if df_history is not None and 'Date' in df_history.columns and not df_history.empty:
             df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
             df_history = df_history.dropna(subset=['Date'])
@@ -495,7 +495,7 @@ with tab1:
             today_str = datetime.now().strftime('%Y-%m-%d')
             now_time = datetime.now().strftime('%H:%M:%S')
             
-            if len(df_history) >= 1: # 表格內至少有一筆歷史資料才可更新
+            if len(df_history) >= 1:
                 if today_str in df_history['Date'].values:
                     idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
                     existing_val = safe_float(df_history.at[idx, 'Total_Value'])
@@ -517,7 +517,6 @@ with tab1:
         history_error = True
 
     if history_error or df_history_to_display.empty:
-        # API 當機時，僅於前端繪製今日點位，絕不覆寫雲端
         df_history_to_display = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value, 'Last_Updated': datetime.now().strftime('%H:%M:%S')}])
 
     st.divider()
@@ -647,7 +646,6 @@ with tab2:
                 if d_kd_death: tags.append("日KD高檔死叉")
                 if is_break: tags.append("跌破季線")
 
-                # 強勢趨勢加分權重
                 bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up * 1) + (ma_s_up * 1)
                 bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1)
                 
@@ -684,10 +682,34 @@ with tab2:
 
     st.divider()
     st.markdown("### 📋 完整技術分析清單")
-    with st.expander("💡 狀態警示名詞定義說明", expanded=False):
+    with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
         st.markdown("""
-        * **綜合買賣評級**：依據指標判定：🚀 買進 (週金叉)、🛑 賣出 (週死叉或近高點回落 15%)、⚠️ 減碼 (20日高點回落 10%)。
-        * **均線位階**：輔助判定長短線多空趨勢，如「站穩 月/季線」代表強勢。
+        #### 一、 綜合買賣動作評級
+        * **🚀 買進**：只要出現「週線 / 日線 KD 低檔金叉」或「週線 / 日線 MACD 零下金叉」，視為多方轉折啟動。
+        * **🛑 賣出**：只要出現「週線 / 日線 KD 高檔死叉」、「週線 / 日線 MACD 零上死叉」，或觸發「近一年高點回落達 15%」，視為空方風險劇增。
+        * **⚠️ 減碼**：觸發「20日高點回落達 10%」，視為短線趨勢轉弱。
+        * **➖ 持平**：未觸發上述強烈轉折或防禦訊號，屬於趨勢延續中。
+
+        #### 二、 技術指標交叉過濾 (KD & MACD)
+        * **🟢 低檔/零下金叉**：KD 於 30 以下金叉 / MACD 於 0 軸以下金叉。
+        * **🟢 一般金叉**：KD 於 30 以上金叉 / MACD 於 0 軸以上金叉。
+        * **🔴 高檔/零上死叉**：KD 於 70 以上死叉 / MACD 於 0 軸以上死叉。
+        * **🔴 一般死叉**：KD 於 70 以下死叉 / MACD 於 0 軸以下死叉。
+        * **📈 已金叉 / 📉 已死叉**：交叉狀態已維持超過一天，趨勢發散中。
+
+        #### 三、 均線動能與破線警示 (MA)
+        * **跌破月/季線**：今日剛發生實質跌破月線或季線。
+        * **月/季線上彎 ≥ 3日**：月線 (MA20) 或季線連續三個交易日數值呈現遞增。
+        * **月季線雙上彎**：同時滿足上述月線與季線連續上彎 3 日的條件。
+
+        #### 四、 價格回落與盤整防禦
+        * **近高點回落 XX%**：距過去 52 週最高價跌幅達 15% (含) 以上。
+        * **20日回落 XX%**：距過去 20 日最高價跌幅達 10% (含) 以上。
+        * **💤 20日窄幅盤整**：過去 20 日最高與最低價上下振幅壓縮在 7% (含) 以內。
+
+        #### 五、 均線位階綜合判定
+        * **短中線位階 (月線與季線)**：🟢 站穩 月/季線、🔴 月/季線 之下、🟡 守季受月壓、🔵 站月臨季壓。
+        * **長線位階 (半年線與年線)**：🟢 長線多頭、🔴 長線空頭、🟡 守年線(半年下彎)、🔵 臨年線壓(年線下彎)。
         """)
         
     if ta_results:
@@ -795,9 +817,6 @@ with tab3:
 
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
-    # ==========================================
-    # 🔥 強化：Trading_Journal 防呆保護機制
-    # ==========================================
     journal_error = False
     try:
         df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
@@ -807,7 +826,7 @@ with tab4:
             df_journal = df_journal.dropna(subset=['Date'])
             
             if len(df_journal) < 1:
-                st.warning("⚠️ 偵測到 Trading_Journal 為空。已啟動防寫保護，請手動在雲端輸入第一筆紀錄以解鎖。")
+                st.warning("⚠️ 系統偵測到看盤心得無歷史資料，已啟動防寫保護。請手動輸入第一筆紀錄以解鎖。")
                 journal_error = True
         else:
             journal_error = True
