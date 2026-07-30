@@ -485,8 +485,9 @@ with tab1:
     try:
         df_history = conn.read(worksheet="Value_History", ttl=0)
         if df_history is not None and 'Date' in df_history.columns and not df_history.empty:
-            df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce')
             df_history = df_history.dropna(subset=['Date'])
+            df_history['Date'] = df_history['Date'].dt.strftime('%Y-%m-%d')
             
             today_str = datetime.now().strftime('%Y-%m-%d')
             now_time = datetime.now().strftime('%H:%M:%S')
@@ -678,11 +679,11 @@ with tab2:
 
     st.divider()
     st.markdown("### 📋 完整技術分析清單")
-    with st.expander("💡 狀態警示名詞定義說明", expanded=False):
+    with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
         st.markdown("""
         #### 一、 綜合買賣動作評級
-        * **🚀 買進**：出現「週/日線 KD 低檔金叉」或「週/日線 MACD 零下金叉」。
-        * **🛑 賣出**：出現「週/日線 KD 高檔死叉」、「週/日線 MACD 零上死叉」，或「近一年高點回落達 15%」。
+        * **🚀 買進**：「週/日線 KD 低檔金叉」或「週/日線 MACD 零下金叉」。
+        * **🛑 賣出**：「週/日線 KD 高檔死叉」、「週/日線 MACD 零上死叉」，或「近一年高點回落達 15%」。
         * **⚠️ 減碼**：「20日高點回落達 10%」。
         * **➖ 持平**：未觸發上述強烈轉折或防禦訊號。
 
@@ -792,17 +793,18 @@ with tab_comp:
                     try:
                         hist = yf.Ticker(sym).history(period=yf_period)
                         if not hist.empty:
-                            hist.index = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+                            # 嚴格切齊時間軸至午夜零點，防止跨時區導致 IndexError 空值崩潰
+                            hist.index = pd.to_datetime(hist.index).normalize()
+                            hist = hist[~hist.index.duplicated(keep='last')]
                             comp_data[tgt] = hist['Close']
                     except: pass
                 
                 if comp_data:
                     df_comp = pd.DataFrame(comp_data)
-                    df_comp = df_comp.fillna(method='ffill').dropna()
+                    # 避免版本棄用警告，改用 .ffill()
+                    df_comp = df_comp.ffill().bfill().dropna()
                     if not df_comp.empty:
-                        # 轉換為基準 0 的累計報酬率 (%)
                         df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
-                        
                         fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計報酬率 (%)', 'variable': '標的', 'index': '日期'})
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig_comp, use_container_width=True)
@@ -839,17 +841,18 @@ with tab3:
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "代號": st.column_config.TextColumn("代號", width="small"),
                     "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                    "近一季報酬": st.column_config.NumberColumn("近一季報酬", format="%+.2f %%"),
-                    "近半年報酬": st.column_config.NumberColumn("近半年報酬", format="%+.2f %%"),
-                    "近一年報酬": st.column_config.NumberColumn("近一年報酬", format="%+.2f %%"),
-                    "相對大盤": st.column_config.NumberColumn("相對大盤(1年)", format="%+.2f %%"),
-                    "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
+                    # 避免 Streamlit API 格式崩潰，將百分比移至標題
+                    "近一季報酬": st.column_config.NumberColumn("近一季報酬 (%)", format="%+.2f"),
+                    "近半年報酬": st.column_config.NumberColumn("近半年報酬 (%)", format="%+.2f"),
+                    "近一年報酬": st.column_config.NumberColumn("近一年報酬 (%)", format="%+.2f"),
+                    "相對大盤": st.column_config.NumberColumn("相對大盤(1年) (%)", format="%+.2f"),
+                    "近一年殖利率": st.column_config.NumberColumn("近一年殖利率 (%)", format="%.2f"),
                     "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
                     "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄", width="large"),
                     "毛利率": st.column_config.TextColumn("毛利率", width="small"),
                     "營益率": st.column_config.TextColumn("營益率", width="small"),
                     "淨利率": st.column_config.TextColumn("淨利率", width="small"),
-                    "ROE": st.column_config.NumberColumn("ROE", format="%.2f %%"),
+                    "ROE": st.column_config.NumberColumn("ROE (%)", format="%.2f"),
                 },
                 hide_index=True, height=600
             )
@@ -861,8 +864,9 @@ with tab4:
         df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
         
         if df_journal is not None and 'Date' in df_journal.columns and not df_journal.empty:
-            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce')
             df_journal = df_journal.dropna(subset=['Date'])
+            df_journal['Date'] = df_journal['Date'].dt.strftime('%Y-%m-%d')
             
             if len(df_journal) < 1:
                 st.warning("⚠️ 系統偵測到看盤心得無歷史資料，已啟動防寫保護。請手動輸入第一筆紀錄以解鎖。")
