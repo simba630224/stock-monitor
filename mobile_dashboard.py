@@ -146,19 +146,20 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 
             bench_ret = bench_returns.get(market, 0.0)
             rel_val = ret_1y - bench_ret
-            rel_str_display = f"{'🟢' if rel_val >= 0 else '🔴'} {'' if rel_val < 0 else '+'}{rel_val:.1f}%"
 
             f_info = get_fundamental_info(sym)
             is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper()
-            roe = f"{f_info.get('returnOnEquity', 0)*100:.1f}%" if f_info.get('returnOnEquity') and not is_etf else "不適用"
+            
+            roe_raw = f_info.get('returnOnEquity')
+            roe_val = roe_raw * 100 if roe_raw is not None and not is_etf else None
 
             tot_div = float(hist['Dividends'][hist['Dividends'] > 0].sum()) if 'Dividends' in hist.columns else 0.0
             yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
             return {
                 "市場": market, "代號": display_ticker, "收盤": curr_p,
-                "季含息報酬": f"{ret_1q:.1f}%", "年含息報酬": f"{ret_1y:.1f}%",
-                "對大盤": rel_str_display, "殖利率": f"{yield_1y:.1f}%", "ROE": roe
+                "季報酬": ret_1q, "年報酬": ret_1y,
+                "對大盤": rel_val, "殖利率": yield_1y, "ROE": roe_val
             }
     except: pass
     return None
@@ -297,7 +298,7 @@ with col_l:
 with col_r:
     st.caption(f"更新:{datetime.now().strftime('%H:%M')}")
 
-tab1, tab_hl, tab2, tab3, tab4, tab5 = st.tabs(["💰資產", "🎯亮點", "📈技術", "🏆績效", "📖心得", "📝管理"])
+tab1, tab_hl, tab_comp, tab2, tab3, tab4, tab5 = st.tabs(["💰資產", "🎯亮點", "🆚比較", "📈技術", "🏆績效", "📖心得", "📝管理"])
 
 with tab1:
     with st.spinner("載入報價與算資產中..."):
@@ -532,6 +533,43 @@ with tab_hl:
         st.info(f"📈 **日線強勢區 (短線)**\n\n{format_mobile_items(bullish_daily)}")
         st.error(f"⚠️ **空方風險區 (破線/死叉)**\n\n{format_mobile_items(bearish_alerts)}")
 
+with tab_comp:
+    st.markdown("### 🆚 多檔標的走勢比較")
+    st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
+    
+    if 'target_options' in locals() and target_options:
+        all_options_list = list(target_options.keys())
+        default_selections = all_options_list[:2] if len(all_options_list) >= 2 else None
+        
+        comp_targets = st.multiselect("請選擇標的 (最多4檔)：", options=all_options_list, default=default_selections, max_selections=4)
+        comp_period = st.selectbox("比較期間", ["半年", "一年", "三年"], index=1)
+            
+        if comp_targets:
+            with st.spinner("載入比較數據中..."):
+                period_map = {"半年": "6mo", "一年": "1y", "三年": "3y"}
+                yf_period = period_map[comp_period]
+                
+                comp_data = {}
+                for tgt in comp_targets:
+                    sym = target_options[tgt]
+                    try:
+                        hist = yf.Ticker(sym).history(period=yf_period)
+                        if not hist.empty:
+                            hist.index = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+                            comp_data[tgt] = hist['Close']
+                    except: pass
+                
+                if comp_data:
+                    df_comp = pd.DataFrame(comp_data)
+                    df_comp = df_comp.fillna(method='ffill').dropna()
+                    if not df_comp.empty:
+                        df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
+                        fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns)
+                        fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), yaxis_title="累計報酬率 (%)", xaxis_title=None)
+                        st.plotly_chart(fig_comp, use_container_width=True)
+                else:
+                    st.warning("無法取得歷史資料。")
+
 with tab2:
     with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
         st.markdown("""
@@ -609,7 +647,21 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            st.dataframe(df_perf[["代號", "季含息報酬", "年含息報酬", "對大盤", "殖利率", "ROE"]], width="stretch", hide_index=True, height=450)
+            st.dataframe(
+                df_perf,
+                width="stretch",
+                column_config={
+                    "市場": st.column_config.TextColumn("市場"),
+                    "代號": st.column_config.TextColumn("代號"),
+                    "收盤": st.column_config.NumberColumn("收盤", format="%.2f"),
+                    "季報酬": st.column_config.NumberColumn("季報酬", format="%+.1f%%"),
+                    "年報酬": st.column_config.NumberColumn("年報酬", format="%+.1f%%"),
+                    "對大盤": st.column_config.NumberColumn("對大盤", format="%+.1f%%"),
+                    "殖利率": st.column_config.NumberColumn("殖利率", format="%.1f%%"),
+                    "ROE": st.column_config.NumberColumn("ROE", format="%.1f%%")
+                },
+                hide_index=True, height=450
+            )
 
 with tab4:
     st.markdown("### 📖 每日看盤心得")
