@@ -367,8 +367,9 @@ with tab1:
         try:
             df_history = conn.read(worksheet="Value_History", ttl=0)
             if df_history is not None and 'Date' in df_history.columns and not df_history.empty:
-                df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+                df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce')
                 df_history = df_history.dropna(subset=['Date'])
+                df_history['Date'] = df_history['Date'].dt.strftime('%Y-%m-%d')
                 
                 if len(df_history) >= 1:
                     today_str = datetime.now().strftime('%Y-%m-%d')
@@ -555,13 +556,16 @@ with tab_comp:
                     try:
                         hist = yf.Ticker(sym).history(period=yf_period)
                         if not hist.empty:
-                            hist.index = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+                            # 嚴格切齊時間軸至午夜零點，防止跨時區導致 IndexError 崩潰
+                            hist.index = pd.to_datetime(hist.index).normalize()
+                            hist = hist[~hist.index.duplicated(keep='last')]
                             comp_data[tgt] = hist['Close']
                     except: pass
                 
                 if comp_data:
                     df_comp = pd.DataFrame(comp_data)
-                    df_comp = df_comp.fillna(method='ffill').dropna()
+                    # 避免版本棄用警告，改用 .ffill().bfill() 增加強固性
+                    df_comp = df_comp.ffill().bfill().dropna()
                     if not df_comp.empty:
                         df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
                         fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns)
@@ -654,11 +658,12 @@ with tab3:
                     "市場": st.column_config.TextColumn("市場"),
                     "代號": st.column_config.TextColumn("代號"),
                     "收盤": st.column_config.NumberColumn("收盤", format="%.2f"),
-                    "季報酬": st.column_config.NumberColumn("季報酬", format="%+.1f%%"),
-                    "年報酬": st.column_config.NumberColumn("年報酬", format="%+.1f%%"),
-                    "對大盤": st.column_config.NumberColumn("對大盤", format="%+.1f%%"),
-                    "殖利率": st.column_config.NumberColumn("殖利率", format="%.1f%%"),
-                    "ROE": st.column_config.NumberColumn("ROE", format="%.1f%%")
+                    # 避免 Streamlit API 格式崩潰，將百分比移至標題
+                    "季報酬": st.column_config.NumberColumn("季報酬 (%)", format="%+.1f"),
+                    "年報酬": st.column_config.NumberColumn("年報酬 (%)", format="%+.1f"),
+                    "對大盤": st.column_config.NumberColumn("對大盤(1年) (%)", format="%+.1f"),
+                    "殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
+                    "ROE": st.column_config.NumberColumn("ROE (%)", format="%.1f")
                 },
                 hide_index=True, height=450
             )
@@ -669,8 +674,9 @@ with tab4:
     try:
         df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
         if df_journal is not None and 'Date' in df_journal.columns and not df_journal.empty:
-            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce')
             df_journal = df_journal.dropna(subset=['Date'])
+            df_journal['Date'] = df_journal['Date'].dt.strftime('%Y-%m-%d')
             
             if len(df_journal) < 1:
                 st.warning("⚠️ 系統偵測到看盤心得無歷史資料，已啟動防寫保護。請手動輸入第一筆紀錄以解鎖。")
