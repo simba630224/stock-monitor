@@ -210,32 +210,28 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 ret_1q = calc_ret(63)
                 ret_6m = calc_ret(126)
                 
-                is_new_stock = False
                 if len(valid_hist) > 252:
                     ret_1y = ((curr_p - float(valid_hist.iloc[-252])) / float(valid_hist.iloc[-252])) * 100
                 else:
                     ret_1y = ((curr_p - float(valid_hist.iloc[0])) / float(valid_hist.iloc[0])) * 100
-                    is_new_stock = True
 
                 bench_ret = bench_returns.get(market, 0.0)
                 rel_val = ret_1y - bench_ret
-                emoji = "🟢" if rel_val >= 0 else "🔴"
-                sign = "+" if rel_val > 0 else ""
-                suffix = " (上市至今)" if is_new_stock else ""
-                rel_str_display = f"{emoji} {sign}{rel_val:.2f} %{suffix}"
 
                 f_info = get_fundamental_info(sym)
                 is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper() or 'MUTUALFUND' in str(f_info.get('quoteType', '')).upper()
                 
-                def fmt_pct(val):
+                def fmt_pct_text(val):
                     if is_etf: return "ETF/不適用"
                     if val is not None and pd.notna(val): return f"{val * 100:.1f} %"
                     return "暫無資料"
 
-                gross_m = fmt_pct(f_info.get('grossMargins'))
-                op_m = fmt_pct(f_info.get('operatingMargins'))
-                prof_m = fmt_pct(f_info.get('profitMargins'))
-                roe = fmt_pct(f_info.get('returnOnEquity'))
+                gross_m = fmt_pct_text(f_info.get('grossMargins'))
+                op_m = fmt_pct_text(f_info.get('operatingMargins'))
+                prof_m = fmt_pct_text(f_info.get('profitMargins'))
+                
+                roe_raw = f_info.get('returnOnEquity')
+                roe_val = roe_raw * 100 if roe_raw is not None and not is_etf else None
 
                 div_records = []
                 tot_div = 0.0
@@ -250,9 +246,9 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 
                 return {
                     "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
-                    "近一季含息報酬": ret_1q, "近半年含息報酬": ret_6m, "近一年含息報酬": ret_1y,
-                    "相對大盤(1年)": rel_str_display, "近一年殖利率": yield_1y, "總配息金額": tot_div,
-                    "近一年配息明細": div_history_str, "毛利率": gross_m, "營益率": op_m, "淨利率": prof_m, "ROE": roe
+                    "近一季報酬": ret_1q, "近半年報酬": ret_6m, "近一年報酬": ret_1y,
+                    "相對大盤": rel_val, "近一年殖利率": yield_1y, "總配息金額": tot_div,
+                    "近一年配息明細": div_history_str, "毛利率": gross_m, "營益率": op_m, "淨利率": prof_m, "ROE": roe_val
                 }
         except: time.sleep(1)
     return None
@@ -416,7 +412,7 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-tab1, tab2, tab3, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🏆 績效與股息追蹤", "📖 每日看盤心得"])
+tab1, tab2, tab_comp, tab3, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🆚 標的比較", "🏆 績效與股息追蹤", "📖 每日看盤心得"])
 
 with tab1:
     with st.spinner("正在同步即時報價資料..."):
@@ -682,34 +678,33 @@ with tab2:
 
     st.divider()
     st.markdown("### 📋 完整技術分析清單")
-    with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
+    with st.expander("💡 狀態警示名詞定義說明", expanded=False):
         st.markdown("""
         #### 一、 綜合買賣動作評級
-        * **🚀 買進**：只要出現「週線 / 日線 KD 低檔金叉」或「週線 / 日線 MACD 零下金叉」，視為多方轉折啟動。
-        * **🛑 賣出**：只要出現「週線 / 日線 KD 高檔死叉」、「週線 / 日線 MACD 零上死叉」，或觸發「近一年高點回落達 15%」，視為空方風險劇增。
-        * **⚠️ 減碼**：觸發「20日高點回落達 10%」，視為短線趨勢轉弱。
-        * **➖ 持平**：未觸發上述強烈轉折或防禦訊號，屬於趨勢延續中。
+        * **🚀 買進**：出現「週/日線 KD 低檔金叉」或「週/日線 MACD 零下金叉」。
+        * **🛑 賣出**：出現「週/日線 KD 高檔死叉」、「週/日線 MACD 零上死叉」，或「近一年高點回落達 15%」。
+        * **⚠️ 減碼**：「20日高點回落達 10%」。
+        * **➖ 持平**：未觸發上述強烈轉折或防禦訊號。
 
         #### 二、 技術指標交叉過濾 (KD & MACD)
         * **🟢 低檔/零下金叉**：KD 於 30 以下金叉 / MACD 於 0 軸以下金叉。
         * **🟢 一般金叉**：KD 於 30 以上金叉 / MACD 於 0 軸以上金叉。
         * **🔴 高檔/零上死叉**：KD 於 70 以上死叉 / MACD 於 0 軸以上死叉。
         * **🔴 一般死叉**：KD 於 70 以下死叉 / MACD 於 0 軸以下死叉。
-        * **📈 已金叉 / 📉 已死叉**：交叉狀態已維持超過一天，趨勢發散中。
 
         #### 三、 均線動能與破線警示 (MA)
         * **跌破月/季線**：今日剛發生實質跌破月線或季線。
-        * **月/季線上彎 ≥ 3日**：月線 (MA20) 或季線連續三個交易日數值呈現遞增。
-        * **月季線雙上彎**：同時滿足上述月線與季線連續上彎 3 日的條件。
+        * **月/季線上彎 ≥ 3日**：月線(MA20)或季線連續三個交易日遞增。
+        * **月季線雙上彎**：同時滿足月線與季線連續上彎 3 日。
 
         #### 四、 價格回落與盤整防禦
         * **近高點回落 XX%**：距過去 52 週最高價跌幅達 15% (含) 以上。
         * **20日回落 XX%**：距過去 20 日最高價跌幅達 10% (含) 以上。
-        * **💤 20日窄幅盤整**：過去 20 日最高與最低價上下振幅壓縮在 7% (含) 以內。
+        * **💤 20日窄幅盤整**：過去 20 日最高與最低價振幅壓縮在 7% (含) 以內。
 
         #### 五、 均線位階綜合判定
-        * **短中線位階 (月線與季線)**：🟢 站穩 月/季線、🔴 月/季線 之下、🟡 守季受月壓、🔵 站月臨季壓。
-        * **長線位階 (半年線與年線)**：🟢 長線多頭、🔴 長線空頭、🟡 守年線(半年下彎)、🔵 臨年線壓(年線下彎)。
+        * **短中線 (月線與季線)**：🟢 站穩月/季線、🔴 月/季線之下、🟡 守季受月壓、🔵 站月臨季壓。
+        * **長線 (半年線與年線)**：🟢 長線多頭、🔴 長線空頭、🟡 守年線(半年下彎)、🔵 臨年線壓(年線下彎)。
         """)
         
     if ta_results:
@@ -772,6 +767,50 @@ with tab2:
             fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
             st.plotly_chart(fig_tech, use_container_width=True)
 
+with tab_comp:
+    st.subheader("🆚 多檔標的走勢比較")
+    st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
+    
+    if 'target_options' in locals() and target_options:
+        all_options_list = list(target_options.keys())
+        default_selections = all_options_list[:2] if len(all_options_list) >= 2 else None
+        
+        comp_col1, comp_col2 = st.columns([3, 1])
+        with comp_col1:
+            comp_targets = st.multiselect("請選擇比較標的 (最多4檔)：", options=all_options_list, default=default_selections, max_selections=4)
+        with comp_col2:
+            comp_period = st.radio("比較期間", ["半年", "一年", "三年"], horizontal=True, index=1)
+            
+        if comp_targets:
+            with st.spinner("載入比較數據中..."):
+                period_map = {"半年": "6mo", "一年": "1y", "三年": "3y"}
+                yf_period = period_map[comp_period]
+                
+                comp_data = {}
+                for tgt in comp_targets:
+                    sym = target_options[tgt]
+                    try:
+                        hist = yf.Ticker(sym).history(period=yf_period)
+                        if not hist.empty:
+                            hist.index = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+                            comp_data[tgt] = hist['Close']
+                    except: pass
+                
+                if comp_data:
+                    df_comp = pd.DataFrame(comp_data)
+                    df_comp = df_comp.fillna(method='ffill').dropna()
+                    if not df_comp.empty:
+                        # 轉換為基準 0 的累計報酬率 (%)
+                        df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
+                        
+                        fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計報酬率 (%)', 'variable': '標的', 'index': '日期'})
+                        fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                        st.plotly_chart(fig_comp, use_container_width=True)
+                else:
+                    st.warning("無法取得選定標的的歷史資料。")
+    else:
+        st.info("請先確認持股清單並等待資料載入。")
+
 with tab3:
     st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**超額大盤表現 (Alpha)**、**基本面財報指標**與**近一年真實配息紀錄**。")
     with st.spinner("正在計算各標的績效與配息資料..."):
@@ -800,17 +839,17 @@ with tab3:
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "代號": st.column_config.TextColumn("代號", width="small"),
                     "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                    "近一季含息報酬": st.column_config.NumberColumn("近一季含息報酬", format="%.2f %%"),
-                    "近半年含息報酬": st.column_config.NumberColumn("近半年含息報酬", format="%.2f %%"),
-                    "近一年含息報酬": st.column_config.NumberColumn("近一年含息報酬", format="%.2f %%"),
-                    "相對大盤(1年)": st.column_config.TextColumn("相對大盤 (1年)", width="medium"),
+                    "近一季報酬": st.column_config.NumberColumn("近一季報酬", format="%+.2f %%"),
+                    "近半年報酬": st.column_config.NumberColumn("近半年報酬", format="%+.2f %%"),
+                    "近一年報酬": st.column_config.NumberColumn("近一年報酬", format="%+.2f %%"),
+                    "相對大盤": st.column_config.NumberColumn("相對大盤(1年)", format="%+.2f %%"),
                     "近一年殖利率": st.column_config.NumberColumn("近一年殖利率", format="%.2f %%"),
                     "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
-                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄 (每次發放金額)", width="large"),
+                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄", width="large"),
                     "毛利率": st.column_config.TextColumn("毛利率", width="small"),
                     "營益率": st.column_config.TextColumn("營益率", width="small"),
                     "淨利率": st.column_config.TextColumn("淨利率", width="small"),
-                    "ROE": st.column_config.TextColumn("ROE", width="small"),
+                    "ROE": st.column_config.NumberColumn("ROE", format="%.2f %%"),
                 },
                 hide_index=True, height=600
             )
