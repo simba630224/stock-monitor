@@ -15,9 +15,6 @@ warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
-# 設定獨立的 ETF 持股試算表網址
-ETF_SHEET_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/edit"
-
 def safe_float(val):
     try:
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
@@ -857,15 +854,18 @@ with tab3:
             )
 
 # ==========================================
-# 🔥 新增：ETF 持股分析分頁 (跨檔案 URL 強力連線版)
+# 🔥 新增：ETF 持股分析分頁 (專屬獨立 URL 版)
 # ==========================================
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
     st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
     
+    # 使用獨立外部試算表 URL
+    ETF_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc"
+    
     try:
-        # 🔑 直接指定專屬網址，徹底解決跨檔案 / 預設連線問題
-        df_etf_db = conn.read(spreadsheet=ETF_SHEET_URL, ttl=0)
+        # 強制告訴系統讀取外部網址的 ETF_Holdings_DB 分頁
+        df_etf_db = conn.read(spreadsheet=ETF_URL, worksheet="ETF_Holdings_DB", ttl=0)
         read_success = True
         err_msg = ""
     except Exception as e:
@@ -874,17 +874,22 @@ with tab_etf:
         err_msg = str(e)
 
     if not read_success:
-        st.error(f"❌ **無法連線讀取 `ETF_Holdings_DB` 試算表！**\n系統回報錯誤訊息：`{err_msg}`")
-        st.info("💡 **權限設定解決方法**：\n請打開 [ETF_Holdings_DB 試算表網址](https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/edit)，點擊右上角 **「共用」** ➔ 將存取權改為 **「知道連結的人皆可檢視」** 即可！")
+        st.error(f"❌ **無法讀取外部 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
+        st.info("""💡 **請確認權限設定**：\n這是因為這個新檔案是一個完全獨立的 Google Sheet。
+        您必須開啟該試算表，點擊右上角的 **「共用 (Share)」**，並輸入您在 `.streamlit/secrets.toml` 檔案裡的 `client_email` (即 GCP Service Account 信箱)，賦予它「檢視者」權限，程式才有辦法跨檔案讀取！""")
     elif df_etf_db is None or df_etf_db.empty:
-        st.warning("⚠️ 成功連線到試算表，但讀取到的內容是空的。請確認爬蟲已成功寫入資料。")
+        st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。請確認爬蟲已成功寫入資料。")
     else:
+        # 清除完全空白的列
         df_etf_db = df_etf_db.dropna(how='all')
         
-        # 絕對位置對齊：0=代號, 1=名稱, 2=權重
+        with st.expander("🛠️ 展開查看原始讀取資料 (除錯用)", expanded=False):
+            st.dataframe(df_etf_db.head())
+
         if len(df_etf_db.columns) < 3:
-            st.error(f"⚠️ 欄位數量不足！預期至少 3 欄 (代號/名稱/權重)，但只讀取到 {len(df_etf_db.columns)} 欄。")
+            st.error(f"⚠️ 讀取成功，但欄位數量異常！預期至少 3 欄，但只讀到 {len(df_etf_db.columns)} 欄。")
         else:
+            # 放棄標頭字串比對，強制鎖定第1~3欄的絕對位置
             etf_col = df_etf_db.columns[0]
             name_col = df_etf_db.columns[1]
             weight_col = df_etf_db.columns[2]
@@ -893,7 +898,7 @@ with tab_etf:
             etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'ticker', 'nan', 'none'] and '代號' not in x]
             
             if not etf_options:
-                st.warning("⚠️ 工作表中未能解析出有效的 ETF 代號，請確認第一欄是否有資料。")
+                st.warning("⚠️ 工作表中未能解析出有效的 ETF 代號！請展開上方原始資料確認第一欄的內容。")
             else:
                 col_etf1, col_etf2 = st.columns([1, 2])
                 
@@ -909,6 +914,7 @@ with tab_etf:
                     with col_etf2:
                         try:
                             plot_df = df_show.copy()
+                            # 暴力清洗權重欄位：移除 % 符號、逗點與空白
                             plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace('%', '', regex=False).str.replace(',', '', regex=False).str.strip()
                             plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                             
@@ -920,9 +926,9 @@ with tab_etf:
                                 fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450, margin=dict(l=10, r=10, t=40, b=10))
                                 st.plotly_chart(fig_etf, use_container_width=True)
                             else:
-                                st.info("該 ETF 無有效的權重數值可供繪製圖表。")
+                                st.info("該 ETF 無效的權重數值可供繪製圖表。")
                         except Exception as ex:
-                            st.warning(f"無法繪製持股比例圖表：{ex}")
+                            st.warning(f"無法繪製持股比例圖表，錯誤代碼：{ex}")
 
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
@@ -1005,7 +1011,7 @@ with st.sidebar:
         if st.button("💾 儲存美股變更"):
             with st.spinner("正在寫入美股資料..."):
                 try:
-                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    conn.update(worksheet="US_Portfolio", data=edited_us)
                     st.success("✅ 美股更新成功！請重新整理網頁。")
                 except Exception as e: st.error(f"寫入失敗：{e}")
     else: st.info("美股清單目前為空。")
