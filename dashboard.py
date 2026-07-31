@@ -15,8 +15,14 @@ warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
+# ==========================================
+# 0. 輔助函式：強力防呆安全轉換與均線位階
+# ==========================================
 def safe_float(val):
     try:
+        # 強制過濾所有非數字字元 (例如使用者手動輸入的逗點 1,000)
+        if isinstance(val, str):
+            val = re.sub(r'[^\d.-]', '', val)
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
     except:
         return 0.0
@@ -42,6 +48,9 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
         status += "均線不足"
     return status
 
+# ==========================================
+# 1. 資料庫與清單設定 (Google Sheets 連線)
+# ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
@@ -68,6 +77,9 @@ except Exception as e:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
+# ==========================================
+# 2. 核心抓取與計算邏輯
+# ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith('.TW') or ticker.endswith('.TWO'): return ticker
@@ -221,15 +233,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 f_info = get_fundamental_info(sym)
                 is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper() or 'MUTUALFUND' in str(f_info.get('quoteType', '')).upper()
                 
-                def fmt_pct_text(val):
-                    if is_etf: return "ETF/不適用"
-                    if val is not None and pd.notna(val): return f"{val * 100:.1f} %"
-                    return "暫無資料"
-
-                gross_m = fmt_pct_text(f_info.get('grossMargins'))
-                op_m = fmt_pct_text(f_info.get('operatingMargins'))
-                prof_m = fmt_pct_text(f_info.get('profitMargins'))
-                
                 roe_raw = f_info.get('returnOnEquity')
                 roe_val = roe_raw * 100 if roe_raw is not None and not is_etf else None
 
@@ -246,9 +249,9 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 
                 return {
                     "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
-                    "近一季報酬": ret_1q, "近半年報酬": ret_6m, "近一年報酬": ret_1y,
-                    "相對大盤": rel_val, "近一年殖利率": yield_1y, "總配息金額": tot_div,
-                    "近一年配息明細": div_history_str, "毛利率": gross_m, "營益率": op_m, "淨利率": prof_m, "ROE": roe_val
+                    "近一季報酬": float(ret_1q), "近半年報酬": float(ret_6m), "近一年報酬": float(ret_1y),
+                    "相對大盤": float(rel_val), "近一年殖利率": float(yield_1y), "總配息金額": float(tot_div),
+                    "近一年配息明細": div_history_str, "ROE": float(roe_val) if roe_val is not None else None
                 }
         except: time.sleep(1)
     return None
@@ -480,6 +483,9 @@ with tab1:
     col3.metric("近一年累計股息 (TWD)", f"${total_dividends_1y:,.0f}")
     col4.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
 
+    # ==========================================
+    # 📉 修正：讀取 Value_History 並強力過濾手輸字串
+    # ==========================================
     history_error = False
     df_history_to_display = pd.DataFrame()
     try:
@@ -487,6 +493,13 @@ with tab1:
         if df_history is not None and 'Date' in df_history.columns and not df_history.empty:
             df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
             df_history = df_history.dropna(subset=['Date'])
+            
+            # 強制清洗 Total_Value，防止手動編輯的字串或逗號引發 Plotly 繪圖格式崩潰
+            if 'Total_Value' in df_history.columns:
+                df_history['Total_Value'] = pd.to_numeric(
+                    df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), 
+                    errors='coerce'
+                ).fillna(0)
             
             today_str = datetime.now().strftime('%Y-%m-%d')
             now_time = datetime.now().strftime('%H:%M:%S')
@@ -505,7 +518,6 @@ with tab1:
                     conn.update(worksheet="Value_History", data=df_history)
                 df_history_to_display = df_history
             else:
-                st.warning("⚠️ 偵測到 Value_History 為空。為防範 API 假性斷線覆蓋資料，系統啟動保護模式。請於試算表手動輸入第一筆歷史紀錄來解鎖。")
                 history_error = True
         else:
             history_error = True
@@ -519,6 +531,8 @@ with tab1:
 
     if not df_history_to_display.empty and len(df_history_to_display) > 1:
         st.subheader("📈 總市值每日變化趨勢")
+        # 確保最後繪圖前絕對是數值型態，防禦 Plotly Crash
+        df_history_to_display['Total_Value'] = pd.to_numeric(df_history_to_display['Total_Value'], errors='coerce').fillna(0)
         fig_hist = px.line(df_history_to_display, x='Date', y='Total_Value', text='Total_Value', markers=True)
         fig_hist.update_traces(textposition="top center", texttemplate='%{text:,.0f}')
         fig_hist.update_layout(yaxis_title="總市值 (TWD)", xaxis_title="日期", margin=dict(t=30, b=0, l=0, r=0), height=350)
@@ -854,7 +868,7 @@ with tab3:
             )
 
 # ==========================================
-# 🔥 新增：ETF 持股分析分頁 (專屬獨立 URL 版)
+# 🔥 新增：ETF 持股分析分頁 (防禦格式崩潰修訂版)
 # ==========================================
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
@@ -865,15 +879,12 @@ with tab_etf:
     try:
         df_etf_db = conn.read(spreadsheet=ETF_URL, worksheet="ETF_Holdings_DB", ttl=0)
         read_success = True
-        err_msg = ""
     except Exception as e:
         df_etf_db = pd.DataFrame()
         read_success = False
-        err_msg = str(e)
 
     if not read_success:
-        st.error(f"❌ **無法讀取外部 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
-        st.info("""💡 **請確認權限設定**：\n您必須開啟該 ETF 試算表，點擊右上角的 **「共用 (Share)」**，並輸入您在 `.streamlit/secrets.toml` 檔案裡的 `client_email`，賦予其「檢視者」權限！""")
+        st.error("❌ **無法讀取外部 ETF 試算表！**")
     elif df_etf_db is None or df_etf_db.empty:
         st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。請確認爬蟲已成功寫入資料。")
     else:
@@ -907,24 +918,24 @@ with tab_etf:
                     with col_etf2:
                         try:
                             plot_df = df_show.copy()
-                            # 確保名稱為字串，避免 Plotly 混淆
+                            # 確保名稱為純字串，避免 Plotly 將數字代號混淆
                             plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                             
-                            # 洗掉 % 與逗號，並轉為 Float
-                            plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace('%', '', regex=False).str.replace(',', '', regex=False).str.strip()
+                            # 強力清洗權重欄位：只保留數字與小數點，無視所有其他符號
+                            plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                             plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                             
                             plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
                             
                             if not plot_df.empty:
-                                # 預先生成標籤，完全不使用 Plotly 的 text_auto 避免崩潰
-                                plot_df['text_label'] = plot_df[weight_col].apply(lambda x: f"{x:.2f}%")
+                                # 放棄 Plotly 的 text_auto，改為純 Python 自製標籤，迴避字串解析崩潰
+                                plot_df['文字標籤'] = plot_df[weight_col].apply(lambda x: f"{x:.2f}%")
                                 
                                 fig_etf = px.bar(plot_df, x=weight_col, y=name_col, orientation='h', 
-                                                 title=f"<b>{selected_etf} 核心持股佔比 (%)</b>", text='text_label')
+                                                 title=f"<b>{selected_etf} 核心持股佔比 (%)</b>", text='文字標籤')
                                 fig_etf.update_traces(textposition='outside')
+                                fig_etf.update_yaxes(type='category') # 強制設定 Y 軸為文字類別
                                 fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450, margin=dict(l=10, r=10, t=40, b=10))
-                                fig_etf.update_yaxes(type='category') # 強制確保 Y 軸是類別型態，不會被當成數值
                                 st.plotly_chart(fig_etf, use_container_width=True)
                             else:
                                 st.info("該 ETF 無效的權重數值可供繪製圖表。")
