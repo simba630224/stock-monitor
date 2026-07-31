@@ -15,6 +15,9 @@ warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
+# ==========================================
+# 0. 輔助函式：安全轉換與均線位階
+# ==========================================
 def safe_float(val):
     try:
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
@@ -42,6 +45,9 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
         status += "均線不足"
     return status
 
+# ==========================================
+# 1. 資料庫與清單設定 (Google Sheets 連線)
+# ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
@@ -68,13 +74,21 @@ except Exception as e:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
-# --- 讀取 ETF 持股資料庫 ---
-try:
-    df_etf_db = conn.read(worksheet="ETF_Holdings_DB", ttl=3600)
-    df_etf_db = df_etf_db.dropna(how='all')
-except Exception:
-    df_etf_db = pd.DataFrame()
+# --- 讀取 ETF 持股資料庫 (加入快取與防呆) ---
+@st.cache_data(ttl=300)
+def load_etf_db():
+    try:
+        df = conn.read(worksheet="ETF_Holdings_DB", ttl=0)
+        if df is not None and not df.empty and len(df.columns) > 0:
+            df = df.dropna(how='all').dropna(how='all', axis=1)
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
 
+# ==========================================
+# 2. 核心抓取與計算邏輯
+# ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith('.TW') or ticker.endswith('.TWO'): return ticker
@@ -725,269 +739,4 @@ with tab2:
                 "標的": st.column_config.TextColumn("名稱 (代號)", width="medium"),
                 "狀態警示": st.column_config.TextColumn("🚨 狀態警示", width="large"),
                 "均線位階": st.column_config.TextColumn("均線位階", width="medium"),
-                "52週位置": st.column_config.TextColumn("52週位置", width="small"),
-                "Beta": st.column_config.TextColumn("Beta", width="small"),
-                "日KD": st.column_config.TextColumn("日 KD", width="medium"),
-                "週KD": st.column_config.TextColumn("週 KD", width="medium"),
-            },
-            hide_index=True, height=450
-        )
-
-    st.divider()
-    st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
-    
-    col_select_stock, col_select_period = st.columns([2, 1])
-    with col_select_stock:
-        selected_name = st.selectbox("請選擇要查看技術線圖的標的：", options=list(target_options.keys()) if target_options else ["暫無可繪圖標的"])
-    with col_select_period:
-        period_label = st.selectbox("請選擇顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
-    
-    tail_days = 150 if period_label == "半年 (150日)" else (252 if period_label == "一年 (252日)" else 9999)
-        
-    if selected_name and selected_name != "暫無可繪圖標的":
-        sym = target_options[selected_name]
-        df_chart = get_stock_data(sym)
-        if df_chart is not None:
-            df_plot = df_chart.tail(tail_days)
-            fig_tech = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.5, 0.25, 0.25], subplot_titles=(f"{selected_name} - 走勢圖", "日 KD 指標", "MACD 指標 (12,26,9)"))
-            
-            if 'Open' in df_plot.columns and 'High' in df_plot.columns and 'Low' in df_plot.columns:
-                fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
-            else:
-                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['Close'], mode='lines', name='收盤價'), row=1, col=1)
-                
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name="季線"), row=1, col=1)
-            
-            if 'K_d' in df_plot.columns:
-                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值'), row=2, col=1)
-                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['D_d'], line=dict(color='orange', width=1.5), name='D值'), row=2, col=1)
-            fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
-            fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
-            
-            macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
-            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal'), row=3, col=1)
-            
-            fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
-            st.plotly_chart(fig_tech, use_container_width=True)
-
-with tab_comp:
-    st.subheader("🆚 多檔標的走勢比較")
-    st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
-    
-    if 'target_options' in locals() and target_options:
-        all_options_list = list(target_options.keys())
-        default_selections = all_options_list[:2] if len(all_options_list) >= 2 else None
-        
-        comp_col1, comp_col2 = st.columns([3, 1])
-        with comp_col1:
-            comp_targets = st.multiselect("請選擇比較標的 (最多4檔)：", options=all_options_list, default=default_selections, max_selections=4)
-        with comp_col2:
-            comp_period = st.radio("比較期間", ["半年", "一年", "三年"], horizontal=True, index=1)
-            
-        if comp_targets:
-            with st.spinner("載入比較數據中..."):
-                period_map = {"半年": "6mo", "一年": "1y", "三年": "3y"}
-                yf_period = period_map[comp_period]
-                
-                comp_data = {}
-                for tgt in comp_targets:
-                    sym = target_options[tgt]
-                    try:
-                        hist = yf.Ticker(sym).history(period=yf_period)
-                        if not hist.empty:
-                            hist.index = pd.to_datetime(hist.index).normalize()
-                            hist = hist[~hist.index.duplicated(keep='last')]
-                            comp_data[tgt] = hist['Close']
-                    except: pass
-                
-                if comp_data:
-                    df_comp = pd.DataFrame(comp_data)
-                    df_comp = df_comp.ffill().bfill().dropna()
-                    if not df_comp.empty:
-                        df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
-                        fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計報酬率 (%)', 'variable': '標的', 'index': '日期'})
-                        fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-                        st.plotly_chart(fig_comp, use_container_width=True)
-                else:
-                    st.warning("無法取得選定標的的歷史資料。")
-    else:
-        st.info("請先確認持股清單並等待資料載入。")
-
-with tab3:
-    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**超額大盤表現 (Alpha)**、**基本面財報指標**與**近一年真實配息紀錄**。")
-    with st.spinner("正在計算各標的績效與配息資料..."):
-        bench_returns = get_benchmark_returns()
-        perf_results = []
-        scan_list = []
-        
-        for item in PORTFOLIO_TW:
-            t = str(item.get('Ticker', '')).strip()
-            if t and t != 'nan': scan_list.append((get_yf_ticker_tw(t), t, '台股'))
-                
-        for item in PORTFOLIO_US:
-            t = str(item.get('Ticker', '')).strip()
-            if t and t != 'nan': scan_list.append((t, t, '美股'))
-                
-        for sym, display_ticker, market in scan_list:
-            res = get_perf_div_data(sym, display_ticker, market, bench_returns)
-            if res: perf_results.append(res)
-                
-        if perf_results:
-            df_perf = pd.DataFrame(perf_results)
-            st.dataframe(
-                df_perf,
-                width="stretch",
-                column_config={
-                    "市場": st.column_config.TextColumn("市場", width="small"),
-                    "代號": st.column_config.TextColumn("代號", width="small"),
-                    "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                    "近一季報酬": st.column_config.NumberColumn("近一季報酬 (%)", format="%+.2f"),
-                    "近半年報酬": st.column_config.NumberColumn("近半年報酬 (%)", format="%+.2f"),
-                    "近一年報酬": st.column_config.NumberColumn("近一年報酬 (%)", format="%+.2f"),
-                    "相對大盤": st.column_config.NumberColumn("相對大盤(1年) (%)", format="%+.2f"),
-                    "近一年殖利率": st.column_config.NumberColumn("近一年殖利率 (%)", format="%.2f"),
-                    "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
-                    "近一年配息明細": st.column_config.TextColumn("近一年配息紀錄", width="large"),
-                    "毛利率": st.column_config.TextColumn("毛利率", width="small"),
-                    "營益率": st.column_config.TextColumn("營益率", width="small"),
-                    "淨利率": st.column_config.TextColumn("淨利率", width="small"),
-                    "ROE": st.column_config.NumberColumn("ROE (%)", format="%.2f"),
-                },
-                hide_index=True, height=600
-            )
-
-# ==========================================
-# 🔥 新增：ETF 持股分析分頁
-# ==========================================
-with tab_etf:
-    st.subheader("🧩 ETF Top 10 持股分析")
-    st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
-    
-    if df_etf_db.empty:
-        st.info("💡 尚未偵測到 `ETF_Holdings_DB` 工作表，或表格內無資料。請確認您的爬蟲程式已成功將資料寫入 Google Sheets 即可啟用此功能。")
-    else:
-        col_etf1, col_etf2 = st.columns([1, 2])
-        etf_options = df_etf_db.iloc[:, 0].dropna().unique().tolist()
-        
-        with col_etf1:
-            selected_etf = st.selectbox("👉 請選擇要查詢持股比例的 ETF：", options=etf_options)
-            if selected_etf:
-                df_show = df_etf_db[df_etf_db.iloc[:, 0] == selected_etf].copy()
-                st.dataframe(df_show, hide_index=True, use_container_width=True)
-        
-        with col_etf2:
-            if selected_etf and not df_show.empty:
-                cols = df_show.columns
-                name_col, weight_col = None, None
-                
-                # 自動化偵測欄位名稱 (對齊爬蟲常見命名)
-                for c in cols:
-                    if any(k in str(c) for k in ['名稱', '成分股', 'Name', '股票']): name_col = c
-                    if any(k in str(c) for k in ['比例', '權重', 'Weight', '%']): weight_col = c
-                
-                # 若偵測不到則取預設位置
-                if not name_col and len(cols) > 2: name_col = cols[2]
-                if not weight_col and len(cols) > 3: weight_col = cols[3]
-                
-                if name_col and weight_col:
-                    try:
-                        # 處理字串轉為數字以利繪圖
-                        df_show[weight_col] = pd.to_numeric(df_show[weight_col].astype(str).str.replace('%', '', regex=False), errors='coerce')
-                        df_plot = df_show.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
-                        
-                        fig_etf = px.bar(df_plot, x=weight_col, y=name_col, orientation='h', 
-                                         title=f"<b>{selected_etf} 核心持股佔比</b>", text_auto='.2f')
-                        fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450)
-                        st.plotly_chart(fig_etf, use_container_width=True)
-                    except:
-                        st.warning("無法解析持股比例數值以繪製圖表。")
-
-with tab4:
-    st.subheader("📖 每日看盤心得紀錄")
-    journal_error = False
-    try:
-        df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
-        
-        if df_journal is not None and 'Date' in df_journal.columns and not df_journal.empty:
-            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-            df_journal = df_journal.dropna(subset=['Date'])
-            
-            if len(df_journal) < 1:
-                st.warning("⚠️ 系統偵測到看盤心得無歷史資料，已啟動防寫保護。請手動輸入第一筆紀錄以解鎖。")
-                journal_error = True
-        else:
-            journal_error = True
-    except Exception:
-        journal_error = True
-
-    if journal_error:
-        st.info("💡 提示：若要啟用「每日看盤心得」功能，請在您的 Google 試算表中確認 `Trading_Journal` 格式是否正確。")
-    else:
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        now_time = datetime.now().strftime('%H:%M:%S')
-
-        existing_note = ""
-        if today_str in df_journal['Date'].values:
-            existing_note = str(df_journal.loc[df_journal['Date'] == today_str, 'Notes'].iloc[0])
-            if existing_note == 'nan': existing_note = ""
-
-        with st.form("journal_form"):
-            note_input = st.text_area(f"撰寫 {today_str} 的看盤心得：", value=existing_note, height=150)
-            submitted = st.form_submit_button("💾 儲存心得")
-
-            if submitted:
-                with st.spinner("儲存中..."):
-                    if today_str in df_journal['Date'].values:
-                        idx = df_journal.index[df_journal['Date'] == today_str].tolist()[0]
-                        df_journal.at[idx, 'Notes'] = note_input
-                        df_journal.at[idx, 'Last_Updated'] = now_time
-                    else:
-                        new_row = pd.DataFrame([{'Date': today_str, 'Notes': note_input, 'Last_Updated': now_time}])
-                        df_journal = pd.concat([df_journal, new_row], ignore_index=True)
-                    try:
-                        conn.update(worksheet="Trading_Journal", data=df_journal)
-                        st.success("✅ 心得儲存成功！")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"寫入失敗：{e}")
-        
-        st.divider()
-        st.subheader("📚 歷史心得回顧")
-        if not df_journal.empty:
-            df_history_show = df_journal.sort_values(by='Date', ascending=False)
-            for _, row in df_history_show.iterrows():
-                with st.expander(f"📅 {row['Date']} (最後更新: {row.get('Last_Updated', '')})"):
-                    st.write(row['Notes'])
-
-with st.sidebar:
-    st.header("📝 持股與觀察名單管理")
-    st.markdown("想要追蹤某檔股票嗎？**新增代號並將股數設為 0**，它就會自動加入技術分析掃描！")
-    
-    st.subheader("🇹🇼 台股清單")
-    if not df_tw.empty:
-        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", width="stretch", key="tw_editor")
-        if st.button("💾 儲存台股變更"):
-            with st.spinner("正在寫入台股資料..."):
-                try:
-                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
-                    st.success("✅ 台股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("台股清單目前為空。")
-
-    st.divider()
-
-    st.subheader("🇺🇸 美股清單")
-    if not df_us.empty:
-        edited_df_us = st.data_editor(df_us, num_rows="dynamic", width="stretch", key="us_editor")
-        if st.button("💾 儲存美股變更"):
-            with st.spinner("正在寫入美股資料..."):
-                try:
-                    conn.update(worksheet="US_Portfolio", data=edited_us)
-                    st.success("✅ 美股更新成功！請重新整理網頁。")
-                except Exception as e: st.error(f"寫入失敗：{e}")
-    else: st.info("美股清單目前為空。")
+                "52週位置": st.column_config.TextColumn("52週位置",
