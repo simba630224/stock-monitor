@@ -1,0 +1,30 @@
+name: 每日 ETF 成分股更新
+
+on:
+  schedule:
+    # 設定每天 UTC 21:00 (台灣時間早上 05:00) 執行，避開美股台股盤中
+    - cron: '0 21 * * *'
+  workflow_dispatch: # 允許手動測試
+
+jobs:
+  update-holdings:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Run ETF Holdings Crawler
+        env:
+          # 將您的 Service Account JSON 金鑰存入 GitHub Secrets 中
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        run: python update_etf_holdings.py
