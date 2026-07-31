@@ -15,9 +15,6 @@ warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
-# ==========================================
-# 0. 輔助函式：安全轉換與均線位階
-# ==========================================
 def safe_float(val):
     try:
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
@@ -45,9 +42,6 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
         status += "均線不足"
     return status
 
-# ==========================================
-# 1. 資料庫與清單設定 (Google Sheets 連線)
-# ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
@@ -74,21 +68,18 @@ except Exception as e:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
-# --- 讀取 ETF 持股資料庫 (加入快取與防呆) ---
+# --- 讀取 ETF 持股資料庫 (加入快取防呆) ---
 @st.cache_data(ttl=300)
 def load_etf_db():
     try:
         df = conn.read(worksheet="ETF_Holdings_DB", ttl=0)
-        if df is not None and not df.empty and len(df.columns) > 0:
+        if df is not None and not df.empty and len(df.columns) >= 3:
             df = df.dropna(how='all').dropna(how='all', axis=1)
             return df
     except Exception:
         pass
     return pd.DataFrame()
 
-# ==========================================
-# 2. 核心抓取與計算邏輯
-# ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith('.TW') or ticker.endswith('.TWO'): return ticker
@@ -875,7 +866,7 @@ with tab3:
             )
 
 # ==========================================
-# 🔥 新增：ETF 持股分析分頁
+# 🔥 新增：ETF 持股分析分頁 (修正對齊版)
 # ==========================================
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
@@ -883,22 +874,19 @@ with tab_etf:
     
     df_etf_db = load_etf_db()
     
-    if df_etf_db.empty or len(df_etf_db.columns) == 0:
-        st.info("💡 尚未偵測到 `ETF_Holdings_DB` 工作表，或表格內尚無資料。請確認您的爬蟲程式已成功將資料寫入 Google Sheets 即可啟用此功能。")
+    if df_etf_db.empty or len(df_etf_db.columns) < 3:
+        st.info("💡 尚未偵測到 `ETF_Holdings_DB` 工作表，或表格欄位不足 3 欄。請確認爬蟲程式已正確寫入資料。")
     else:
-        # 識別 ETF Ticker / 名稱 欄位 (通常是第 0 欄或名稱含有 ETF/Ticker 的欄位)
+        # 強制採用絕對位置對齊，忽略任何標題名稱變化
         etf_col = df_etf_db.columns[0]
-        for c in df_etf_db.columns:
-            c_str = str(c).upper()
-            if any(k in c_str for k in ['ETF', 'TICKER', '代號', '標的']):
-                etf_col = c
-                break
-                
+        name_col = df_etf_db.columns[1]
+        weight_col = df_etf_db.columns[2]
+        
         raw_etfs = df_etf_db[etf_col].dropna().astype(str).str.strip().unique().tolist()
-        etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'etf_ticker', 'nan', 'none', 'ticker', 'symbol']]
+        etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'ticker', 'nan', 'none']]
         
         if not etf_options:
-            st.warning("`ETF_Holdings_DB` 工作表中未讀取到有效的 ETF 項目。")
+            st.warning("工作表中未讀取到有效的 ETF 代號。")
         else:
             col_etf1, col_etf2 = st.columns([1, 2])
             
@@ -912,41 +900,23 @@ with tab_etf:
                     st.dataframe(df_show, hide_index=True, use_container_width=True)
                 
                 with col_etf2:
-                    if not df_show.empty:
-                        cols = list(df_show.columns)
-                        name_col = None
-                        weight_col = None
+                    try:
+                        plot_df = df_show.copy()
+                        # 將文字替換為純數字，無視(%)符號干擾
+                        plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace('%', '', regex=False).str.replace(',', '', regex=False).str.strip()
+                        plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                         
-                        # 智慧自動偵測成分股名稱欄位與權重欄位
-                        for c in cols:
-                            c_str = str(c).strip().lower()
-                            if any(k in c_str for k in ['成分', '持股', '名稱', '股票', 'holding', 'stock', 'name', 'item']) and not any(k in c_str for k in ['etf', '比例', '比重', 'weight', '%']):
-                                if name_col is None: name_col = c
-                            if any(k in c_str for k in ['比例', '比重', '權重', 'weight', '%', 'pct', 'percent', 'ratio']):
-                                weight_col = c
-                                
-                        other_cols = [c for c in cols if c != etf_col]
-                        if not name_col and len(other_cols) >= 1: name_col = other_cols[0]
-                        if not weight_col and len(other_cols) >= 2: weight_col = other_cols[-1]
+                        plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
                         
-                        if name_col and weight_col and name_col != weight_col:
-                            try:
-                                plot_df = df_show.copy()
-                                plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace('%', '', regex=False).str.replace(',', '', regex=False).str.strip()
-                                plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
-                                plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
-                                
-                                if not plot_df.empty:
-                                    fig_etf = px.bar(plot_df, x=weight_col, y=name_col, orientation='h', 
-                                                     title=f"<b>{selected_etf} 核心持股佔比 (%)</b>", text_auto='.2f')
-                                    fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450, margin=dict(l=10, r=10, t=40, b=10))
-                                    st.plotly_chart(fig_etf, use_container_width=True)
-                                else:
-                                    st.info("該 ETF 之持股比例數據解析後為空。")
-                            except Exception as ex:
-                                st.warning(f"無法繪製持股比例圖表：{ex}")
+                        if not plot_df.empty:
+                            fig_etf = px.bar(plot_df, x=weight_col, y=name_col, orientation='h', 
+                                             title=f"<b>{selected_etf} 核心持股佔比 (%)</b>", text_auto='.2f')
+                            fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450, margin=dict(l=10, r=10, t=40, b=10))
+                            st.plotly_chart(fig_etf, use_container_width=True)
                         else:
-                            st.info("未自動識別出持股名稱與比例欄位。")
+                            st.info("無有效的權重數值可供繪圖。")
+                    except Exception as ex:
+                        st.warning(f"無法繪製持股比例圖表：{ex}")
 
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
@@ -1029,7 +999,7 @@ with st.sidebar:
         if st.button("💾 儲存美股變更"):
             with st.spinner("正在寫入美股資料..."):
                 try:
-                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    conn.update(worksheet="US_Portfolio", data=edited_us)
                     st.success("✅ 美股更新成功！請重新整理網頁。")
                 except Exception as e: st.error(f"寫入失敗：{e}")
     else: st.info("美股清單目前為空。")
