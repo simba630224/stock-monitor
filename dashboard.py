@@ -854,37 +854,50 @@ with tab3:
             )
 
 # ==========================================
-# 🔥 新增：ETF 持股分析分頁 (修正對齊版)
+# 🔥 新增：ETF 持股分析分頁 (強力除錯版)
 # ==========================================
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
     st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
     
     try:
-        # 直接實時讀取，繞過 cache 以防止空表鎖死
+        # 直接實時讀取，繞過快取以防止遇到一次網路波動就被鎖死為空表
         df_etf_db = conn.read(worksheet="ETF_Holdings_DB", ttl=0)
+        read_success = True
+        err_msg = ""
     except Exception as e:
         df_etf_db = pd.DataFrame()
-        
-    if df_etf_db is None or df_etf_db.empty:
-        st.info("💡 尚未偵測到 `ETF_Holdings_DB` 工作表，或表格內尚無資料。請確認您的爬蟲程式已成功將資料寫入 Google Sheets。")
+        read_success = False
+        err_msg = str(e)
+
+    if not read_success:
+        st.error(f"❌ **無法連線讀取 `ETF_Holdings_DB` 工作表！**\n系統回報錯誤訊息：`{err_msg}`")
+        st.info("💡 **常見原因與解法**：\n1. **名稱有空格**：請點擊 Google Sheets 下方的工作表標籤，確認名稱完全是 `ETF_Holdings_DB`，前後不可以有多餘的空白。\n2. **網址綁定問題**：若您的 `secrets.toml` 中 `spreadsheet` 網址含有 `gid=...`，請將其刪除，只保留到 `.../edit` 之前。否則 Streamlit API 會被鎖死在預設的第一個分頁，無法跨分頁讀取！")
+    elif df_etf_db is None or df_etf_db.empty:
+        st.warning("⚠️ 成功連線到 `ETF_Holdings_DB`，但系統讀取到的資料是空的。請確認爬蟲已成功寫入資料。")
     else:
-        # 清除完全空白的行列
-        df_etf_db = df_etf_db.dropna(how='all').dropna(how='all', axis=1)
+        # 清除完全空白的列
+        df_etf_db = df_etf_db.dropna(how='all')
         
+        # 展開一個除錯視窗，讓您與系統可以同時看見「到底讀到了什麼」
+        with st.expander("🛠️ 展開查看原始讀取資料 (除錯用)", expanded=False):
+            st.write(f"資料維度：{df_etf_db.shape}")
+            st.dataframe(df_etf_db.head())
+
+        # 只要欄位數大於等於 3，我們就強制採用絕對位置 (第1、2、3欄) 對齊，無視標頭叫什麼名字
         if len(df_etf_db.columns) < 3:
-            st.warning(f"⚠️ 讀取到的欄位不足。目前偵測到的欄位為：{list(df_etf_db.columns)}")
+            st.error(f"⚠️ 讀取成功，但欄位數量異常！預期至少 3 欄 (代號/名稱/權重)，但只讀取到 {len(df_etf_db.columns)} 欄。請展開上方原始資料確認格式。")
         else:
-            # 絕對位置對齊：0=代號, 1=名稱, 2=權重
             etf_col = df_etf_db.columns[0]
             name_col = df_etf_db.columns[1]
             weight_col = df_etf_db.columns[2]
             
             raw_etfs = df_etf_db[etf_col].dropna().astype(str).str.strip().unique().tolist()
-            etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'ticker', 'nan', 'none']]
+            # 濾除所有可能被誤判為資料的標頭文字
+            etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'ticker', 'nan', 'none'] and '代號' not in x]
             
             if not etf_options:
-                st.warning("工作表中未讀取到有效的 ETF 代號。")
+                st.warning("⚠️ 工作表中未能解析出有效的 ETF 代號！請展開上方原始資料確認第一欄的內容。")
             else:
                 col_etf1, col_etf2 = st.columns([1, 2])
                 
@@ -900,7 +913,7 @@ with tab_etf:
                     with col_etf2:
                         try:
                             plot_df = df_show.copy()
-                            # 將文字替換為純數字，無視(%)符號干擾
+                            # 暴力清洗權重欄位：移除 % 符號、逗點與空白
                             plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace('%', '', regex=False).str.replace(',', '', regex=False).str.strip()
                             plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                             
@@ -912,9 +925,9 @@ with tab_etf:
                                 fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450, margin=dict(l=10, r=10, t=40, b=10))
                                 st.plotly_chart(fig_etf, use_container_width=True)
                             else:
-                                st.info("該 ETF 無有效的權重數值可供繪圖。")
+                                st.info("該 ETF 無效的權重數值可供繪製圖表。")
                         except Exception as ex:
-                            st.warning(f"無法繪製持股比例圖表：{ex}")
+                            st.warning(f"無法繪製持股比例圖表，錯誤代碼：{ex}")
 
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
