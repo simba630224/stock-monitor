@@ -7,3 +7,6 @@ requests
 matplotlib
 mplfinance
 st-gsheets-connection
+gspread
+oauth2client
+beautifulsoup4
