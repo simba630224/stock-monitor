@@ -12,7 +12,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 # 1. 設定與環境變數
 # ==========================================
 # 請將這裡換成您實際的 Google Sheets 網址
-PORTFOLIO_SHEET_URL = "streamlit-bot@portfolio-dashboard-498512.iam.gserviceaccount.com"
+PORTFOLIO_SHEET_URL = "https://docs.google.com/spreadsheets/d/16EgWvmGUPfOrDKGiefWCovNQNYf-E4RAVDGu7zx1BI4/edit?gid=0#gid=0"
 HOLDINGS_SHEET_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/edit?gid=0#gid=0"
 
 # Google Sheets API 授權
