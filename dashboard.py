@@ -68,6 +68,13 @@ except Exception as e:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
+# --- 讀取 ETF 持股資料庫 ---
+try:
+    df_etf_db = conn.read(worksheet="ETF_Holdings_DB", ttl=3600)
+    df_etf_db = df_etf_db.dropna(how='all')
+except Exception:
+    df_etf_db = pd.DataFrame()
+
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith('.TW') or ticker.endswith('.TWO'): return ticker
@@ -412,7 +419,7 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-tab1, tab2, tab_comp, tab3, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🆚 標的比較", "🏆 績效與股息追蹤", "📖 每日看盤心得"])
+tab1, tab2, tab_comp, tab3, tab_etf, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🆚 標的比較", "🏆 績效與股息追蹤", "🧩 ETF持股", "📖 每日看盤心得"])
 
 with tab1:
     with st.spinner("正在同步即時報價資料..."):
@@ -485,9 +492,8 @@ with tab1:
     try:
         df_history = conn.read(worksheet="Value_History", ttl=0)
         if df_history is not None and 'Date' in df_history.columns and not df_history.empty:
-            df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce')
+            df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
             df_history = df_history.dropna(subset=['Date'])
-            df_history['Date'] = df_history['Date'].dt.strftime('%Y-%m-%d')
             
             today_str = datetime.now().strftime('%Y-%m-%d')
             now_time = datetime.now().strftime('%H:%M:%S')
@@ -793,7 +799,6 @@ with tab_comp:
                     try:
                         hist = yf.Ticker(sym).history(period=yf_period)
                         if not hist.empty:
-                            # 嚴格切齊時間軸至午夜零點，防止跨時區導致 IndexError 空值崩潰
                             hist.index = pd.to_datetime(hist.index).normalize()
                             hist = hist[~hist.index.duplicated(keep='last')]
                             comp_data[tgt] = hist['Close']
@@ -801,7 +806,6 @@ with tab_comp:
                 
                 if comp_data:
                     df_comp = pd.DataFrame(comp_data)
-                    # 避免版本棄用警告，改用 .ffill()
                     df_comp = df_comp.ffill().bfill().dropna()
                     if not df_comp.empty:
                         df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
@@ -841,7 +845,6 @@ with tab3:
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "代號": st.column_config.TextColumn("代號", width="small"),
                     "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                    # 避免 Streamlit API 格式崩潰，將百分比移至標題
                     "近一季報酬": st.column_config.NumberColumn("近一季報酬 (%)", format="%+.2f"),
                     "近半年報酬": st.column_config.NumberColumn("近半年報酬 (%)", format="%+.2f"),
                     "近一年報酬": st.column_config.NumberColumn("近一年報酬 (%)", format="%+.2f"),
@@ -857,6 +860,52 @@ with tab3:
                 hide_index=True, height=600
             )
 
+# ==========================================
+# 🔥 新增：ETF 持股分析分頁
+# ==========================================
+with tab_etf:
+    st.subheader("🧩 ETF Top 10 持股分析")
+    st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
+    
+    if df_etf_db.empty:
+        st.info("💡 尚未偵測到 `ETF_Holdings_DB` 工作表，或表格內無資料。請確認您的爬蟲程式已成功將資料寫入 Google Sheets 即可啟用此功能。")
+    else:
+        col_etf1, col_etf2 = st.columns([1, 2])
+        etf_options = df_etf_db.iloc[:, 0].dropna().unique().tolist()
+        
+        with col_etf1:
+            selected_etf = st.selectbox("👉 請選擇要查詢持股比例的 ETF：", options=etf_options)
+            if selected_etf:
+                df_show = df_etf_db[df_etf_db.iloc[:, 0] == selected_etf].copy()
+                st.dataframe(df_show, hide_index=True, use_container_width=True)
+        
+        with col_etf2:
+            if selected_etf and not df_show.empty:
+                cols = df_show.columns
+                name_col, weight_col = None, None
+                
+                # 自動化偵測欄位名稱 (對齊爬蟲常見命名)
+                for c in cols:
+                    if any(k in str(c) for k in ['名稱', '成分股', 'Name', '股票']): name_col = c
+                    if any(k in str(c) for k in ['比例', '權重', 'Weight', '%']): weight_col = c
+                
+                # 若偵測不到則取預設位置
+                if not name_col and len(cols) > 2: name_col = cols[2]
+                if not weight_col and len(cols) > 3: weight_col = cols[3]
+                
+                if name_col and weight_col:
+                    try:
+                        # 處理字串轉為數字以利繪圖
+                        df_show[weight_col] = pd.to_numeric(df_show[weight_col].astype(str).str.replace('%', '', regex=False), errors='coerce')
+                        df_plot = df_show.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
+                        
+                        fig_etf = px.bar(df_plot, x=weight_col, y=name_col, orientation='h', 
+                                         title=f"<b>{selected_etf} 核心持股佔比</b>", text_auto='.2f')
+                        fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450)
+                        st.plotly_chart(fig_etf, use_container_width=True)
+                    except:
+                        st.warning("無法解析持股比例數值以繪製圖表。")
+
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
     journal_error = False
@@ -864,9 +913,8 @@ with tab4:
         df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
         
         if df_journal is not None and 'Date' in df_journal.columns and not df_journal.empty:
-            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce')
+            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
             df_journal = df_journal.dropna(subset=['Date'])
-            df_journal['Date'] = df_journal['Date'].dt.strftime('%Y-%m-%d')
             
             if len(df_journal) < 1:
                 st.warning("⚠️ 系統偵測到看盤心得無歷史資料，已啟動防寫保護。請手動輸入第一筆紀錄以解鎖。")
