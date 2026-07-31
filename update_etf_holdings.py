@@ -12,8 +12,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 # 1. 設定與環境變數
 # ==========================================
 # 請將這裡換成您實際的 Google Sheets 網址
-PORTFOLIO_SHEET_URL = "您的_Portfolio_streamlit_網址"
-HOLDINGS_SHEET_URL = "您的_ETF_Holdings_DB_網址"
+PORTFOLIO_SHEET_URL = "https://docs.google.com/spreadsheets/d/16EgWvmGUPfOrDKGiefWCovNQNYf-E4RAVDGu7zx1BI4/edit?gid=0#gid=0"
+HOLDINGS_SHEET_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/edit?gid=1970038349#gid=1970038349"
 
 # Google Sheets API 授權
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
