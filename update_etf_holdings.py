@@ -41,7 +41,7 @@ def pad_tw_ticker(ticker):
     return t
 
 def get_us_etf_holdings(ticker):
-    """海外 ETF 爬蟲"""
+    """海外 ETF 爬蟲 (YFinance)"""
     print(f"🔍 正在檢查海外標的: {ticker}")
     try:
         etf = yf.Ticker(ticker)
@@ -51,7 +51,7 @@ def get_us_etf_holdings(ticker):
             source_len = len(funds_data.top_holdings)
             print(f"ℹ️ [資料源] yfinance 實際提供 {source_len} 筆")
             
-            holdings = funds_data.top_holdings.head(20)
+            holdings = funds_data.top_holdings.head(20) # 擴大至 20 筆
             result = []
             for symbol, row in holdings.iterrows():
                 weight = row.get('Holding Percent', 0)
@@ -70,102 +70,131 @@ def get_us_etf_holdings(ticker):
     return []
 
 def get_tw_etf_holdings(raw_ticker):
-    """台股 ETF 爬蟲 (三引擎 + 暴力盲搜版)"""
+    """台股 ETF 爬蟲 (CMoney -> MoneyDJ -> Yahoo)"""
     clean_ticker = pad_tw_ticker(raw_ticker)
     print(f"🔍 正在抓取台股 ETF: {clean_ticker}")
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     }
     
-    # 雙後綴自動切換：解決 009815 等上櫃商品查無資料的問題
-    suffixes = ['.TW', '.TWO']
-    
-    for suffix in suffixes:
-        full_ticker = f"{clean_ticker}{suffix}"
-        result = []
+    result = []
 
-        # ==================================
-        # 引擎 1：MoneyDJ (模糊標題辨識)
-        # ==================================
-        try:
-            url_mdj = f"https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid={full_ticker}"
-            res = requests.get(url_mdj, headers=headers, timeout=10)
-            res.encoding = 'utf-8'
-            soup = BeautifulSoup(res.text, 'html.parser')
+    # ==================================
+    # 引擎 1：CMoney (主力，可突破 Top 10)
+    # ==================================
+    try:
+        url_c = f"https://www.cmoney.tw/etf/tw/{clean_ticker}/fundholding"
+        res_c = requests.get(url_c, headers=headers, timeout=10)
+        soup_c = BeautifulSoup(res_c.text, 'html.parser')
+        
+        tables = soup_c.find_all('table')
+        for tbl in tables:
+            header_row = tbl.find('tr')
+            if not header_row: continue
             
-            tables = soup.find_all('table')
-            for tbl in tables:
-                header_row = tbl.find('tr')
-                if not header_row: continue
-                
-                th_cells = header_row.find_all(['th', 'td'])
-                h_text = [c.text.strip().replace(' ', '') for c in th_cells]
-                
-                name_idx, weight_idx = -1, -1
-                
-                # 放寬海外 ETF 標題關鍵字
-                for i, h in enumerate(h_text):
-                    if any(k in h for k in ['名稱', '股票', '標的']):
-                        if name_idx == -1: name_idx = i
-                    if any(k in h for k in ['權重', '比例', '持股', '比重', '佔比', '%']):
-                        if weight_idx == -1: weight_idx = i
-                        
-                if name_idx != -1 and weight_idx != -1:
-                    for row in tbl.find_all('tr')[1:]:
-                        cols = row.find_all(['td', 'th'])
-                        if len(cols) > max(name_idx, weight_idx):
-                            name = cols[name_idx].text.strip()
-                            weight_str = cols[weight_idx].text.replace('%', '').replace(',', '').strip()
-                            try:
-                                weight = float(weight_str)
-                                if 0 < weight <= 100 and name and '名稱' not in name:
-                                    result.append({"ETF代號": clean_ticker, "成分股名稱": name, "權重(%)": weight})
-                            except ValueError:
-                                continue
-                    break 
+            h_text = [c.text.strip().replace(' ', '') for c in header_row.find_all(['th', 'td'])]
+            name_idx, weight_idx = -1, -1
+            
+            for i, h in enumerate(h_text):
+                if any(k in h for k in ['名稱', '股票', '標的']): name_idx = i
+                if any(k in h for k in ['權重', '比例', '比重', '佔比', '%']): weight_idx = i
                     
-            if len(result) > 0:
-                print(f"ℹ️ [資料源] MoneyDJ 實際提供 {len(result)} 筆")
-                result = sorted(result, key=lambda x: x['權重(%)'], reverse=True)[:20]
-                print(f"✅ [來源: MoneyDJ] 成功抓取 {full_ticker}，共 {len(result)} 檔入庫")
-                time.sleep(1)
-                return result
-        except Exception:
-            pass
+            if name_idx != -1 and weight_idx != -1:
+                for row in tbl.find_all('tr')[1:]:
+                    cols = row.find_all(['td', 'th'])
+                    if len(cols) > max(name_idx, weight_idx):
+                        name = cols[name_idx].text.strip()
+                        weight_str = cols[weight_idx].text.replace('%', '').replace(',', '').strip()
+                        try:
+                            weight = float(weight_str)
+                            if 0 < weight <= 100 and name:
+                                result.append({"ETF代號": clean_ticker, "成分股名稱": name, "權重(%)": weight})
+                        except ValueError:
+                            continue
+                break 
+                
+        if len(result) > 0:
+            print(f"ℹ️ [資料源] CMoney 實際提供 {len(result)} 筆")
+            result = sorted(result, key=lambda x: x['權重(%)'], reverse=True)[:20]
+            print(f"✅ [來源: CMoney] 成功抓取 {clean_ticker}，共 {len(result)} 檔入庫")
+            time.sleep(1)
+            return result
+    except Exception as e:
+        pass
 
-        # ==================================
-        # 引擎 2：Yahoo 股市 (DOM 暴力破解)
-        # ==================================
-        try:
-            url_yahoo = f"https://tw.stock.yahoo.com/quote/{full_ticker}/holding"
-            res = requests.get(url_yahoo, headers=headers, timeout=10)
-            soup = BeautifulSoup(res.text, 'html.parser')
+    # ==================================
+    # 引擎 2：MoneyDJ (強制綁定 .TW)
+    # ==================================
+    try:
+        # 依照您的觀察，MoneyDJ 無論上市櫃一律使用 .TW
+        url_mdj = f"https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid={clean_ticker}.TW"
+        res_mdj = requests.get(url_mdj, headers=headers, timeout=10)
+        res_mdj.encoding = 'utf-8'
+        soup_mdj = BeautifulSoup(res_mdj.text, 'html.parser')
+        
+        tables = soup_mdj.find_all('table')
+        for tbl in tables:
+            header_row = tbl.find('tr')
+            if not header_row: continue
             
-            # 不再依賴特定父標籤，直接掃描全域的所有列表物件
-            list_items = soup.find_all('li')
+            h_text = [c.text.strip().replace(' ', '') for c in header_row.find_all(['th', 'td'])]
+            name_idx, weight_idx = -1, -1
+            
+            for i, h in enumerate(h_text):
+                if any(k in h for k in ['名稱', '股票', '標的']): name_idx = i
+                if any(k in h for k in ['權重', '比例', '比重', '佔比', '%']): weight_idx = i
+                    
+            if name_idx != -1 and weight_idx != -1:
+                for row in tbl.find_all('tr')[1:]:
+                    cols = row.find_all(['td', 'th'])
+                    if len(cols) > max(name_idx, weight_idx):
+                        name = cols[name_idx].text.strip()
+                        weight_str = cols[weight_idx].text.replace('%', '').replace(',', '').strip()
+                        try:
+                            weight = float(weight_str)
+                            if 0 < weight <= 100 and name and '名稱' not in name:
+                                result.append({"ETF代號": clean_ticker, "成分股名稱": name, "權重(%)": weight})
+                        except ValueError:
+                            continue
+                break 
+                
+        if len(result) > 0:
+            print(f"ℹ️ [資料源] MoneyDJ 實際提供 {len(result)} 筆")
+            result = sorted(result, key=lambda x: x['權重(%)'], reverse=True)[:20]
+            print(f"✅ [來源: MoneyDJ] 成功抓取 {clean_ticker}，共 {len(result)} 檔入庫")
+            time.sleep(1)
+            return result
+    except Exception:
+        pass
+
+    # ==================================
+    # 引擎 3：Yahoo 股市 (備援，嘗試雙後綴)
+    # ==================================
+    for suffix in ['.TW', '.TWO']:
+        try:
+            url_yahoo = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
+            res_y = requests.get(url_yahoo, headers=headers, timeout=10)
+            soup_y = BeautifulSoup(res_y.text, 'html.parser')
+            
+            list_items = soup_y.find_all('li')
             for item in list_items:
                 divs = item.find_all('div')
                 if len(divs) >= 2:
                     name = divs[0].text.strip()
-                    
-                    # 濾除雜訊
                     if not name or name in ['持股名稱', '股票名稱', '標的'] or len(name) > 20:
                         continue
                     
-                    # 盲搜帶有 % 的區塊
                     for d in divs[1:]:
                         txt = d.text.strip()
                         if '%' in txt and len(txt) < 15:
                             try:
                                 weight = float(txt.replace('%', '').replace(',', ''))
                                 if 0 < weight <= 100:
-                                     result.append({
-                                        "ETF代號": clean_ticker,
-                                        "成分股名稱": name.split(' ')[0], 
-                                        "權重(%)": weight
-                                    })
-                                     break # 找到權重就換下一個持股
+                                     result.append({"ETF代號": clean_ticker, "成分股名稱": name.split(' ')[0], "權重(%)": weight})
+                                     break 
                             except ValueError:
                                 pass
 
@@ -173,33 +202,13 @@ def get_tw_etf_holdings(raw_ticker):
                 unique_result = list({v['成分股名稱']:v for v in result}.values())
                 print(f"ℹ️ [資料源] Yahoo 網頁實際顯示 {len(unique_result)} 筆")
                 result = sorted(unique_result, key=lambda x: x['權重(%)'], reverse=True)[:20]
-                print(f"✅ [來源: Yahoo] 成功抓取 {full_ticker}，共 {len(result)} 檔入庫")
+                print(f"✅ [來源: Yahoo] 成功抓取 {clean_ticker}，共 {len(result)} 檔入庫")
                 time.sleep(1)
                 return result
         except Exception:
             pass
             
-        # ==================================
-        # 引擎 3：YFinance API 隱藏備援
-        # ==================================
-        try:
-            etf = yf.Ticker(full_ticker)
-            fd = etf.get_funds_data()
-            if fd and fd.top_holdings is not None and not fd.top_holdings.empty:
-                holdings = fd.top_holdings.head(20)
-                for symbol, row in holdings.iterrows():
-                    weight = row.get('Holding Percent', 0)
-                    if pd.notna(weight) and weight > 0:
-                        result.append({"ETF代號": clean_ticker, "成分股名稱": row.get('Name', symbol), "權重(%)": round(weight * 100, 2)})
-                
-                if len(result) > 0:
-                    print(f"✅ [來源: YFinance] 成功抓取 {full_ticker}，共 {len(result)} 檔入庫")
-                    return result
-        except Exception:
-            pass
-            
-    # 若三大引擎 + 雙市場字尾 (共 6 種組合) 都宣告失敗
-    print(f"⚠️ ℹ️ [資料空窗期] {clean_ticker} 為近期掛牌或連結型 ETF，各大平台皆暫未更新明細。")
+    print(f"⚠️ {clean_ticker} 各大網站無提供明細 (可能為剛上市之新股，或連結型基金)。")
     time.sleep(1)
     return []
 
@@ -207,7 +216,7 @@ def get_tw_etf_holdings(raw_ticker):
 # 3. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (三引擎全面優化版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (CMoney 突破 Top10 版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
@@ -219,20 +228,16 @@ def main():
 
     all_holdings = []
 
-    # 處理台股
     for row in tw_records:
         raw_ticker = str(row.get('Ticker', '')).strip().upper()
         if not raw_ticker: continue
         clean_ticker = pad_tw_ticker(raw_ticker)
         
-        if clean_ticker.startswith('00'):
-            if clean_ticker.endswith('B'):
-                continue
+        if clean_ticker.startswith('00') and not clean_ticker.endswith('B'):
             holdings = get_tw_etf_holdings(clean_ticker)
             if holdings:
                 all_holdings.extend(holdings)
 
-    # 處理美股
     for row in us_records:
         ticker = str(row.get('Ticker', '')).strip().upper()
         if not ticker: continue
