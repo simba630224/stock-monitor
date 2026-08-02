@@ -31,7 +31,7 @@ client = gspread.authorize(creds)
 # ==========================================
 
 def pad_tw_ticker(ticker):
-    """將 '50' 轉回 '0050'，'981A' 轉回 '00981A'"""
+    """將 '50' 轉回 '0050'"""
     t = str(ticker).strip().upper().replace('.TW', '').replace('.TWO', '')
     if t.isdigit():
         if len(t) == 2: return "00" + t  
@@ -48,7 +48,10 @@ def get_us_etf_holdings(ticker):
         funds_data = etf.get_funds_data()
         
         if funds_data and funds_data.top_holdings is not None and not funds_data.top_holdings.empty:
-            # 確保抓取 Top 20
+            source_len = len(funds_data.top_holdings)
+            print(f"ℹ️ [資料源限制] yfinance API 實際提供 {source_len} 筆資料")
+            
+            # 確保抓取 Top 20 (若來源少於20則全拿)
             holdings = funds_data.top_holdings.head(20)
             result = []
             for symbol, row in holdings.iterrows():
@@ -60,7 +63,7 @@ def get_us_etf_holdings(ticker):
                     "成分股名稱": row.get('Name', symbol),
                     "權重(%)": round(weight * 100, 2)
                 })
-            print(f"✅ 成功抓取海外 ETF: {ticker}，共 {len(result)} 檔成分股")
+            print(f"✅ 成功抓取海外 ETF: {ticker}，共 {len(result)} 檔成分股入庫")
             return result
         else:
             print(f"⚠️ {ticker} 系統無提供成分股明細。")
@@ -78,7 +81,6 @@ def get_tw_etf_holdings(raw_ticker):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # 雙後綴機制：自動嘗試上市 (.TW) 與上櫃 (.TWO) 以防止 009815 等上櫃 ETF 漏抓
     suffixes = ['.TW', '.TWO']
     
     for suffix in suffixes:
@@ -112,7 +114,6 @@ def get_tw_etf_holdings(raw_ticker):
                     data_rows = tbl.find_all('tr')[1:]
                     for row in data_rows:
                         cols = row.find_all(['td', 'th'])
-                        
                         if len(cols) > max(name_idx, weight_idx):
                             name = cols[name_idx].text.strip()
                             weight_str = cols[weight_idx].text.replace('%', '').replace(',', '').strip()
@@ -130,9 +131,9 @@ def get_tw_etf_holdings(raw_ticker):
                     break 
                     
             if len(result) > 0:
-                # 擴大並限制至 Top 20
+                print(f"ℹ️ [資料源限制] MoneyDJ 網頁實際提供 {len(result)} 筆資料")
                 result = sorted(result, key=lambda x: x['權重(%)'], reverse=True)[:20]
-                print(f"✅ [來源: MoneyDJ] 成功抓取 {full_ticker}，共 {len(result)} 檔成分股")
+                print(f"✅ [來源: MoneyDJ] 成功抓取 {full_ticker}，共 {len(result)} 檔成分股入庫")
                 time.sleep(1)
                 return result
         except Exception as e:
@@ -166,16 +167,15 @@ def get_tw_etf_holdings(raw_ticker):
                                 pass
 
             if len(result) > 0:
-                unique_result = {v['成分股名稱']:v for v in result}.values()
-                # 擴大並限制至 Top 20
-                result = sorted(list(unique_result), key=lambda x: x['權重(%)'], reverse=True)[:20]
-                print(f"✅ [來源: Yahoo] 成功抓取 {full_ticker}，共 {len(result)} 檔成分股")
+                unique_result = list({v['成分股名稱']:v for v in result}.values())
+                print(f"ℹ️ [資料源限制] Yahoo 靜態網頁實際僅顯示 {len(unique_result)} 筆資料")
+                result = sorted(unique_result, key=lambda x: x['權重(%)'], reverse=True)[:20]
+                print(f"✅ [來源: Yahoo] 成功抓取 {full_ticker}，共 {len(result)} 檔成分股入庫")
                 time.sleep(1)
                 return result
         except Exception as e:
             pass
             
-    # 如果 .TW 和 .TWO 都抓不到
     print(f"⚠️ {clean_ticker} 網站無提供成分股明細 (可能為剛上市無資料之新股)。")
     time.sleep(1)
     return []
@@ -184,7 +184,7 @@ def get_tw_etf_holdings(raw_ticker):
 # 3. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (擴大抓取 Top20 版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (透明度升級版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
@@ -226,14 +226,12 @@ def main():
     df_holdings.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_holdings = df_holdings.fillna(0)
     
-    # 取得當前台灣時間的年月
     tz_tw = timezone(timedelta(hours=8))
     current_date = datetime.now(tz_tw)
     sheet_title = current_date.strftime("%Y_%m_Top20") 
     
     try:
         db_sheet = client.open_by_url(HOLDINGS_SHEET_URL)
-        
         try:
             ws = db_sheet.worksheet(sheet_title)
             print(f"📝 找到當月工作表 {sheet_title}，準備更新資料...")
