@@ -9,13 +9,15 @@ import re
 from datetime import datetime
 import warnings
 import time
-import traceback
 from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
+# ==========================================
+# 0. 輔助函式：強力防呆安全轉換與均線位階
+# ==========================================
 def safe_float(val):
     try:
         if isinstance(val, str):
@@ -323,11 +325,27 @@ def process_technical_analysis(sym, name, market):
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
         is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
 
-        ma20_up_3d = False
-        ma_s_up_3d = False
-        if len(df) >= 4 and pd.notna(df['季線'].iloc[-4]):
-            ma20_up_3d = (df['MA20'].iloc[-1] > df['MA20'].iloc[-2]) and (df['MA20'].iloc[-2] > df['MA20'].iloc[-3]) and (df['MA20'].iloc[-3] > df['MA20'].iloc[-4])
-            ma_s_up_3d = (df['季線'].iloc[-1] > df['季線'].iloc[-2]) and (df['季線'].iloc[-2] > df['季線'].iloc[-3]) and (df['季線'].iloc[-3] > df['季線'].iloc[-4])
+        # 🚀 新增與修訂：判斷月/季線連續上/下彎 >= 5日，以及站上/跌破 >= 5日
+        ma20_up_5d = False
+        ma_s_up_5d = False
+        ma20_dn_5d = False
+        ma_s_dn_5d = False
+        above_ma20_5d = False
+        below_ma20_5d = False
+        above_mas_5d = False
+        below_mas_5d = False
+
+        if len(df) >= 6 and pd.notna(df['季線'].iloc[-6]):
+            ma20_up_5d = all(df['MA20'].iloc[i] > df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
+            ma_s_up_5d = all(df['季線'].iloc[i] > df['季線'].iloc[i-1] for i in range(-1, -6, -1))
+            
+            ma20_dn_5d = all(df['MA20'].iloc[i] < df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
+            ma_s_dn_5d = all(df['季線'].iloc[i] < df['季線'].iloc[i-1] for i in range(-1, -6, -1))
+            
+            above_ma20_5d = all(df['Close'].iloc[i] > df['MA20'].iloc[i] for i in range(-5, 0))
+            below_ma20_5d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-5, 0))
+            above_mas_5d = all(df['Close'].iloc[i] > df['季線'].iloc[i] for i in range(-5, 0))
+            below_mas_5d = all(df['Close'].iloc[i] < df['季線'].iloc[i] for i in range(-5, 0))
         
         high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
         low_52w = df['Low'].tail(252).min() if 'Low' in df.columns else 0.0
@@ -365,9 +383,22 @@ def process_technical_analysis(sym, name, market):
         
         alerts = []
         if is_break_ma: alerts.append("跌破月/季線")
-        if ma20_up_3d and ma_s_up_3d: alerts.append("月/季線上彎≥3日")
-        elif ma20_up_3d: alerts.append("月線上彎≥3日")
-        elif ma_s_up_3d: alerts.append("季線上彎≥3日")
+        
+        if ma20_up_5d and ma_s_up_5d: alerts.append("月/季線上彎≥5日")
+        elif ma20_up_5d: alerts.append("月線上彎≥5日")
+        elif ma_s_up_5d: alerts.append("季線上彎≥5日")
+        
+        if ma20_dn_5d and ma_s_dn_5d: alerts.append("月/季線下彎≥5日")
+        elif ma20_dn_5d: alerts.append("月線下彎≥5日")
+        elif ma_s_dn_5d: alerts.append("季線下彎≥5日")
+        
+        if above_ma20_5d and above_mas_5d: alerts.append("站上月/季線≥5日")
+        elif above_ma20_5d: alerts.append("站上月線≥5日")
+        elif above_mas_5d: alerts.append("站上季線≥5日")
+        
+        if below_ma20_5d and below_mas_5d: alerts.append("跌破月/季線≥5日")
+        elif below_ma20_5d: alerts.append("跌破月線≥5日")
+        elif below_mas_5d: alerts.append("跌破季線≥5日")
         
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15:
             alerts.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
@@ -404,7 +435,10 @@ def process_technical_analysis(sym, name, market):
             "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
             "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma,
             "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status,
-            "_ma20_up_3d": ma20_up_3d, "_ma_s_up_3d": ma_s_up_3d
+            "_ma20_up_5d": ma20_up_5d, "_ma_s_up_5d": ma_s_up_5d,
+            "_ma20_dn_5d": ma20_dn_5d, "_ma_s_dn_5d": ma_s_dn_5d,
+            "_above_ma20_5d": above_ma20_5d, "_below_ma20_5d": below_ma20_5d,
+            "_above_mas_5d": above_mas_5d, "_below_mas_5d": below_mas_5d
         }
     except Exception as e: return None
 
@@ -489,9 +523,6 @@ with tab1:
     col3.metric("近一年累計股息 (TWD)", f"${total_dividends_1y:,.0f}")
     col4.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
 
-    # ==========================================
-    # 📉 總市值歷史寫入防呆機制
-    # ==========================================
     history_error = False
     df_history_to_display = pd.DataFrame()
     try:
@@ -500,7 +531,6 @@ with tab1:
             df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
             df_history = df_history.dropna(subset=['Date'])
             
-            # 強制清洗 Total_Value，防止手動編輯的字串或逗號引發 Plotly 繪圖格式崩潰
             if 'Total_Value' in df_history.columns:
                 df_history['Total_Value'] = pd.to_numeric(
                     df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), 
@@ -642,8 +672,14 @@ with tab2:
                 d_kd_death = "🔴 KD高檔死叉" in kd_d
                 
                 is_break = res.get('_is_break_ma', False)
-                ma20_up = res.get('_ma20_up_3d', False)
-                ma_s_up = res.get('_ma_s_up_3d', False)
+                ma20_up_5d = res.get('_ma20_up_5d', False)
+                ma_s_up_5d = res.get('_ma_s_up_5d', False)
+                ma20_dn_5d = res.get('_ma20_dn_5d', False)
+                ma_s_dn_5d = res.get('_ma_s_dn_5d', False)
+                above_ma20_5d = res.get('_above_ma20_5d', False)
+                below_ma20_5d = res.get('_below_ma20_5d', False)
+                above_mas_5d = res.get('_above_mas_5d', False)
+                below_mas_5d = res.get('_below_mas_5d', False)
 
                 tags = []
                 if w_macd_gold: tags.append("週MACD零下金叉")
@@ -651,18 +687,31 @@ with tab2:
                 if d_macd_gold: tags.append("日MACD零下金叉")
                 if d_kd_gold: tags.append("日KD低檔金叉")
                 
-                if ma20_up and ma_s_up: tags.append("月季線雙上彎")
-                elif ma20_up: tags.append("月線上彎")
-                elif ma_s_up: tags.append("季線上彎")
+                if ma20_up_5d and ma_s_up_5d: tags.append("月季線雙上彎≥5日")
+                elif ma20_up_5d: tags.append("月線上彎≥5日")
+                elif ma_s_up_5d: tags.append("季線上彎≥5日")
+                
+                if above_ma20_5d and above_mas_5d: tags.append("站上月季線≥5日")
+                elif above_ma20_5d: tags.append("站上月線≥5日")
+                elif above_mas_5d: tags.append("站上季線≥5日")
                 
                 if w_macd_death: tags.append("週MACD零上死叉")
                 if w_kd_death: tags.append("週KD高檔死叉")
                 if d_macd_death: tags.append("日MACD零上死叉")
                 if d_kd_death: tags.append("日KD高檔死叉")
+                
                 if is_break: tags.append("跌破季線")
+                
+                if ma20_dn_5d and ma_s_dn_5d: tags.append("月季線雙下彎≥5日")
+                elif ma20_dn_5d: tags.append("月線下彎≥5日")
+                elif ma_s_dn_5d: tags.append("季線下彎≥5日")
+                
+                if below_ma20_5d and below_mas_5d: tags.append("跌破月季線≥5日")
+                elif below_ma20_5d: tags.append("跌破月線≥5日")
+                elif below_mas_5d: tags.append("跌破季線≥5日")
 
-                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up * 1) + (ma_s_up * 1)
-                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1)
+                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up_5d * 1) + (ma_s_up_5d * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1)
+                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn_5d * 1) + (ma_s_dn_5d * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1)
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score}
                 
@@ -713,8 +762,10 @@ with tab2:
 
         #### 三、 均線動能與破線警示 (MA)
         * **跌破月/季線**：今日剛發生實質跌破月線或季線。
-        * **月/季線上彎 ≥ 3日**：月線(MA20)或季線連續三個交易日遞增。
-        * **月季線雙上彎**：同時滿足月線與季線連續上彎 3 日。
+        * **月/季線上彎 ≥ 5日**：月線(MA20)或季線連續 5 個交易日遞增。
+        * **月/季線下彎 ≥ 5日**：月線(MA20)或季線連續 5 個交易日遞減。
+        * **站上月/季線 ≥ 5日**：收盤價連續 5 個交易日維持在該均線之上。
+        * **跌破月/季線 ≥ 5日**：收盤價連續 5 個交易日維持在該均線之下。
 
         #### 四、 價格回落與盤整防禦
         * **近高點回落 XX%**：距過去 52 週最高價跌幅達 15% (含) 以上。
@@ -728,7 +779,7 @@ with tab2:
         
     if ta_results:
         df_ta = pd.DataFrame(ta_results)
-        df_ta = df_ta.drop(columns=['_raw_kd_d', '_raw_kd_w', '_raw_pe', '_is_break_ma', '_raw_macd_d', '_raw_macd_w', '_ma20_up_3d', '_ma_s_up_3d'], errors='ignore')
+        df_ta = df_ta.drop(columns=['_raw_kd_d', '_raw_kd_w', '_raw_pe', '_is_break_ma', '_raw_macd_d', '_raw_macd_w', '_ma20_up_5d', '_ma_s_up_5d', '_ma20_dn_5d', '_ma_s_dn_5d', '_above_ma20_5d', '_below_ma20_5d', '_above_mas_5d', '_below_mas_5d'], errors='ignore')
         st.dataframe(
             df_ta, 
             width="stretch",
@@ -872,15 +923,10 @@ with tab3:
                 hide_index=True, height=600
             )
 
-# ==========================================
-# 🔥 終極修訂版：ETF 匯出直連抓取 (免疫所有權限報錯)
-# ==========================================
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
     st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
     
-    # 放棄容易被擋的 API，直接使用 CSV 匯出網址直連！
-    # 只要您將該試算表設定為「知道連結的人均可檢視」，Pandas 就能秒抓，永不崩潰！
     csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/export?format=csv&gid=892058804"
     
     try:
@@ -893,7 +939,7 @@ with tab_etf:
         err_msg = str(e)
 
     if not read_success:
-        st.error(f"❌ **無法讀取 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
+        st.error(f"❌ **無法讀取外部 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
         st.info("💡 **唯一解決方法**：\n請打開您的 ETF 試算表，點擊右上角的 **「共用 (Share)」**，將一般存取權限改為**「知道連結的人均可檢視 (Anyone with the link)」**。這不會洩漏您的隱私，且能讓程式瞬間讀取！")
     elif df_etf_db is None or df_etf_db.empty:
         st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。請確認爬蟲已成功寫入資料。")
