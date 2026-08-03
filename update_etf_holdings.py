@@ -29,36 +29,31 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. 深度資料清洗與驗證演算法 (解決雜訊問題)
+# 2. 深度資料清洗與 DataFrame 萬用解析
 # ==========================================
 def clean_and_validate_holding(raw_name, raw_weight):
-    """
-    專門過濾 MoneyDJ 混在成分股欄位中的「產業分類」與「資產類別」
-    並清洗名稱上的雜訊 (如 "1.台積電" -> "台積電", "國巨*" -> "國巨")
-    """
+    """過濾產業分類與資產類別，只留下純淨的個股"""
     name = str(raw_name).strip().replace('\n', '').replace('\r', '')
     
-    # 移除開頭的數字排序 (如 "1.", "10.")
+    # 移除開頭的數字 (如 "1.台積電") 與結尾的星號
     name = re.sub(r'^\d+\.', '', name).strip()
-    # 移除結尾的星號 (如 "國巨*")
     name = re.sub(r'\*+$', '', name).strip()
     
-    # 1. 拒絕包含特定字眼的資產分類
+    # 黑名單：拒絕非成分股的分類
     bad_keywords = ['股票', '債券', '現金', '期貨', '選擇權', '基金', '合計', '小計', '總計', '資產', '其他', '行業', '存款', '附買回', '流動準備']
     if not name or any(k in name for k in bad_keywords):
         return None, None
         
-    # 2. 拒絕產業分類 (如 "半導體業", "金融保險")
+    # 過濾結尾為"業"的產業名稱 (如 "半導體業")，保留少數真正的公司名稱
     if name.endswith('業') and len(name) >= 3:
-        # 允許少數真的以"業"結尾的公司 (如 統一實業)
         if name not in ['統一實業', '大成實業']:
             return None, None
             
+    # 過濾特定產業分類
     industry_names = ['金融保險', '生技醫療', '通信網路', '觀光餐旅', '電子零組件', '半導體', '電腦及週邊設備', '光電', '航運', '鋼鐵', '塑膠', '紡織纖維', '電機機械', '電器電纜', '化學工業', '建材營造', '貿易百貨', '油電燃氣', '橡膠', '造紙', '玻璃陶瓷', '水泥']
     if name in industry_names:
         return None, None
         
-    # 3. 驗證並轉換權重數字
     w_str = str(raw_weight).replace('%', '').replace(',', '').strip()
     try:
         weight = float(w_str)
@@ -69,8 +64,45 @@ def clean_and_validate_holding(raw_name, raw_weight):
         
     return None, None
 
+def process_df(df):
+    """利用 Pandas 矩陣，暴力破解各網站的表格結構"""
+    df = df.astype(str)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [str(c[-1]) for c in df.columns]
+        
+    name_idx, weight_idx = -1, -1
+    data_start_row = 0
+    name_kws = ['名稱', '標的', '股票', '持股', '成分股', '發行公司']
+    weight_kws = ['權重', '比例', '比重', '佔比', '%', '佔資產']
+    
+    # 掃描表頭
+    for i, col in enumerate(df.columns):
+        if name_idx == -1 and any(k in str(col) for k in name_kws): name_idx = i
+        if weight_idx == -1 and any(k in str(col) for k in weight_kws): weight_idx = i
+            
+    # 若表頭沒抓到，掃描表格前10列尋找隱藏的標題列
+    if name_idx == -1 or weight_idx == -1:
+        for idx, row in df.head(10).iterrows():
+            n_i, w_i = -1, -1
+            for i, val in enumerate(row):
+                if n_i == -1 and any(k in str(val) for k in name_kws): n_i = i
+                if w_i == -1 and any(k in str(val) for k in weight_kws): w_i = i
+            if n_i != -1 and w_i != -1:
+                name_idx, weight_idx = n_i, w_i
+                data_start_row = idx + 1
+                break
+                
+    if name_idx != -1 and weight_idx != -1:
+        results = []
+        for idx in range(data_start_row, len(df)):
+            name, weight = clean_and_validate_holding(df.iloc[idx, name_idx], df.iloc[idx, weight_idx])
+            if name and weight:
+                results.append({"成分股名稱": name, "權重(%)": weight})
+        return results
+    return []
+
 def process_holdings(ticker, holdings_list):
-    """綁定 ETF 代號，去除重複，並允許最大抓取 50 筆"""
+    """綁定 ETF 代號，去除重複，並設定最多抓取 50 筆以突破限制"""
     unique_dict = {}
     for h in holdings_list:
         name = h["成分股名稱"]
@@ -103,20 +135,42 @@ def pad_tw_ticker(ticker):
 # ==========================================
 def get_us_etf_holdings(ticker):
     print(f"🔍 正在檢查美股 ETF: {ticker}")
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    # 引擎 1：CMoney (主力，突破限制)
+    try:
+        url_c = f"https://www.cmoney.tw/etf/us/{ticker}/fundholding"
+        res = requests.get(url_c, headers=headers, timeout=10)
+        res.encoding = 'utf-8'
+        dfs = pd.read_html(StringIO(res.text))
+        for df in dfs:
+            holdings = process_df(df)
+            if holdings:
+                holdings = process_holdings(ticker, holdings)
+                if len(holdings) > 0:
+                    print(f"✅ [來源: CMoney] 成功抓取美股 {ticker}，共 {len(holdings)} 檔")
+                    time.sleep(1)
+                    return holdings
+    except Exception:
+        pass
+
+    # 引擎 2：YFinance (備援)
     try:
         etf = yf.Ticker(ticker)
         funds_data = etf.get_funds_data()
         if funds_data and funds_data.top_holdings is not None and not funds_data.top_holdings.empty:
-            holdings = funds_data.top_holdings.head(50) 
+            df = funds_data.top_holdings.head(50) 
             result = []
-            for symbol, row in holdings.iterrows():
+            for symbol, row in df.iterrows():
                 weight = row.get('Holding Percent', 0)
-                if pd.isna(weight): weight = 0 
-                result.append({"成分股名稱": row.get('Name', symbol), "權重(%)": round(weight * 100, 2)})
-            print(f"✅ [美股 YFinance] 成功抓取 {ticker}，共 {len(result)} 檔")
-            return process_holdings(ticker, result)
+                if pd.notna(weight) and weight > 0:
+                    result.append({"成分股名稱": row.get('Name', symbol), "權重(%)": round(weight * 100, 2)})
+            if result:
+                print(f"✅ [來源: YFinance] 成功抓取美股 {ticker}，共 {len(result)} 檔")
+                return process_holdings(ticker, result)
     except Exception:
         pass
+        
     print(f"⚠️ {ticker} 系統無提供成分股明細。")
     return []
 
@@ -124,88 +178,39 @@ def get_tw_etf_holdings(raw_ticker):
     clean_ticker = pad_tw_ticker(raw_ticker)
     print(f"🔍 正在抓取台股 ETF: {clean_ticker}")
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    results = []
-
-    # ========================================================
-    # 引擎 1：MoneyDJ (雙軌解析法，專治各種不規則表格與 009815)
-    # ========================================================
-    try:
-        url_mdj = f"https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid={clean_ticker}.TW"
-        res = requests.get(url_mdj, headers=headers, timeout=10)
-        res.encoding = 'utf-8'
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # [軌道 A] 嚴格解析法 (專攻 0050 等混合產業分類的表格)
-        for tr in soup.find_all('tr'):
-            tds = tr.find_all(['td', 'th'])
-            if len(tds) >= 2:
-                for i in range(len(tds) - 1):
-                    col1 = tds[i].text.strip()
-                    # 嚴格尋找開頭是數字+小數點的格式 (如 "1.台積電")
-                    if re.match(r'^\d+\.', col1):
-                        col2 = tds[i+1].text.strip()
-                        name, weight = clean_and_validate_holding(col1, col2)
-                        if name and weight:
-                            results.append({"成分股名稱": name, "權重(%)": weight})
-                        break # 換下一列
-                        
-        if results:
-            print(f"✅ [MoneyDJ 嚴格解析] 成功抓取 {clean_ticker}，共 {len(results)} 檔純淨資料")
-            time.sleep(1)
-            return process_holdings(clean_ticker, results)
+    # 將包含 CMoney 的所有來源加入陣列，依序嘗試
+    urls_to_try = [
+        (f"https://www.cmoney.tw/etf/tw/{clean_ticker}/fundholding", "CMoney"),
+        (f"https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid={clean_ticker}.TW", "MoneyDJ (.TW)"),
+        (f"https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid={clean_ticker}.TWO", "MoneyDJ (.TWO)")
+    ]
+    
+    for url, source_name in urls_to_try:
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            res.encoding = 'utf-8'
+            dfs = pd.read_html(StringIO(res.text))
             
-        # [軌道 B] 寬鬆 Pandas 解析法 (當軌道 A 失敗時啟用，專攻 009815 這種海外無排序 ETF)
-        dfs = pd.read_html(StringIO(res.text))
-        for df in dfs:
-            df = df.astype(str)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [str(c[-1]) for c in df.columns]
-                
-            name_idx, weight_idx = -1, -1
-            data_start_row = 0
-            name_kws = ['名稱', '標的', '股票', '持股', '成分股']
-            weight_kws = ['權重', '比例', '比重', '佔比', '%']
-            
-            for i, col in enumerate(df.columns):
-                if any(k in str(col) for k in name_kws): name_idx = i
-                if any(k in str(col) for k in weight_kws): weight_idx = i
-                
-            if name_idx == -1 or weight_idx == -1:
-                for idx, row in df.head(10).iterrows():
-                    n_i, w_i = -1, -1
-                    for i, val in enumerate(row):
-                        if any(k in str(val) for k in name_kws): n_i = i
-                        if any(k in str(val) for k in weight_kws): w_i = i
-                    if n_i != -1 and w_i != -1:
-                        name_idx, weight_idx = n_i, w_i
-                        data_start_row = idx + 1
-                        break
-                        
-            if name_idx != -1 and weight_idx != -1:
-                for idx in range(data_start_row, len(df)):
-                    name, weight = clean_and_validate_holding(df.iloc[idx, name_idx], df.iloc[idx, weight_idx])
-                    if name and weight:
-                        results.append({"成分股名稱": name, "權重(%)": weight})
-                        
-        if results:
-            print(f"✅ [MoneyDJ 寬鬆解析] 成功抓取 {clean_ticker}，共 {len(results)} 檔純淨資料")
-            time.sleep(1)
-            return process_holdings(clean_ticker, results)
-    except Exception:
-        pass
+            for df in dfs:
+                holdings = process_df(df)
+                if holdings:
+                    holdings = process_holdings(clean_ticker, holdings)
+                    if len(holdings) > 0:
+                        print(f"✅ [來源: {source_name}] 成功抓取 {clean_ticker}，共 {len(holdings)} 檔乾淨資料")
+                        time.sleep(1)
+                        return holdings
+        except Exception:
+            pass
 
-    # ========================================================
-    # 引擎 2：Yahoo 股市 (終極備援，含 .TW 與 .TWO)
-    # ========================================================
+    # 終極備援：Yahoo 股市
     for suffix in ['.TW', '.TWO']:
         try:
             url_y = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
             res = requests.get(url_y, headers=headers, timeout=10)
             soup = BeautifulSoup(res.text, 'html.parser')
+            results = []
             for item in soup.find_all('li'):
                 divs = item.find_all('div')
                 if len(divs) >= 2:
@@ -218,13 +223,13 @@ def get_tw_etf_holdings(raw_ticker):
                                 results.append({"成分股名稱": name, "權重(%)": weight})
                                 break 
             if results:
-                print(f"✅ [Yahoo 備援] 成功抓取 {clean_ticker}，共 {len(results)} 檔純淨資料")
+                print(f"✅ [來源: Yahoo 備援] 成功抓取 {clean_ticker}，共 {len(results)} 檔乾淨資料")
                 time.sleep(1)
                 return process_holdings(clean_ticker, results)
         except Exception:
             pass
             
-    print(f"⚠️ {clean_ticker} 查無明細 (可能為剛上市，或資料庫空窗)。")
+    print(f"⚠️ {clean_ticker} 查無明細 (可能為剛上市、資料空窗，或為未持有個股的連結型基金)。")
     time.sleep(1)
     return []
 
@@ -232,7 +237,7 @@ def get_tw_etf_holdings(raw_ticker):
 # 4. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (防雜訊與新股相容升級版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (CMoney 升級與防雜訊版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
