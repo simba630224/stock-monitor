@@ -28,70 +28,85 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. 終極資料清洗演算法 (消滅 Yahoo 與 MoneyDJ 雜訊)
+# 2. 終極資料清洗與降維解析演算法
 # ==========================================
 def clean_holding_name(raw_name):
+    """最嚴苛的黑名單濾網，確保只留下純淨的個股名稱"""
     name = str(raw_name).strip().replace('\n', '').replace(' ', '')
     
-    # 1. 移除開頭數字 (如 "1.台積電" -> "台積電")
-    name = re.sub(r'^\d+[.、\s]*', '', name)
-    # 2. 移除結尾的代號或星號 (如 "台積電(2330.TW)" -> "台積電", "微軟(MSFT)" -> "微軟")
+    # 1. 剔除數字開頭 (如 "1.台積電") 與括號代號 (如 "(2330.TW)")
+    name = re.sub(r'^[\d\.、\s]+', '', name)
     name = re.sub(r'\(.*?\)', '', name)
     name = re.sub(r'\*+$', '', name)
     
-    # 3. 拒絕長度過短 (如 "A") 或純數字與標點符號 (如 "865,733.10")
+    # 2. 長度防呆 (消滅 "A") 與純數字/標點防呆 (消滅 "865,733.10")
     if len(name) < 2: return None
-    if re.fullmatch(r'^[0-9,\.]+$', name): return None
+    if re.fullmatch(r'^[0-9,\.\-]+$', name): return None
         
-    # 4. 拒絕國家與地區 (Yahoo 雜訊)
-    if name in ['台灣', '美國', '日本', '中國', '香港', '韓國', '歐洲', '亞洲', '美洲', '全球']:
-        return None
+    # 3. 剔除國家與無效關鍵字
+    bad_exact = ['台灣', '美國', '日本', '中國', '香港', '韓國', '歐洲', '亞洲', '全球', '股票', '債券', '現金', '期貨', '選擇權', '基金', '合計', '小計', '總計', '資產', '其他', '行業', '存款', '附買回', '流動準備', '名稱', '權重', '比例', '明細', '比重', '佔比', '發行公司', '投資明細', '基金投資', '持股', '市值']
+    if name in bad_exact: return None
         
-    # 5. 拒絕資產分類與標題欄位
-    bad_keywords = ['股票', '債券', '現金', '期貨', '選擇權', '基金', '合計', '小計', '總計', '資產', '其他', '行業', '存款', '附買回', '流動準備', '名稱', '權重', '比例', '明細', '比重', '佔比']
-    if any(k in name for k in bad_keywords):
-        return None
-        
-    # 6. 拒絕產業分類 (專殺 "半導體業", "金融保險")
+    # 4. 剔除產業分類 (專殺 0050 中的 "半導體業"、"金融保險" 等)
+    bad_industries = ['半導體', '金融保險', '電子零組件', '電腦及週邊', '通信網路', '光電', '航運', '生技醫療', '塑膠', '電機機械', '電器電纜', '化學工業', '建材營造', '貿易百貨', '油電燃氣', '橡膠', '造紙', '玻璃陶瓷', '水泥', '食品', '汽車']
+    if any(k in name for k in bad_industries): return None
+    
     if name.endswith('業'):
-        if name not in ['統一實業', '大成實業', '勤益控', '神達電腦', '廣達電腦', '仁寶電腦']:
+        if name not in ['統一實業', '大成實業', '勤益控', '神達電腦', '廣達電腦', '仁寶電腦', '精誠資訊']:
             return None
             
-    industry_names = ['金融保險', '生技醫療', '通信網路', '觀光餐旅', '電子零組件', '半導體', '電腦及週邊設備', '光電', '航運', '鋼鐵', '塑膠', '紡織纖維', '電機機械', '電器電纜', '化學工業', '建材營造', '貿易百貨', '油電燃氣', '橡膠', '造紙', '玻璃陶瓷', '水泥', '食品', '汽車', '電子通路', '資訊服務']
-    if name in industry_names:
-        return None
-        
     return name
 
-def extract_from_html(html_text):
-    """萬用行遍歷法：只抓取合理的 名稱 + 數字 (突破 CMoney 等隱藏表格)"""
+def extract_yahoo_json(html_text):
+    """大絕招一：攔截 Yahoo 網頁隱藏的後台完整 JSON 資料 (無視 10 檔限制)"""
+    results = []
+    # 尋找 JSON 陣列區塊："holdings":[{"symbol":"...","name":"...","ratio":...}]
+    match = re.search(r'"holdings":\[(.*?)\]', html_text)
+    if match:
+        block = match.group(1)
+        items = re.findall(r'{[^}]+}', block)
+        for item in items:
+            n_match = re.search(r'"name":"([^"]+)"', item)
+            r_match = re.search(r'"ratio":([0-9.]+)', item)
+            if n_match and r_match:
+                name = clean_holding_name(n_match.group(1))
+                if name:
+                    try:
+                        weight = float(r_match.group(1))
+                        if 0 < weight <= 100:
+                            results.append({"成分股名稱": name, "權重(%)": weight})
+                    except ValueError:
+                        pass
+    return results
+
+def extract_texts_greedily(html_text):
+    """大絕招二：人類視覺文字掃描法 (無視所有排版陷阱，專剋 CMoney 與 MoneyDJ)"""
     soup = BeautifulSoup(html_text, 'html.parser')
+    blocks = list(soup.stripped_strings) # 將網頁全部打散成純文字陣列
     results = []
     
-    for tr in soup.find_all(['tr', 'li']):
-        tds = tr.find_all(['td', 'th', 'div'])
-        if len(tds) < 2: continue
+    for i, block in enumerate(blocks):
+        # 尋找帶有 % 的數字
+        if '%' in block:
+            w_str = block.replace('%', '').replace(',', '').strip()
+        elif i + 1 < len(blocks) and blocks[i+1] == '%':
+            w_str = blocks[i].replace(',', '').strip()
+        else:
+            continue
             
-        row_texts = [td.text.strip() for td in tds]
-        
-        # 尋找權重 (通常在右邊，從後面找起)
-        weight = None
-        for txt in reversed(row_texts):
-            w_str = txt.replace('%', '').replace(',', '').strip()
-            try:
-                w = float(w_str)
-                if 0 < w <= 100:
-                    weight = w
-                    break
-            except ValueError:
-                continue
-                
-        # 尋找乾淨的名稱
+        try:
+            weight = float(w_str)
+            if not (0 < weight <= 100): continue
+        except ValueError:
+            continue
+            
+        # 找到 % 後，往前尋找最近的一個「合法股票名稱」
         name = None
-        for txt in row_texts:
-            c_name = clean_holding_name(txt)
-            if c_name:
-                name = c_name
+        for j in range(1, 6):
+            if i - j < 0: break
+            candidate = clean_holding_name(blocks[i-j])
+            if candidate:
+                name = candidate
                 break
                 
         if name and weight:
@@ -100,17 +115,15 @@ def extract_from_html(html_text):
     return results
 
 def process_holdings(ticker, holdings_list):
-    """綁定代號並移除重複項，嚴格鎖定 Top 20"""
+    """綁定代號並移除重複項，嚴格鎖定輸出為 Top 20"""
     unique_dict = {}
     for h in holdings_list:
         name = h["成分股名稱"]
-        # 保留最大權重者，防範重複抓取
         if name not in unique_dict or h["權重(%)"] > unique_dict[name]["權重(%)"]:
             unique_dict[name] = h
             
     res = list(unique_dict.values())
-    # 嚴格裁切至 Top 20
-    res = sorted(res, key=lambda x: x['權重(%)'], reverse=True)[:20]
+    res = sorted(res, key=lambda x: x['權重(%)'], reverse=True)[:20] # 確保只輸出前 20 檔
     
     final_res = []
     for h in res:
@@ -131,46 +144,44 @@ def pad_tw_ticker(ticker):
     return t
 
 # ==========================================
-# 3. 爬蟲引擎配置
+# 3. 爬蟲引擎配置 (雙管齊下)
 # ==========================================
 def get_us_etf_holdings(ticker):
     print(f"🔍 正在檢查美股 ETF: {ticker}")
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://www.cmoney.tw/"
     }
     
-    # 引擎 1：CMoney
+    # 引擎 1：CMoney 文字掃描
     try:
-        url_c = f"https://www.cmoney.tw/etf/us/{ticker}/fundholding"
-        res = requests.get(url_c, headers=headers, timeout=10)
-        holdings = extract_from_html(res.text)
+        url = f"https://www.cmoney.tw/etf/us/{ticker}/fundholding"
+        res = requests.get(url, headers=headers, timeout=10)
+        holdings = extract_texts_greedily(res.text)
         if holdings:
-            holdings = process_holdings(ticker, holdings)
-            print(f"✅ [來源: CMoney] 成功抓取美股 {ticker}，共 {len(holdings)} 檔")
+            res_list = process_holdings(ticker, holdings)
+            print(f"✅ [來源: CMoney] 成功抓取美股 {ticker}，共 {len(res_list)} 檔")
             time.sleep(1)
-            return holdings
-    except Exception:
-        pass
+            return res_list
+    except Exception: pass
 
     # 引擎 2：YFinance
     try:
         etf = yf.Ticker(ticker)
-        funds_data = etf.get_funds_data()
-        if funds_data and funds_data.top_holdings is not None and not funds_data.top_holdings.empty:
-            df = funds_data.top_holdings.head(20) 
+        fd = etf.get_funds_data()
+        if fd and fd.top_holdings is not None and not fd.top_holdings.empty:
+            df = fd.top_holdings.head(20) 
             result = []
             for symbol, row in df.iterrows():
-                weight = row.get('Holding Percent', 0)
-                if pd.notna(weight) and weight > 0:
+                w = row.get('Holding Percent', 0)
+                if pd.notna(w) and w > 0:
                     name = clean_holding_name(row.get('Name', symbol))
-                    if name:
-                        result.append({"成分股名稱": name, "權重(%)": round(weight * 100, 2)})
+                    if name: result.append({"成分股名稱": name, "權重(%)": round(w * 100, 2)})
             if result:
-                print(f"✅ [來源: YFinance] 成功抓取美股 {ticker}，共 {len(result)} 檔")
-                return process_holdings(ticker, result)
-    except Exception:
-        pass
+                res_list = process_holdings(ticker, result)
+                print(f"✅ [來源: YFinance] 成功抓取美股 {ticker}，共 {len(res_list)} 檔")
+                return res_list
+    except Exception: pass
         
     print(f"⚠️ {ticker} 系統無提供成分股明細。")
     return []
@@ -179,58 +190,54 @@ def get_tw_etf_holdings(raw_ticker):
     clean_ticker = pad_tw_ticker(raw_ticker)
     print(f"🔍 正在抓取台股 ETF: {clean_ticker}")
     
-    # 加入 Referer 騙過 CMoney 防護
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Referer": "https://www.cmoney.tw/"
+        "Referer": "https://tw.stock.yahoo.com/"
     }
     
-    # 第一順位：CMoney (直接訪問 /fundholding 取得 Top 20)
+    # 第一順位：Yahoo JSON 攔截法 (最精準、無 Top10 限制)
+    for suffix in ['.TW', '.TWO']:
+        try:
+            url = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                holdings = extract_yahoo_json(res.text)
+                if holdings:
+                    res_list = process_holdings(clean_ticker, holdings)
+                    print(f"✅ [來源: Yahoo 後台資料庫] 成功抓取 {clean_ticker}，共 {len(res_list)} 檔純淨資料")
+                    time.sleep(1)
+                    return res_list
+        except Exception: pass
+
+    # 第二順位：CMoney 文字掃描法
     try:
-        url_c = f"https://www.cmoney.tw/etf/tw/{clean_ticker}/fundholding"
-        res = requests.get(url_c, headers=headers, timeout=10)
-        res.encoding = 'utf-8'
-        holdings = extract_from_html(res.text)
-        if holdings:
-            holdings = process_holdings(clean_ticker, holdings)
-            if len(holdings) > 0:
-                print(f"✅ [來源: CMoney] 成功抓取 {clean_ticker}，共 {len(holdings)} 檔")
+        url = f"https://www.cmoney.tw/etf/tw/{clean_ticker}/fundholding"
+        headers["Referer"] = "https://www.cmoney.tw/"
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            holdings = extract_texts_greedily(res.text)
+            if holdings:
+                res_list = process_holdings(clean_ticker, holdings)
+                print(f"✅ [來源: CMoney 文字掃描] 成功抓取 {clean_ticker}，共 {len(res_list)} 檔純淨資料")
                 time.sleep(1)
-                return holdings
-    except Exception:
-        pass
+                return res_list
+    except Exception: pass
 
-    # 第二順位：MoneyDJ (.TW 與 .TWO 雙引擎)
+    # 第三順位：MoneyDJ 文字掃描法
     for suffix in ['.TW', '.TWO']:
         try:
-            url_m = f"https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid={clean_ticker}{suffix}"
-            res = requests.get(url_m, headers=headers, timeout=10)
+            url = f"https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid={clean_ticker}{suffix}"
+            res = requests.get(url, headers=headers, timeout=10)
             res.encoding = 'utf-8'
-            holdings = extract_from_html(res.text)
-            if holdings:
-                holdings = process_holdings(clean_ticker, holdings)
-                if len(holdings) > 0:
-                    print(f"✅ [來源: MoneyDJ] 成功抓取 {clean_ticker}，共 {len(holdings)} 檔")
+            if res.status_code == 200:
+                holdings = extract_texts_greedily(res.text)
+                if holdings:
+                    res_list = process_holdings(clean_ticker, holdings)
+                    print(f"✅ [來源: MoneyDJ 文字掃描] 成功抓取 {clean_ticker}，共 {len(res_list)} 檔純淨資料")
                     time.sleep(1)
-                    return holdings
-        except Exception:
-            pass
-
-    # 第三順位：Yahoo 股市
-    for suffix in ['.TW', '.TWO']:
-        try:
-            url_y = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
-            res = requests.get(url_y, headers=headers, timeout=10)
-            holdings = extract_from_html(res.text)
-            if holdings:
-                holdings = process_holdings(clean_ticker, holdings)
-                if len(holdings) > 0:
-                    print(f"✅ [來源: Yahoo 備援] 成功抓取 {clean_ticker}，共 {len(holdings)} 檔")
-                    time.sleep(1)
-                    return holdings
-        except Exception:
-            pass
+                    return res_list
+        except Exception: pass
             
     print(f"⚠️ {clean_ticker} 查無明細 (可能為剛上市或平台防爬蟲阻攔)。")
     time.sleep(1)
@@ -240,7 +247,7 @@ def get_tw_etf_holdings(raw_ticker):
 # 4. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (CMoney 專武與精準 Top20 版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (降維掃描與 JSON 攔截版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
@@ -284,8 +291,6 @@ def main():
     
     tz_tw = timezone(timedelta(hours=8))
     current_date = datetime.now(tz_tw)
-    
-    # 依照您的要求，命名已改回 Top 20
     sheet_title = current_date.strftime("%Y_%m_Top20")
     
     try:
