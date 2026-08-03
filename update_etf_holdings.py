@@ -28,11 +28,12 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. 終極工業級濾網 (消滅所有雜訊)
+# 2. 終極工業級濾網 (消滅所有雜訊與產業分類)
 # ==========================================
 def clean_holding_name(raw_name):
-    """最嚴苛的黑名單，針對 MoneyDJ 混雜在表格中的雜訊進行深度清洗"""
-    name = str(raw_name).strip()
+    """最嚴苛的黑名單，針對各網站混雜在表格中的雜訊進行深度清洗"""
+    # 注意：這裡不直接移除所有空格，以免將英文公司名 (如 NVIDIA CORP) 黏在一起
+    name = str(raw_name).strip().replace('\n', '').replace('\r', '')
     
     # 1. 移除開頭的數字、標點與空格 (如 "1. 台積電" -> "台積電")
     name = re.sub(r'^[\d\.,、\s]+', '', name)
@@ -47,18 +48,31 @@ def clean_holding_name(raw_name):
         return None
         
     # 4. 拒絕純數字與標點符號 (消滅 ",865,733.10")
-    if re.fullmatch(r'^[0-9,\.\-\+%]+$', name): 
+    if re.fullmatch(r'^[0-9,\.\-\+%]+$', name.replace(' ', '')): 
         return None
         
-    # 5. 拒絕國家地區與資產分類 (消滅 "台灣", "股票")
-    bad_exact = {'台灣', '臺灣', '美國', '日本', '中國', '香港', '韓國', '歐洲', '亞洲', '全球', '美洲', '股票', '債券', '現金', '期貨', '選擇權', '基金', '合計', '小計', '總計', '資產', '其他', '行業', '存款', '附買回', '流動準備', '名稱', '權重', '比例', '明細', '比重', '佔比', '發行公司', '投資明細', '受益憑證', '外幣', '市值'}
-    if name in bad_exact: 
+    # 5. 拒絕國家地區與資產分類
+    bad_exact = {
+        '台灣', '臺灣', '美國', '日本', '中國', '香港', '韓國', '歐洲', '亞洲', '全球', '美洲', 
+        '股票', '債券', '現金', '期貨', '選擇權', '基金', '合計', '小計', '總計', '資產', '其他', '行業', 
+        '存款', '附買回', '流動準備', '名稱', '權重', '比例', '明細', '比重', '佔比', '發行公司', 
+        '投資明細', '受益憑證', '外幣', '市值', '指數', '報酬'
+    }
+    if name.replace(' ', '') in bad_exact: 
         return None
         
-    # 6. 拒絕產業分類 (消滅 "半導體業", "金融保險")
-    industries_exact = {'金融保險', '生技醫療', '通信網路', '觀光餐旅', '電子零組件', '半導體', '電腦及週邊設備', '電腦及週邊', '光電', '航運', '鋼鐵', '塑膠', '紡織纖維', '電機機械', '電器電纜', '化學工業', '建材營造', '貿易百貨', '油電燃氣', '橡膠', '造紙', '玻璃陶瓷', '水泥', '食品', '汽車', '電子通路', '資訊服務', '類指數'}
+    # 6. 拒絕國內外所有產業分類 (全面封殺 "資訊科技", "運動休閒", "半導體業")
+    industries_exact = {
+        # 台股分類
+        '金融保險', '生技醫療', '通信網路', '觀光餐旅', '電子零組件', '半導體', '電腦及週邊設備', '電腦及週邊', 
+        '光電', '航運', '鋼鐵', '塑膠', '紡織纖維', '電機機械', '電器電纜', '化學工業', '建材營造', '貿易百貨', 
+        '油電燃氣', '橡膠', '造紙', '玻璃陶瓷', '水泥', '食品', '汽車', '電子通路', '資訊服務', '類指數',
+        '綠能環保', '數位雲端', '運動休閒', '居家生活', '農業科技', '綜合',
+        # 美股/GICS 國際分類
+        '資訊科技', '通訊服務', '非核心消費', '核心消費', '醫療保健', '工業', '原材料', '房地產', '公用事業', '金融', '能源'
+    }
     
-    if name in industries_exact:
+    if name.replace('業', '') in industries_exact or name in industries_exact:
         return None
     
     # 阻擋以"業"結尾的產業分類，但放行真正的公司
@@ -181,18 +195,18 @@ def get_tw_etf_holdings(raw_ticker):
     print(f"🔍 正在抓取台股 ETF: {clean_ticker}")
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Referer": "https://www.moneydj.com/"
     }
     
-    # 第一順位：Yahoo JSON (專攻 0050, 0056，可無痛取得大量名單)
+    # 第一順位：Yahoo JSON (專攻 0050, 0056，可無痛取得 Top 20)
     for suffix in ['.TW', '.TWO']:
         try:
             url_y = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
             res = requests.get(url_y, headers=headers, timeout=10)
             if res.status_code == 200:
                 holdings = parse_yahoo_json(res.text)
-                if len(holdings) >= 10: # 若取得資料豐富，直接採用
+                if len(holdings) >= 10: 
                     res_list = process_holdings(clean_ticker, holdings)
                     print(f"✅ [來源: Yahoo JSON] 成功抓取 {clean_ticker}，共 {len(res_list)} 檔純淨資料")
                     time.sleep(1)
@@ -200,7 +214,7 @@ def get_tw_etf_holdings(raw_ticker):
         except Exception: pass
 
     # 第二順位：MoneyDJ (專攻 009813, 009815 等新股)
-    # 注意：同時嘗試小寫 (.tw) 與大寫 (.TW)，確保萬無一失
+    # 注意：根據回報，全面使用小寫網址 etf/x/basic/basic0007.xdjhtm，並輪詢四種後綴
     suffixes_to_try = ['.tw', '.TW', '.two', '.TWO']
     
     for suffix in suffixes_to_try:
@@ -226,7 +240,7 @@ def get_tw_etf_holdings(raw_ticker):
 # 5. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (工業濾網純淨 Top20 版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (全網域突破 & 終極純淨版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
