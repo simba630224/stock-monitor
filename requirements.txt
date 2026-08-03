@@ -10,3 +10,4 @@ st-gsheets-connection
 gspread
 oauth2client
 beautifulsoup4
+curl_cffi
