@@ -28,39 +28,50 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. 無塵室等級：終極黑名單濾網
+# 2. 嚴謹校正：海外與連結型 ETF 替身字典
+# ==========================================
+# 針對台灣發行但追蹤海外市場的 ETF，直接透過 YFinance 抓取海外對等標的
+FEEDER_PROXY_MAP = {
+    '009813': 'XLG',    # 貝萊德 S&P 500 Top 50 -> 對應 Invesco S&P 500 Top 50 ETF
+    '009815': 'MAGS',   # 大華美國 MAG7+ -> 對應 Roundhill MAG7 ETF
+    '009812': '1306.T', # 野村日本東證 -> 對應日本 TOPIX ETF (1306.JP)
+    '00646': 'IVV',     # 元大 S&P 500 -> 對應 iShares S&P 500 ETF
+    '00662': 'QQQ',     # 富邦 NASDAQ -> 對應 Invesco QQQ
+    '00830': 'SOXX',    # 國泰費城半導體 -> 對應 iShares 半導體 ETF
+    '00757': 'FNGS',    # 統一 FANG+ -> 對應 MicroSectors FANG+ ETN
+}
+
+# ==========================================
+# 3. 無塵室等級：終極黑名單濾網
 # ==========================================
 def clean_holding_name(raw_name):
     """消滅所有代號、數字、國家地區、台股分類與 GICS 國際分類"""
     name = str(raw_name).strip().replace('\n', '').replace('\r', '')
     
-    # 1. 移除開頭的數字、標點與空格 (如 "1. 台積電" -> "台積電")
+    # 移除開頭數字、結尾括號與星號
     name = re.sub(r'^[\d\.,、\s]+', '', name)
-    # 2. 移除結尾的代號或星號 (如 "聯發科(2454.TW)" -> "聯發科")
     name = re.sub(r'\(.*?\)', '', name)
     name = re.sub(r'（.*?）', '', name)
     name = re.sub(r'\*+$', '', name)
     name = name.strip()
     
-    # 3. 拒絕長度過短 (消滅 "A") 與純數字標點 (消滅 ",865,733.10")
     if len(name) < 2: return None
     if re.fullmatch(r'^[0-9,\.\-\+%]+$', name.replace(' ', '')): return None
         
-    # 4. 拒絕精確名詞 (國家、資產類別、標題列、單一產業詞彙)
     bad_exact = {
         '台灣', '臺灣', '美國', '日本', '中國', '香港', '韓國', '歐洲', '亞洲', '全球', '美洲', 
         '股票', '債券', '現金', '期貨', '選擇權', '基金', '合計', '小計', '總計', '資產', '其他', '行業', 
         '存款', '附買回', '流動準備', '名稱', '權重', '比例', '明細', '比重', '佔比', '發行公司', 
         '投資明細', '受益憑證', '外幣', '市值', '指數', '報酬', '綜合', '能源', '工業', '原材料', 
-        '半導體', '金融', '光電', '航運', '鋼鐵', '塑膠', '橡膠', '造紙', '水泥', '食品', '汽車'
+        '半導體', '金融', '光電', '航運', '鋼鐵', '塑膠', '橡膠', '造紙', '水泥', '食品', '汽車', '電子'
     }
     if name.replace(' ', '') in bad_exact: return None
         
-    # 5. 特殊前綴與後綴無情封殺 (專殺 00935 的 "電子-..." 與 00646 的 "...消費品")
+    # 專殺 00935 的 "電子-..." 與 00646 的 "...消費品"
     if name.startswith('電子-'): return None
     if name.endswith('消費品'): return None
         
-    # 6. 強效子字串封殺 (包含即剔除)
+    # 強效子字串封殺 (包含即剔除)
     bad_substrings = [
         '通信網路', '運動休閒', '資訊科技', '綠能環保', '數位雲端', '居家生活', '農業科技', 
         '金融保險', '生技醫療', '觀光餐旅', '電子零組件', '半導體業', '建材營造', '貿易百貨', 
@@ -70,45 +81,15 @@ def clean_holding_name(raw_name):
     ]
     if any(bad in name for bad in bad_substrings): return None
     
-    # 7. 阻擋以"業"結尾的產業分類，但放行真正的公司
+    # 阻擋以"業"結尾的分類，但放行真正的公司
     if name.endswith('業') and name not in ['統一實業', '大成實業', '勤益控', '神達電腦', '廣達電腦', '仁寶電腦', '精誠資訊']:
         return None
             
     return name
 
 # ==========================================
-# 3. 雙核心解析引擎
+# 4. 雙核心解析引擎與後處理
 # ==========================================
-def extract_texts_greedily(html_text):
-    """貪婪備援掃描，專剋表頭異常的網頁"""
-    soup = BeautifulSoup(html_text, 'html.parser')
-    blocks = list(soup.stripped_strings)
-    results = []
-    for i, block in enumerate(blocks):
-        if '%' in block:
-            w_str = block.replace('%', '').replace(',', '').strip()
-        elif i + 1 < len(blocks) and blocks[i+1] == '%':
-            w_str = blocks[i].replace(',', '').strip()
-        else:
-            continue
-        try:
-            weight = float(w_str)
-            if not (0 < weight <= 100): continue
-        except ValueError:
-            continue
-            
-        name = None
-        for j in range(1, 6):
-            if i - j < 0: break
-            candidate = clean_holding_name(blocks[i-j])
-            if candidate:
-                name = candidate
-                break
-                
-        if name and weight:
-            results.append({"成分股名稱": name, "權重(%)": weight})
-    return results
-
 def parse_moneydj_table(html_text):
     """針對 MoneyDJ 特製的結構化表格解析器"""
     soup = BeautifulSoup(html_text, 'html.parser')
@@ -142,9 +123,6 @@ def parse_moneydj_table(html_text):
                                 results.append({"成分股名稱": name, "權重(%)": w})
                         except ValueError: pass
                         
-    # 若結構解析失敗 (如 009815 無常規表頭)，啟用貪婪掃描
-    if not results:
-        return extract_texts_greedily(html_text)
     return results
 
 def parse_yahoo_json(html_text):
@@ -197,10 +175,16 @@ def pad_tw_ticker(ticker):
     return t
 
 # ==========================================
-# 4. 爬蟲引擎配置
+# 5. 爬蟲引擎配置
 # ==========================================
-def get_us_etf_holdings(ticker):
-    print(f"🔍 正在檢查美股 ETF: {ticker}")
+def get_us_etf_holdings(ticker, override_ticker=None):
+    """
+    抓取 YFinance 資料。
+    override_ticker 允許將 1306.T 的結果偽裝成 009812 寫入資料庫。
+    """
+    target_output_ticker = override_ticker if override_ticker else ticker
+    print(f"🔍 正在檢查海外標的: {ticker}" + (f" (作為 {override_ticker} 的替身)" if override_ticker else ""))
+    
     try:
         etf = yf.Ticker(ticker)
         fd = etf.get_funds_data()
@@ -210,28 +194,40 @@ def get_us_etf_holdings(ticker):
             for symbol, row in df.iterrows():
                 w = row.get('Holding Percent', 0)
                 if pd.notna(w) and w > 0:
-                    name = clean_holding_name(row.get('Name', symbol))
-                    if name: result.append({"成分股名稱": name, "權重(%)": round(w * 100, 2)})
+                    raw_name = row.get('Name', symbol)
+                    name = clean_holding_name(raw_name) if clean_holding_name(raw_name) else symbol
+                    result.append({"成分股名稱": name, "權重(%)": round(w * 100, 2)})
             if result:
-                res_list = process_holdings(ticker, result)
-                print(f"✅ [來源: YFinance] 成功抓取美股 {ticker}，共 {len(res_list)} 檔")
+                res_list = process_holdings(target_output_ticker, result)
+                print(f"✅ [來源: YFinance] 成功抓取 {target_output_ticker}，共 {len(res_list)} 檔")
                 return res_list
     except Exception: pass
-    print(f"⚠️ {ticker} 系統無提供成分股明細。")
+    
+    if not override_ticker:
+        print(f"⚠️ {ticker} 系統無提供成分股明細。")
     return []
 
 def get_tw_etf_holdings(raw_ticker):
     clean_ticker = pad_tw_ticker(raw_ticker)
+    
+    # 【關鍵突破】如果是海外連結型 ETF，直接啟動替身穿透法！
+    if clean_ticker in FEEDER_PROXY_MAP:
+        proxy_ticker = FEEDER_PROXY_MAP[clean_ticker]
+        print(f"🔄 偵測到 {clean_ticker} 為海外/連結型 ETF，啟動底層穿透轉向 {proxy_ticker}...")
+        proxy_results = get_us_etf_holdings(proxy_ticker, override_ticker=clean_ticker)
+        if proxy_results:
+            return proxy_results
+        else:
+            print(f"⚠️ 底層替身 {proxy_ticker} 抓取失敗，退回常規台股網頁掃描...")
+    
     print(f"🔍 正在抓取台股 ETF: {clean_ticker}")
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Connection": "keep-alive"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+        "Referer": "https://tw.stock.yahoo.com/"
     }
     
-    # 第一順位：Yahoo JSON (專攻 0050, 0056，突破 Top 20)
+    # 國內第一順位：Yahoo JSON (專攻 0050, 0056，突破 Top 20)
     for suffix in ['.TW', '.TWO']:
         try:
             url_y = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
@@ -245,10 +241,8 @@ def get_tw_etf_holdings(raw_ticker):
                     return res_list
         except Exception: pass
 
-    # 第二順位：MoneyDJ (專攻 009813, 009815 等新股或海外成分)
-    # 注意：完全採用小寫基礎路徑，並輪詢四種大小寫後綴
+    # 國內第二順位：MoneyDJ (專攻其他新股，使用小寫基礎路徑)
     suffixes_to_try = ['.tw', '.TW', '.two', '.TWO']
-    
     for suffix in suffixes_to_try:
         try:
             url_m = f"https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={clean_ticker}{suffix}"
@@ -269,10 +263,10 @@ def get_tw_etf_holdings(raw_ticker):
     return []
 
 # ==========================================
-# 5. 主程式邏輯
+# 6. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (無塵純淨 Top20 版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (底層穿透 Top20 最終版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
