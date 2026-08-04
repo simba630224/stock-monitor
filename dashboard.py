@@ -9,7 +9,6 @@ import re
 from datetime import datetime
 import warnings
 import time
-import traceback
 from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
@@ -243,15 +242,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 f_info = get_fundamental_info(sym)
                 is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper() or 'MUTUALFUND' in str(f_info.get('quoteType', '')).upper()
                 
-                def fmt_pct_text(val):
-                    if is_etf: return "ETF/不適用"
-                    if val is not None and pd.notna(val): return f"{val * 100:.1f} %"
-                    return "暫無資料"
-
-                gross_m = fmt_pct_text(f_info.get('grossMargins'))
-                op_m = fmt_pct_text(f_info.get('operatingMargins'))
-                prof_m = fmt_pct_text(f_info.get('profitMargins'))
-                
                 roe_raw = f_info.get('returnOnEquity')
                 roe_val = roe_raw * 100 if roe_raw is not None and not is_etf else None
 
@@ -268,9 +258,9 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 
                 return {
                     "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
-                    "近一季報酬": ret_1q, "近半年報酬": ret_6m, "近一年報酬": ret_1y,
-                    "相對大盤": rel_val, "近一年殖利率": yield_1y, "總配息金額": tot_div,
-                    "近一年配息明細": div_history_str, "毛利率": gross_m, "營益率": op_m, "淨利率": prof_m, "ROE": roe_val
+                    "近一季報酬": float(ret_1q), "近半年報酬": float(ret_6m), "近一年報酬": float(ret_1y),
+                    "相對大盤": float(rel_val), "近一年殖利率": float(yield_1y), "總配息金額": float(tot_div),
+                    "近一年配息明細": div_history_str, "ROE": float(roe_val) if roe_val is not None else None
                 }
         except: time.sleep(1)
     return None
@@ -336,7 +326,6 @@ def process_technical_analysis(sym, name, market):
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
         is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
 
-        # 🚀 判斷月/季線連續上/下彎 >= 5日，以及站上/跌破 >= 5日
         ma20_up_5d = False
         ma_s_up_5d = False
         ma20_dn_5d = False
@@ -358,7 +347,6 @@ def process_technical_analysis(sym, name, market):
             above_mas_5d = all(df['Close'].iloc[i] > df['季線'].iloc[i] for i in range(-5, 0))
             below_mas_5d = all(df['Close'].iloc[i] < df['季線'].iloc[i] for i in range(-5, 0))
 
-        # 🚀 新增：近 5 日累計漲跌幅 5% 判定
         ret_5d = 0.0
         has_ret_5d = False
         if len(df) >= 6 and pd.notna(df['Close'].iloc[-6]) and df['Close'].iloc[-6] > 0:
@@ -375,7 +363,7 @@ def process_technical_analysis(sym, name, market):
         k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-1]) else 50.0
         d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-1]) else 50.0
         pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 50.0
-        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 50.0
+        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-2]) else 50.0
         
         macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
         macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
@@ -417,12 +405,11 @@ def process_technical_analysis(sym, name, market):
         if below_ma20_5d and below_mas_5d: alerts.append("跌破月/季線≥5日")
         elif below_ma20_5d: alerts.append("跌破月線≥5日")
         elif below_mas_5d: alerts.append("跌破季線≥5日")
-
-        # 近 5 日漲跌幅警示加入
+        
         if has_ret_5d:
             if ret_5d >= 5.0: alerts.append(f"近5日上漲{ret_5d:.1f}%")
             elif ret_5d <= -5.0: alerts.append(f"近5日下跌{abs(ret_5d):.1f}%")
-        
+
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15:
             alerts.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10:
@@ -552,31 +539,35 @@ with tab1:
     try:
         df_history = conn.read(worksheet="Value_History", ttl=0)
         if df_history is not None and 'Date' in df_history.columns and not df_history.empty:
-            df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-            df_history = df_history.dropna(subset=['Date'])
+            df_history.columns = [str(c).strip().replace(' ', '_') for c in df_history.columns]
             
-            if 'Total_Value' in df_history.columns:
+            if 'Date' in df_history.columns and 'Total_Value' in df_history.columns:
+                df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+                df_history = df_history.dropna(subset=['Date'])
+                
                 df_history['Total_Value'] = pd.to_numeric(
                     df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), 
                     errors='coerce'
                 ).fillna(0)
-            
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            now_time = datetime.now().strftime('%H:%M:%S')
-            
-            if len(df_history) >= 1:
-                if today_str in df_history['Date'].values:
-                    idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
-                    existing_val = safe_float(df_history.at[idx, 'Total_Value'])
-                    if abs(existing_val - total_market_value) > 1:
-                        df_history.at[idx, 'Total_Value'] = total_market_value
-                        df_history.at[idx, 'Last_Updated'] = now_time
+                
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                now_time = datetime.now().strftime('%H:%M:%S')
+                
+                if len(df_history) >= 1:
+                    if today_str in df_history['Date'].values:
+                        idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
+                        existing_val = safe_float(df_history.at[idx, 'Total_Value'])
+                        if abs(existing_val - total_market_value) > 1:
+                            df_history.at[idx, 'Total_Value'] = total_market_value
+                            df_history.at[idx, 'Last_Updated'] = now_time
+                            conn.update(worksheet="Value_History", data=df_history)
+                    else:
+                        new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+                        df_history = pd.concat([df_history, new_row], ignore_index=True)
                         conn.update(worksheet="Value_History", data=df_history)
+                    df_history_to_display = df_history
                 else:
-                    new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
-                    df_history = pd.concat([df_history, new_row], ignore_index=True)
-                    conn.update(worksheet="Value_History", data=df_history)
-                df_history_to_display = df_history
+                    history_error = True
             else:
                 history_error = True
         else:
@@ -584,7 +575,7 @@ with tab1:
     except Exception:
         history_error = True
 
-    if history_error or df_history_to_display.empty:
+    if history_error or df_history_to_display.empty or 'Total_Value' not in df_history_to_display.columns:
         df_history_to_display = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value, 'Last_Updated': datetime.now().strftime('%H:%M:%S')}])
 
     st.divider()
@@ -696,10 +687,10 @@ with tab2:
                 d_kd_death = "🔴 KD高檔死叉" in kd_d
                 
                 is_break = res.get('_is_break_ma', False)
-                ma20_up_5d = res.get('_ma20_up_5d', False)
-                ma_s_up_5d = res.get('_ma_s_up_5d', False)
-                ma20_dn_5d = res.get('_ma20_dn_5d', False)
-                ma_s_dn_5d = res.get('_ma_s_dn_5d', False)
+                ma20_up = res.get('_ma20_up_5d', False)
+                ma_s_up = res.get('_ma_s_up_5d', False)
+                ma20_dn = res.get('_ma20_dn_5d', False)
+                ma_s_dn = res.get('_ma_s_dn_5d', False)
                 above_ma20_5d = res.get('_above_ma20_5d', False)
                 below_ma20_5d = res.get('_below_ma20_5d', False)
                 above_mas_5d = res.get('_above_mas_5d', False)
@@ -713,9 +704,9 @@ with tab2:
                 if d_macd_gold: tags.append("日MACD零下金叉")
                 if d_kd_gold: tags.append("日KD低檔金叉")
                 
-                if ma20_up_5d and ma_s_up_5d: tags.append("月季線雙上彎≥5日")
-                elif ma20_up_5d: tags.append("月線上彎≥5日")
-                elif ma_s_up_5d: tags.append("季線上彎≥5日")
+                if ma20_up and ma_s_up: tags.append("月季線雙上彎≥5日")
+                elif ma20_up: tags.append("月線上彎≥5日")
+                elif ma_s_up: tags.append("季線上彎≥5日")
                 
                 if above_ma20_5d and above_mas_5d: tags.append("站上月季線≥5日")
                 elif above_ma20_5d: tags.append("站上月線≥5日")
@@ -730,9 +721,9 @@ with tab2:
                 
                 if is_break: tags.append("跌破季線")
                 
-                if ma20_dn_5d and ma_s_dn_5d: tags.append("月季線雙下彎≥5日")
-                elif ma20_dn_5d: tags.append("月線下彎≥5日")
-                elif ma_s_dn_5d: tags.append("季線下彎≥5日")
+                if ma20_dn and ma_s_dn: tags.append("月季線雙下彎≥5日")
+                elif ma20_dn: tags.append("月線下彎≥5日")
+                elif ma_s_dn: tags.append("季線下彎≥5日")
                 
                 if below_ma20_5d and below_mas_5d: tags.append("跌破月季線≥5日")
                 elif below_ma20_5d: tags.append("跌破月線≥5日")
@@ -740,8 +731,8 @@ with tab2:
                 
                 if has_ret_5d and ret_5d <= -5.0: tags.append("近5日下跌≥5%")
 
-                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up_5d * 1) + (ma_s_up_5d * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
-                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn_5d * 1) + (ma_s_dn_5d * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
+                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up * 1) + (ma_s_up * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
+                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn * 1) + (ma_s_dn * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score}
                 
@@ -959,27 +950,19 @@ with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
     st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
     
-    csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/export?format=csv&gid=892058804"
-    
     try:
-        df_etf_db = pd.read_csv(csv_url)
+        df_etf_db = conn.read(spreadsheet="https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc", worksheet="ETF_Holdings_DB", ttl=0)
         read_success = True
-        err_msg = ""
     except Exception as e:
         df_etf_db = pd.DataFrame()
         read_success = False
-        err_msg = str(e)
 
     if not read_success:
-        st.error(f"❌ **無法讀取 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
-        st.info("💡 **唯一解決方法**：\n請打開您的 ETF 試算表，點擊右上角的 **「共用 (Share)」**，將一般存取權限改為**「知道連結的人均可檢視 (Anyone with the link)」**。這不會洩漏您的隱私，且能讓程式瞬間讀取！")
+        st.error("❌ **無法讀取外部 ETF 試算表！**")
     elif df_etf_db is None or df_etf_db.empty:
         st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。請確認爬蟲已成功寫入資料。")
     else:
         df_etf_db = df_etf_db.dropna(how='all')
-        
-        with st.expander("🛠️ 展開查看原始讀取資料 (除錯用)", expanded=False):
-            st.dataframe(df_etf_db.head())
 
         if len(df_etf_db.columns) < 3:
             st.error(f"⚠️ 讀取成功，但欄位數量異常！預期至少 3 欄，但只讀到 {len(df_etf_db.columns)} 欄。")
@@ -992,7 +975,7 @@ with tab_etf:
             etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'ticker', 'nan', 'none'] and '代號' not in x]
             
             if not etf_options:
-                st.warning("⚠️ 工作表中未能解析出有效的 ETF 代號！請展開上方原始資料確認第一欄的內容。")
+                st.warning("⚠️ 工作表中未能解析出有效的 ETF 代號！")
             else:
                 col_etf1, col_etf2 = st.columns([1, 2])
                 
@@ -1010,7 +993,6 @@ with tab_etf:
                             plot_df = df_show.copy()
                             plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                             
-                            # 暴力清洗權重欄位：移除 % 符號、逗點與空白
                             plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                             plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                             
@@ -1111,7 +1093,7 @@ with st.sidebar:
         if st.button("💾 儲存美股變更"):
             with st.spinner("正在寫入美股資料..."):
                 try:
-                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    conn.update(worksheet="US_Portfolio", data=edited_us)
                     st.success("✅ 美股更新成功！請重新整理網頁。")
                 except Exception as e: st.error(f"寫入失敗：{e}")
     else: st.info("美股清單目前為空。")
