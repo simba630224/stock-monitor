@@ -21,37 +21,75 @@ st.set_page_config(page_title="行動隨身投資儀表板", layout="wide")
 # ==========================================
 def safe_float(val):
     try:
-        # 強制過濾所有非數字字元 (防禦手動輸入逗點等字串污染)
         if isinstance(val, str):
             val = re.sub(r'[^\d.-]', '', val)
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
     except:
         return 0.0
 
+# ==========================================
+# 1. 資料庫與清單設定 (Google Sheets 連線)
+# ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-try:
-    df_tw = conn.read(worksheet="TW_Portfolio", ttl=0).dropna(subset=['Ticker'])
-    if '名稱' not in df_tw.columns: df_tw['名稱'] = ''
-    if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
-    if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
-    if '類別' not in df_tw.columns: df_tw['類別'] = '台股'
+def load_and_standardize_portfolio(worksheet_name, default_category):
+    try:
+        df = conn.read(worksheet=worksheet_name, ttl=0)
+        if df is None or df.empty:
+            return pd.DataFrame()
+            
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.loc[:, ~df.columns.duplicated()]
+        
+        col_map = {}
+        for c in df.columns:
+            cl = c.lower()
+            if cl in ['ticker', 'symbol', '代號', '股票代號', '標的代號']: col_map[c] = 'Ticker'
+            elif cl in ['name', '名稱', '標的名稱', '股票名稱']: col_map[c] = '名稱'
+            elif cl in ['shares', '股數', '持有股數', '庫存', '數量']: col_map[c] = 'Shares'
+            elif cl in ['出借', '借券', '複委託']: col_map[c] = '出借' if default_category == '台股' else '複委託'
+            elif cl in ['類別', 'category', '分類', '市場']: col_map[c] = '類別'
+            
+        df = df.rename(columns=col_map)
+        
+        if 'Ticker' not in df.columns and len(df.columns) > 0:
+            df = df.rename(columns={df.columns[0]: 'Ticker'})
+            
+        if 'Ticker' in df.columns:
+            df = df.dropna(subset=['Ticker'])
+            df = df[df['Ticker'].astype(str).str.strip() != '']
+        else:
+            return pd.DataFrame()
+            
+        if '名稱' not in df.columns: df['名稱'] = ''
+        if 'Shares' not in df.columns: df['Shares'] = 0.0
+        
+        if default_category == '台股' and '出借' not in df.columns: df['出借'] = 0.0
+        elif default_category == '美股' and '複委託' not in df.columns: df['複委託'] = 0.0
+        
+        if '類別' not in df.columns: df['類別'] = default_category
+        
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+df_tw = load_and_standardize_portfolio("TW_Portfolio", "台股")
+if not df_tw.empty:
     PORTFOLIO_TW = df_tw.to_dict('records')
-except:
+else:
     PORTFOLIO_TW = []
     df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
 
-try:
-    df_us = conn.read(worksheet="US_Portfolio", ttl=0).dropna(subset=['Ticker'])
-    if '名稱' not in df_us.columns: df_us['名稱'] = ''
-    if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
-    if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
-    if '類別' not in df_us.columns: df_us['類別'] = '美股'
+df_us = load_and_standardize_portfolio("US_Portfolio", "美股")
+if not df_us.empty:
     PORTFOLIO_US = df_us.to_dict('records')
-except:
+else:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
+# ==========================================
+# 2. 核心抓取與計算邏輯
+# ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
     if ticker.endswith('.TW') or ticker.endswith('.TWO'): return ticker
@@ -221,12 +259,33 @@ def process_technical_analysis(sym, name):
         
         is_break_ma = (last_p < ma_season and df['Close'].iloc[-2] >= prev_ma_season)
 
-        ma20_up_3d = False
-        ma_s_up_3d = False
-        if len(df) >= 4 and pd.notna(df['MA_season'].iloc[-4]):
-            ma20_up_3d = (df['MA20'].iloc[-1] > df['MA20'].iloc[-2]) and (df['MA20'].iloc[-2] > df['MA20'].iloc[-3]) and (df['MA20'].iloc[-3] > df['MA20'].iloc[-4])
-            ma_s_up_3d = (df['MA_season'].iloc[-1] > df['MA_season'].iloc[-2]) and (df['MA_season'].iloc[-2] > df['MA_season'].iloc[-3]) and (df['MA_season'].iloc[-3] > df['MA_season'].iloc[-4])
-        
+        ma20_up_5d = False
+        ma_s_up_5d = False
+        ma20_dn_5d = False
+        ma_s_dn_5d = False
+        above_ma20_5d = False
+        below_ma20_5d = False
+        above_mas_5d = False
+        below_mas_5d = False
+
+        if len(df) >= 6 and pd.notna(df['MA_season'].iloc[-6]):
+            ma20_up_5d = all(df['MA20'].iloc[i] > df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
+            ma_s_up_5d = all(df['MA_season'].iloc[i] > df['MA_season'].iloc[i-1] for i in range(-1, -6, -1))
+            
+            ma20_dn_5d = all(df['MA20'].iloc[i] < df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
+            ma_s_dn_5d = all(df['MA_season'].iloc[i] < df['MA_season'].iloc[i-1] for i in range(-1, -6, -1))
+            
+            above_ma20_5d = all(df['Close'].iloc[i] > df['MA20'].iloc[i] for i in range(-5, 0))
+            below_ma20_5d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-5, 0))
+            above_mas_5d = all(df['Close'].iloc[i] > df['MA_season'].iloc[i] for i in range(-5, 0))
+            below_mas_5d = all(df['Close'].iloc[i] < df['MA_season'].iloc[i] for i in range(-5, 0))
+
+        ret_5d = 0.0
+        has_ret_5d = False
+        if len(df) >= 6 and pd.notna(df['Close'].iloc[-6]) and df['Close'].iloc[-6] > 0:
+            ret_5d = ((last_p - df['Close'].iloc[-6]) / df['Close'].iloc[-6]) * 100
+            has_ret_5d = True
+            
         high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
         low_52w = df['Low'].tail(252).min() if 'Low' in df.columns else 0.0
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1e-9) * 100) if (high_52w - low_52w) > 0 else 50.0
@@ -261,7 +320,27 @@ def process_technical_analysis(sym, name):
         macd_w_status = eval_macd_status(macd_w, macds_w, pmacd_w, pmacds_w) if has_enough_weekly else "資料不足"
 
         alerts = []
-        if last_p < ma20 and ma20 > 0: alerts.append("跌破MA20")
+        if is_break_ma: alerts.append("跌破季線")
+        
+        if ma20_up_5d and ma_s_up_5d: alerts.append("月季線雙上彎≥5日")
+        elif ma20_up_5d: alerts.append("月線上彎≥5日")
+        elif ma_s_up_5d: alerts.append("季線上彎≥5日")
+        
+        if ma20_dn_5d and ma_s_dn_5d: alerts.append("月季線雙下彎≥5日")
+        elif ma20_dn_5d: alerts.append("月線下彎≥5日")
+        elif ma_s_dn_5d: alerts.append("季線下彎≥5日")
+        
+        if above_ma20_5d and above_mas_5d: alerts.append("站上月季線≥5日")
+        elif above_ma20_5d: alerts.append("站上月線≥5日")
+        elif above_mas_5d: alerts.append("站上季線≥5日")
+        
+        if below_ma20_5d and below_mas_5d: alerts.append("跌破月季線≥5日")
+        elif below_ma20_5d: alerts.append("跌破月線≥5日")
+        elif below_mas_5d: alerts.append("跌破季線≥5日")
+        
+        if has_ret_5d:
+            if ret_5d >= 5.0: alerts.append(f"近5日上漲{ret_5d:.1f}%")
+            elif ret_5d <= -5.0: alerts.append(f"近5日下跌{abs(ret_5d):.1f}%")
         
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15: 
             alerts.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
@@ -288,7 +367,11 @@ def process_technical_analysis(sym, name):
             "代號": sym.split('.')[0], "🚨警示": alert_str, "價格": last_p, "52週位置": f"{pos_52w:.0f}%", "日KD": kd_display,
             "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma,
             "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status, "_name": name, "_sym": sym,
-            "_ma20_up_3d": ma20_up_3d, "_ma_s_up_3d": ma_s_up_3d
+            "_ma20_up_5d": ma20_up_5d, "_ma_s_up_5d": ma_s_up_5d,
+            "_ma20_dn_5d": ma20_dn_5d, "_ma_s_dn_5d": ma_s_dn_5d,
+            "_above_ma20_5d": above_ma20_5d, "_below_ma20_5d": below_ma20_5d,
+            "_above_mas_5d": above_mas_5d, "_below_mas_5d": below_mas_5d,
+            "_has_ret_5d": has_ret_5d, "_ret_5d": ret_5d
         }
     except: return None
 
@@ -370,48 +453,51 @@ with tab1:
         col_m4.metric("近一年累計股息", f"${total_dividends_1y:,.0f}")
 
         # ==========================================
-        # 📉 修正：讀取 Value_History 並強力過濾手輸字串
+        # 📉 歷史資產防呆寫入與繪圖
         # ==========================================
         history_error = False
         df_history_to_display = pd.DataFrame()
         try:
             df_history = conn.read(worksheet="Value_History", ttl=0)
-            if df_history is not None and 'Date' in df_history.columns and not df_history.empty:
-                df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-                df_history = df_history.dropna(subset=['Date'])
+            if df_history is not None and not df_history.empty:
+                df_history.columns = [str(c).strip().replace(' ', '_') for c in df_history.columns]
+                df_history = df_history.loc[:, ~df_history.columns.duplicated()]
                 
-                # 強制清洗 Total_Value，防止手動編輯的字串引發 Plotly 繪圖格式崩潰
-                if 'Total_Value' in df_history.columns:
+                if 'Date' in df_history.columns and 'Total_Value' in df_history.columns:
+                    df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+                    df_history = df_history.dropna(subset=['Date'])
+                    
                     df_history['Total_Value'] = pd.to_numeric(
                         df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), 
                         errors='coerce'
                     ).fillna(0)
-                
-                if len(df_history) >= 1:
+                    
                     today_str = datetime.now().strftime('%Y-%m-%d')
                     now_time = datetime.now().strftime('%H:%M:%S')
                     
-                    if today_str in df_history['Date'].values:
-                        idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
-                        existing_val = safe_float(df_history.at[idx, 'Total_Value'])
-                        if abs(existing_val - total_market_value) > 1:
-                            df_history.at[idx, 'Total_Value'] = total_market_value
-                            df_history.at[idx, 'Last_Updated'] = now_time
+                    if len(df_history) >= 1:
+                        if today_str in df_history['Date'].values:
+                            idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
+                            existing_val = safe_float(df_history.at[idx, 'Total_Value'])
+                            if abs(existing_val - total_market_value) > 1:
+                                df_history.at[idx, 'Total_Value'] = total_market_value
+                                df_history.at[idx, 'Last_Updated'] = now_time
+                                conn.update(worksheet="Value_History", data=df_history)
+                        else:
+                            new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+                            df_history = pd.concat([df_history, new_row], ignore_index=True)
                             conn.update(worksheet="Value_History", data=df_history)
+                        df_history_to_display = df_history
                     else:
-                        new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
-                        df_history = pd.concat([df_history, new_row], ignore_index=True)
-                        conn.update(worksheet="Value_History", data=df_history)
-                    df_history_to_display = df_history
+                        history_error = True
                 else:
-                    st.warning("⚠️ 系統偵測到 Value_History 無歷史資料，已啟動防寫保護。請手動輸入第一筆資料解鎖。")
                     history_error = True
             else:
                 history_error = True
         except Exception:
             history_error = True
 
-        if history_error or df_history_to_display.empty:
+        if history_error or df_history_to_display.empty or 'Total_Value' not in df_history_to_display.columns:
             df_history_to_display = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value}])
 
         if not history_error and not df_history_to_display.empty and len(df_history_to_display) > 1:
@@ -419,7 +505,6 @@ with tab1:
             st.caption("📈 總市值每日變化趨勢")
             df_history_to_display['Total_Value'] = pd.to_numeric(df_history_to_display['Total_Value'], errors='coerce').fillna(0)
             fig_hist = px.line(df_history_to_display, x='Date', y='Total_Value', markers=True)
-            # 加上數字標籤
             fig_hist.update_traces(text=df_history_to_display['Total_Value'], textposition="top center", texttemplate='%{text:,.0f}')
             fig_hist.update_layout(height=260, margin=dict(t=10, b=10, l=10, r=10), yaxis_title=None, xaxis_title=None)
             st.plotly_chart(fig_hist, use_container_width=True)
@@ -500,8 +585,16 @@ with tab_hl:
                 d_kd_death = "🔴 KD高檔死叉" in kd_d
                 
                 is_break = res.get('_is_break_ma', False)
-                ma20_up = res.get('_ma20_up_3d', False)
-                ma_s_up = res.get('_ma_s_up_3d', False)
+                ma20_up = res.get('_ma20_up_5d', False)
+                ma_s_up = res.get('_ma_s_up_5d', False)
+                ma20_dn = res.get('_ma20_dn_5d', False)
+                ma_s_dn = res.get('_ma_s_dn_5d', False)
+                above_ma20_5d = res.get('_above_ma20_5d', False)
+                below_ma20_5d = res.get('_below_ma20_5d', False)
+                above_mas_5d = res.get('_above_mas_5d', False)
+                below_mas_5d = res.get('_below_mas_5d', False)
+                has_ret_5d = res.get('_has_ret_5d', False)
+                ret_5d = res.get('_ret_5d', 0.0)
 
                 tags = []
                 if w_macd_gold: tags.append("週MACD零下金叉")
@@ -509,18 +602,35 @@ with tab_hl:
                 if d_macd_gold: tags.append("日MACD零下金叉")
                 if d_kd_gold: tags.append("日KD低檔金叉")
                 
-                if ma20_up and ma_s_up: tags.append("月季線雙上彎")
-                elif ma20_up: tags.append("月線上彎")
-                elif ma_s_up: tags.append("季線上彎")
+                if ma20_up and ma_s_up: tags.append("月季線上彎≥5日")
+                elif ma20_up: tags.append("月線上彎≥5日")
+                elif ma_s_up: tags.append("季線上彎≥5日")
+                
+                if above_ma20_5d and above_mas_5d: tags.append("站上月季線≥5日")
+                elif above_ma20_5d: tags.append("站上月線≥5日")
+                elif above_mas_5d: tags.append("站上季線≥5日")
+                
+                if has_ret_5d and ret_5d >= 5.0: tags.append("近5日上漲≥5%")
                 
                 if w_macd_death: tags.append("週MACD零上死叉")
                 if w_kd_death: tags.append("週KD高檔死叉")
                 if d_macd_death: tags.append("日MACD零上死叉")
                 if d_kd_death: tags.append("日KD高檔死叉")
+                
                 if is_break: tags.append("跌破季線")
+                
+                if ma20_dn and ma_s_dn: tags.append("月季線下彎≥5日")
+                elif ma20_dn: tags.append("月線下彎≥5日")
+                elif ma_s_dn: tags.append("季線下彎≥5日")
+                
+                if below_ma20_5d and below_mas_5d: tags.append("跌破月季線≥5日")
+                elif below_ma20_5d: tags.append("跌破月線≥5日")
+                elif below_mas_5d: tags.append("跌破季線≥5日")
+                
+                if has_ret_5d and ret_5d <= -5.0: tags.append("近5日下跌≥5%")
 
-                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up * 1) + (ma_s_up * 1)
-                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1)
+                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up * 1) + (ma_s_up * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
+                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn * 1) + (ma_s_dn * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'pe_str': pe_str, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score, 'price': res['價格']}
                 
@@ -608,10 +718,14 @@ with tab2:
 
         #### 三、 均線動能與破線警示 (MA)
         * **跌破月/季線**：今日剛發生實質跌破月線或季線。
-        * **月/季線上彎 ≥ 3日**：月線(MA20)或季線連續三個交易日遞增。
-        * **月季線雙上彎**：同時滿足月線與季線連續上彎 3 日。
+        * **月/季線上彎 ≥ 5日**：月線(MA20)或季線連續 5 個交易日遞增。
+        * **月/季線下彎 ≥ 5日**：月線(MA20)或季線連續 5 個交易日遞減。
+        * **站上月/季線 ≥ 5日**：收盤價連續 5 個交易日維持在該均線之上。
+        * **跌破月/季線 ≥ 5日**：收盤價連續 5 個交易日維持在該均線之下。
 
-        #### 四、 價格回落與盤整防禦
+        #### 四、 價格回落與漲跌防禦
+        * **近5日上漲 ≥ 5%**：近 5 個交易日累計漲幅達 5% (含) 以上。
+        * **近5日下跌 ≥ 5%**：近 5 個交易日累計跌幅達 5% (含) 以上。
         * **近高點回落 XX%**：距過去 52 週最高價跌幅達 15% (含) 以上。
         * **20日回落 XX%**：距過去 20 日最高價跌幅達 10% (含) 以上。
         * **💤 20日窄幅盤整**：過去 20 日最高與最低價振幅壓縮在 7% (含) 以內。
@@ -690,8 +804,7 @@ with tab3:
 with tab_etf:
     st.markdown("### 🧩 ETF Top 10 成分股")
     
-    # 使用 CSV 匯出網址直連，繞過 API 權限檢查
-    csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/export?format=csv&gid=892058804"
+    csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
     
     try:
         df_etf_db = pd.read_csv(csv_url)
@@ -735,7 +848,6 @@ with tab_etf:
                         plot_df = df_show.copy()
                         plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                         
-                        # 暴力清洗權重欄位：移除 % 符號、逗點與空白
                         plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                         
@@ -750,9 +862,11 @@ with tab_etf:
                             fig_etf.update_layout(height=400, yaxis_title=None, xaxis_title="%", margin=dict(l=10, r=10, t=30, b=10))
                             st.plotly_chart(fig_etf, use_container_width=True)
                         else:
-                            st.info("該 ETF 無效的權重數值。")
+                            st.info("無效的權重數值。")
                     except Exception as ex:
-                        st.warning(f"無法繪製持股比例圖表，錯誤代碼：\n\n{traceback.format_exc()}")
+                        st.warning(f"圖表繪製發生錯誤：\n\n{traceback.format_exc()}")
+                            
+                    st.dataframe(df_show, hide_index=True, use_container_width=True)
 
 with tab4:
     st.markdown("### 📖 每日看盤心得")
