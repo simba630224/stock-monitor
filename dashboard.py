@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 import warnings
 import time
+import traceback
 from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
@@ -16,7 +17,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
-# 0. 輔助函式：強力防呆安全轉換與均線位階
+# 0. 輔助函式：強力防呆安全轉換
 # ==========================================
 def safe_float(val):
     try:
@@ -52,37 +53,60 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-try:
-    df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
-    if df_tw is not None and not df_tw.empty:
-        df_tw.columns = [str(c).strip() for c in df_tw.columns]
-        df_tw = df_tw.dropna(subset=['Ticker'])
-        if '名稱' not in df_tw.columns: df_tw['名稱'] = ''
-        if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
-        if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
-        if '類別' not in df_tw.columns: df_tw['類別'] = '台股'
-        PORTFOLIO_TW = df_tw.to_dict('records')
-    else:
-        PORTFOLIO_TW = []
-        df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
-except Exception as e:
+# 💡 智慧欄位辨識系統：自動適應您在試算表的任何更動
+def load_and_standardize_portfolio(worksheet_name, default_category):
+    try:
+        df = conn.read(worksheet=worksheet_name, ttl=0)
+        if df is None or df.empty:
+            return pd.DataFrame()
+            
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        # 建立欄位對應字典
+        col_map = {}
+        for c in df.columns:
+            cl = c.lower()
+            if cl in ['ticker', 'symbol', '代號', '股票代號', '標的代號']: col_map[c] = 'Ticker'
+            elif cl in ['name', '名稱', '標的名稱', '股票名稱']: col_map[c] = '名稱'
+            elif cl in ['shares', '股數', '持有股數', '庫存', '數量']: col_map[c] = 'Shares'
+            elif cl in ['出借', '借券', '複委託']: col_map[c] = '出借' if default_category == '台股' else '複委託'
+            elif cl in ['類別', 'category', '分類', '市場']: col_map[c] = '類別'
+            
+        df = df.rename(columns=col_map)
+        
+        # 若仍無 Ticker，預設第一欄為 Ticker
+        if 'Ticker' not in df.columns and len(df.columns) > 0:
+            df = df.rename(columns={df.columns[0]: 'Ticker'})
+            
+        if 'Ticker' in df.columns:
+            df = df.dropna(subset=['Ticker'])
+            df = df[df['Ticker'].astype(str).str.strip() != '']
+        else:
+            return pd.DataFrame()
+            
+        if '名稱' not in df.columns: df['名稱'] = ''
+        if 'Shares' not in df.columns: df['Shares'] = 0.0
+        
+        if default_category == '台股' and '出借' not in df.columns: df['出借'] = 0.0
+        elif default_category == '美股' and '複委託' not in df.columns: df['複委託'] = 0.0
+        
+        if '類別' not in df.columns: df['類別'] = default_category
+        
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+df_tw = load_and_standardize_portfolio("TW_Portfolio", "台股")
+if not df_tw.empty:
+    PORTFOLIO_TW = df_tw.to_dict('records')
+else:
     PORTFOLIO_TW = []
     df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
 
-try:
-    df_us = conn.read(worksheet="US_Portfolio", ttl=0)
-    if df_us is not None and not df_us.empty:
-        df_us.columns = [str(c).strip() for c in df_us.columns]
-        df_us = df_us.dropna(subset=['Ticker'])
-        if '名稱' not in df_us.columns: df_us['名稱'] = ''
-        if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
-        if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
-        if '類別' not in df_us.columns: df_us['類別'] = '美股'
-        PORTFOLIO_US = df_us.to_dict('records')
-    else:
-        PORTFOLIO_US = []
-        df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
-except Exception as e:
+df_us = load_and_standardize_portfolio("US_Portfolio", "美股")
+if not df_us.empty:
+    PORTFOLIO_US = df_us.to_dict('records')
+else:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
@@ -242,6 +266,15 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 f_info = get_fundamental_info(sym)
                 is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper() or 'MUTUALFUND' in str(f_info.get('quoteType', '')).upper()
                 
+                def fmt_pct_text(val):
+                    if is_etf: return "ETF/不適用"
+                    if val is not None and pd.notna(val): return f"{val * 100:.1f} %"
+                    return "暫無資料"
+
+                gross_m = fmt_pct_text(f_info.get('grossMargins'))
+                op_m = fmt_pct_text(f_info.get('operatingMargins'))
+                prof_m = fmt_pct_text(f_info.get('profitMargins'))
+                
                 roe_raw = f_info.get('returnOnEquity')
                 roe_val = roe_raw * 100 if roe_raw is not None and not is_etf else None
 
@@ -260,7 +293,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                     "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
                     "近一季報酬": float(ret_1q), "近半年報酬": float(ret_6m), "近一年報酬": float(ret_1y),
                     "相對大盤": float(rel_val), "近一年殖利率": float(yield_1y), "總配息金額": float(tot_div),
-                    "近一年配息明細": div_history_str, "ROE": float(roe_val) if roe_val is not None else None
+                    "近一年配息明細": div_history_str, "毛利率": gross_m, "營益率": op_m, "淨利率": prof_m, "ROE": float(roe_val) if roe_val is not None else None
                 }
         except: time.sleep(1)
     return None
@@ -534,6 +567,9 @@ with tab1:
     col3.metric("近一年累計股息 (TWD)", f"${total_dividends_1y:,.0f}")
     col4.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
 
+    # ==========================================
+    # 📉 總市值歷史寫入防呆機制
+    # ==========================================
     history_error = False
     df_history_to_display = pd.DataFrame()
     try:
@@ -687,10 +723,10 @@ with tab2:
                 d_kd_death = "🔴 KD高檔死叉" in kd_d
                 
                 is_break = res.get('_is_break_ma', False)
-                ma20_up = res.get('_ma20_up_5d', False)
-                ma_s_up = res.get('_ma_s_up_5d', False)
-                ma20_dn = res.get('_ma20_dn_5d', False)
-                ma_s_dn = res.get('_ma_s_dn_5d', False)
+                ma20_up_5d = res.get('_ma20_up_5d', False)
+                ma_s_up_5d = res.get('_ma_s_up_5d', False)
+                ma20_dn_5d = res.get('_ma20_dn_5d', False)
+                ma_s_dn_5d = res.get('_ma_s_dn_5d', False)
                 above_ma20_5d = res.get('_above_ma20_5d', False)
                 below_ma20_5d = res.get('_below_ma20_5d', False)
                 above_mas_5d = res.get('_above_mas_5d', False)
@@ -704,9 +740,9 @@ with tab2:
                 if d_macd_gold: tags.append("日MACD零下金叉")
                 if d_kd_gold: tags.append("日KD低檔金叉")
                 
-                if ma20_up and ma_s_up: tags.append("月季線雙上彎≥5日")
-                elif ma20_up: tags.append("月線上彎≥5日")
-                elif ma_s_up: tags.append("季線上彎≥5日")
+                if ma20_up_5d and ma_s_up_5d: tags.append("月季線雙上彎≥5日")
+                elif ma20_up_5d: tags.append("月線上彎≥5日")
+                elif ma_s_up_5d: tags.append("季線上彎≥5日")
                 
                 if above_ma20_5d and above_mas_5d: tags.append("站上月季線≥5日")
                 elif above_ma20_5d: tags.append("站上月線≥5日")
@@ -721,9 +757,9 @@ with tab2:
                 
                 if is_break: tags.append("跌破季線")
                 
-                if ma20_dn and ma_s_dn: tags.append("月季線雙下彎≥5日")
-                elif ma20_dn: tags.append("月線下彎≥5日")
-                elif ma_s_dn: tags.append("季線下彎≥5日")
+                if ma20_dn_5d and ma_s_dn_5d: tags.append("月季線雙下彎≥5日")
+                elif ma20_dn_5d: tags.append("月線下彎≥5日")
+                elif ma_s_dn_5d: tags.append("季線下彎≥5日")
                 
                 if below_ma20_5d and below_mas_5d: tags.append("跌破月季線≥5日")
                 elif below_ma20_5d: tags.append("跌破月線≥5日")
@@ -731,8 +767,8 @@ with tab2:
                 
                 if has_ret_5d and ret_5d <= -5.0: tags.append("近5日下跌≥5%")
 
-                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up * 1) + (ma_s_up * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
-                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn * 1) + (ma_s_dn * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
+                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up_5d * 1) + (ma_s_up_5d * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
+                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn_5d * 1) + (ma_s_dn_5d * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score}
                 
@@ -950,19 +986,29 @@ with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
     st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
     
+    ETF_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/export?format=csv&gid=892058804"
+    
     try:
-        df_etf_db = conn.read(spreadsheet="https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc", worksheet="ETF_Holdings_DB", ttl=0)
+        df_etf_db = pd.read_csv(ETF_URL)
         read_success = True
+        err_msg = ""
     except Exception as e:
         df_etf_db = pd.DataFrame()
         read_success = False
+        err_msg = str(e)
 
     if not read_success:
         st.error("❌ **無法讀取外部 ETF 試算表！**")
+        with st.expander("👉 點擊查看詳細系統錯誤訊息", expanded=True):
+            st.code(err_msg)
+        st.info("💡 **唯一解決方法**：\n請打開您的 ETF 試算表，點擊右上角的 **「共用 (Share)」**，將一般存取權限改為**「知道連結的人均可檢視 (Anyone with the link)」**。這不會洩漏您的隱私，且能讓程式瞬間讀取！")
     elif df_etf_db is None or df_etf_db.empty:
         st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。請確認爬蟲已成功寫入資料。")
     else:
         df_etf_db = df_etf_db.dropna(how='all')
+        
+        with st.expander("🛠️ 展開查看原始讀取資料 (除錯用)", expanded=False):
+            st.dataframe(df_etf_db.head())
 
         if len(df_etf_db.columns) < 3:
             st.error(f"⚠️ 讀取成功，但欄位數量異常！預期至少 3 欄，但只讀到 {len(df_etf_db.columns)} 欄。")
@@ -975,7 +1021,7 @@ with tab_etf:
             etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'ticker', 'nan', 'none'] and '代號' not in x]
             
             if not etf_options:
-                st.warning("⚠️ 工作表中未能解析出有效的 ETF 代號！")
+                st.warning("⚠️ 工作表中未能解析出有效的 ETF 代號！請展開上方原始資料確認第一欄的內容。")
             else:
                 col_etf1, col_etf2 = st.columns([1, 2])
                 
