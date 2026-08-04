@@ -28,11 +28,10 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. 終極工業級濾網 (消滅所有雜訊與產業分類)
+# 2. 無塵室等級：終極黑名單濾網
 # ==========================================
 def clean_holding_name(raw_name):
-    """最嚴苛的黑名單，針對各網站混雜在表格中的雜訊進行深度清洗"""
-    # 注意：這裡不直接移除所有空格，以免將英文公司名 (如 NVIDIA CORP) 黏在一起
+    """消滅所有代號、數字、國家地區、台股分類與 GICS 國際分類"""
     name = str(raw_name).strip().replace('\n', '').replace('\r', '')
     
     # 1. 移除開頭的數字、標點與空格 (如 "1. 台積電" -> "台積電")
@@ -43,74 +42,109 @@ def clean_holding_name(raw_name):
     name = re.sub(r'\*+$', '', name)
     name = name.strip()
     
-    # 3. 拒絕長度過短 (消滅 "A")
-    if len(name) < 2: 
-        return None
+    # 3. 拒絕長度過短 (消滅 "A") 與純數字標點 (消滅 ",865,733.10")
+    if len(name) < 2: return None
+    if re.fullmatch(r'^[0-9,\.\-\+%]+$', name.replace(' ', '')): return None
         
-    # 4. 拒絕純數字與標點符號 (消滅 ",865,733.10")
-    if re.fullmatch(r'^[0-9,\.\-\+%]+$', name.replace(' ', '')): 
-        return None
-        
-    # 5. 拒絕國家地區與資產分類
+    # 4. 拒絕精確名詞 (國家、資產類別、標題列、單一產業詞彙)
     bad_exact = {
         '台灣', '臺灣', '美國', '日本', '中國', '香港', '韓國', '歐洲', '亞洲', '全球', '美洲', 
         '股票', '債券', '現金', '期貨', '選擇權', '基金', '合計', '小計', '總計', '資產', '其他', '行業', 
         '存款', '附買回', '流動準備', '名稱', '權重', '比例', '明細', '比重', '佔比', '發行公司', 
-        '投資明細', '受益憑證', '外幣', '市值', '指數', '報酬'
+        '投資明細', '受益憑證', '外幣', '市值', '指數', '報酬', '綜合', '能源', '工業', '原材料', 
+        '半導體', '金融', '光電', '航運', '鋼鐵', '塑膠', '橡膠', '造紙', '水泥', '食品', '汽車'
     }
-    if name.replace(' ', '') in bad_exact: 
-        return None
+    if name.replace(' ', '') in bad_exact: return None
         
-    # 6. 拒絕國內外所有產業分類 (全面封殺 "資訊科技", "運動休閒", "半導體業")
-    industries_exact = {
-        # 台股分類
-        '金融保險', '生技醫療', '通信網路', '觀光餐旅', '電子零組件', '半導體', '電腦及週邊設備', '電腦及週邊', 
-        '光電', '航運', '鋼鐵', '塑膠', '紡織纖維', '電機機械', '電器電纜', '化學工業', '建材營造', '貿易百貨', 
-        '油電燃氣', '橡膠', '造紙', '玻璃陶瓷', '水泥', '食品', '汽車', '電子通路', '資訊服務', '類指數',
-        '綠能環保', '數位雲端', '運動休閒', '居家生活', '農業科技', '綜合',
-        # 美股/GICS 國際分類
-        '資訊科技', '通訊服務', '非核心消費', '核心消費', '醫療保健', '工業', '原材料', '房地產', '公用事業', '金融', '能源'
-    }
+    # 5. 特殊前綴與後綴無情封殺 (專殺 00935 的 "電子-..." 與 00646 的 "...消費品")
+    if name.startswith('電子-'): return None
+    if name.endswith('消費品'): return None
+        
+    # 6. 強效子字串封殺 (包含即剔除)
+    bad_substrings = [
+        '通信網路', '運動休閒', '資訊科技', '綠能環保', '數位雲端', '居家生活', '農業科技', 
+        '金融保險', '生技醫療', '觀光餐旅', '電子零組件', '半導體業', '建材營造', '貿易百貨', 
+        '油電燃氣', '化學工業', '電器電纜', '電機機械', '紡織纖維', '玻璃陶瓷', '電子通路', 
+        '資訊服務', '醫療保健', '通訊服務', '非核心消費', '核心消費', '公用事業', '房地產',
+        '週邊設備', '日常消費'
+    ]
+    if any(bad in name for bad in bad_substrings): return None
     
-    if name.replace('業', '') in industries_exact or name in industries_exact:
+    # 7. 阻擋以"業"結尾的產業分類，但放行真正的公司
+    if name.endswith('業') and name not in ['統一實業', '大成實業', '勤益控', '神達電腦', '廣達電腦', '仁寶電腦', '精誠資訊']:
         return None
-    
-    # 阻擋以"業"結尾的產業分類，但放行真正的公司
-    if name.endswith('業'):
-        if name not in ['統一實業', '大成實業', '勤益控', '神達電腦', '廣達電腦', '仁寶電腦', '精誠資訊']:
-            return None
             
     return name
 
 # ==========================================
 # 3. 雙核心解析引擎
 # ==========================================
-def parse_moneydj_rows(html_text):
-    """針對 MoneyDJ 特製的逐列掃描器，無視表頭直接配對名稱與數字"""
+def extract_texts_greedily(html_text):
+    """貪婪備援掃描，專剋表頭異常的網頁"""
+    soup = BeautifulSoup(html_text, 'html.parser')
+    blocks = list(soup.stripped_strings)
+    results = []
+    for i, block in enumerate(blocks):
+        if '%' in block:
+            w_str = block.replace('%', '').replace(',', '').strip()
+        elif i + 1 < len(blocks) and blocks[i+1] == '%':
+            w_str = blocks[i].replace(',', '').strip()
+        else:
+            continue
+        try:
+            weight = float(w_str)
+            if not (0 < weight <= 100): continue
+        except ValueError:
+            continue
+            
+        name = None
+        for j in range(1, 6):
+            if i - j < 0: break
+            candidate = clean_holding_name(blocks[i-j])
+            if candidate:
+                name = candidate
+                break
+                
+        if name and weight:
+            results.append({"成分股名稱": name, "權重(%)": weight})
+    return results
+
+def parse_moneydj_table(html_text):
+    """針對 MoneyDJ 特製的結構化表格解析器"""
     soup = BeautifulSoup(html_text, 'html.parser')
     results = []
     
-    for tr in soup.find_all('tr'):
-        tds = tr.find_all(['td', 'th'])
-        if len(tds) < 2: continue
-            
-        texts = [td.text.strip() for td in tds]
+    for tbl in soup.find_all('table'):
+        name_idx, weight_idx = -1, -1
+        rows = tbl.find_all('tr')
         
-        # 尋找該列是否有合法的個股名稱
-        for i, txt in enumerate(texts):
-            name = clean_holding_name(txt)
-            if name:
-                # 找到名稱後，往右側尋找合理的權重數字
-                for w_txt in texts[i+1:]:
-                    w_val = w_txt.replace('%', '').replace(',', '').strip()
-                    try:
-                        w = float(w_val)
-                        if 0 < w <= 100:
-                            results.append({"成分股名稱": name, "權重(%)": w})
-                            break
-                    except ValueError:
-                        pass
-                break # 換下一列
+        for row in rows:
+            cols = row.find_all(['th', 'td'])
+            if len(cols) < 2: continue
+            texts = [c.text.strip().replace(' ', '').replace('\n', '') for c in cols]
+            
+            # 定位欄位
+            if name_idx == -1 or weight_idx == -1:
+                for i, t in enumerate(texts):
+                    if any(k in t for k in ['名稱', '股票', '標的', '成分股']): name_idx = i
+                    if any(k in t for k in ['權重', '比例', '比重', '%']): weight_idx = i
+            
+            # 抽取資料
+            else:
+                if len(cols) > max(name_idx, weight_idx):
+                    raw_name = cols[name_idx].text.strip()
+                    name = clean_holding_name(raw_name)
+                    if name:
+                        w_str = cols[weight_idx].text.replace('%', '').replace(',', '').strip()
+                        try:
+                            w = float(w_str)
+                            if 0 < w <= 100:
+                                results.append({"成分股名稱": name, "權重(%)": w})
+                        except ValueError: pass
+                        
+    # 若結構解析失敗 (如 009815 無常規表頭)，啟用貪婪掃描
+    if not results:
+        return extract_texts_greedily(html_text)
     return results
 
 def parse_yahoo_json(html_text):
@@ -130,8 +164,7 @@ def parse_yahoo_json(html_text):
                         w = float(r_match.group(1))
                         if 0 < w <= 100:
                             results.append({"成分股名稱": name, "權重(%)": w})
-                    except ValueError:
-                        pass
+                    except ValueError: pass
     return results
 
 def process_holdings(ticker, holdings_list):
@@ -143,7 +176,6 @@ def process_holdings(ticker, holdings_list):
             unique_dict[name] = h
             
     res = list(unique_dict.values())
-    # 確保最多輸出 20 檔，並依照權重排序
     res = sorted(res, key=lambda x: x['權重(%)'], reverse=True)[:20]
     
     final_res = []
@@ -169,7 +201,6 @@ def pad_tw_ticker(ticker):
 # ==========================================
 def get_us_etf_holdings(ticker):
     print(f"🔍 正在檢查美股 ETF: {ticker}")
-    
     try:
         etf = yf.Ticker(ticker)
         fd = etf.get_funds_data()
@@ -186,7 +217,6 @@ def get_us_etf_holdings(ticker):
                 print(f"✅ [來源: YFinance] 成功抓取美股 {ticker}，共 {len(res_list)} 檔")
                 return res_list
     except Exception: pass
-        
     print(f"⚠️ {ticker} 系統無提供成分股明細。")
     return []
 
@@ -196,10 +226,12 @@ def get_tw_etf_holdings(raw_ticker):
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://www.moneydj.com/"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive"
     }
     
-    # 第一順位：Yahoo JSON (專攻 0050, 0056，可無痛取得 Top 20)
+    # 第一順位：Yahoo JSON (專攻 0050, 0056，突破 Top 20)
     for suffix in ['.TW', '.TWO']:
         try:
             url_y = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
@@ -213,8 +245,8 @@ def get_tw_etf_holdings(raw_ticker):
                     return res_list
         except Exception: pass
 
-    # 第二順位：MoneyDJ (專攻 009813, 009815 等新股)
-    # 注意：根據回報，全面使用小寫網址 etf/x/basic/basic0007.xdjhtm，並輪詢四種後綴
+    # 第二順位：MoneyDJ (專攻 009813, 009815 等新股或海外成分)
+    # 注意：完全採用小寫基礎路徑，並輪詢四種大小寫後綴
     suffixes_to_try = ['.tw', '.TW', '.two', '.TWO']
     
     for suffix in suffixes_to_try:
@@ -223,7 +255,7 @@ def get_tw_etf_holdings(raw_ticker):
             res = requests.get(url_m, headers=headers, timeout=10)
             res.encoding = 'utf-8'
             if res.status_code == 200:
-                holdings = parse_moneydj_rows(res.text)
+                holdings = parse_moneydj_table(res.text)
                 if holdings:
                     res_list = process_holdings(clean_ticker, holdings)
                     if len(res_list) > 0:
@@ -240,7 +272,7 @@ def get_tw_etf_holdings(raw_ticker):
 # 5. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (全網域突破 & 終極純淨版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (無塵純淨 Top20 版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
