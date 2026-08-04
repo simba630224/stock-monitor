@@ -28,17 +28,17 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. 嚴謹校正：海外與連結型 ETF 替身字典
+# 2. 替身字典 (僅作為最後備案 Plan B)
 # ==========================================
-# 針對台灣發行但追蹤海外市場的 ETF，直接透過 YFinance 抓取海外對等標的
+# 當台灣網站完全查無資料時，才啟動這些海外對等標的進行救援
 FEEDER_PROXY_MAP = {
-    '009813': 'XLG',    # 貝萊德 S&P 500 Top 50 -> 對應 Invesco S&P 500 Top 50 ETF
-    '009815': 'MAGS',   # 大華美國 MAG7+ -> 對應 Roundhill MAG7 ETF
-    '009812': '1306.T', # 野村日本東證 -> 對應日本 TOPIX ETF (1306.JP)
-    '00646': 'IVV',     # 元大 S&P 500 -> 對應 iShares S&P 500 ETF
-    '00662': 'QQQ',     # 富邦 NASDAQ -> 對應 Invesco QQQ
-    '00830': 'SOXX',    # 國泰費城半導體 -> 對應 iShares 半導體 ETF
-    '00757': 'FNGS',    # 統一 FANG+ -> 對應 MicroSectors FANG+ ETN
+    '009813': 'XLG',    # 貝萊德 S&P 500 Top 50 -> 備案: Invesco S&P 500 Top 50 ETF
+    '009815': 'MAGS',   # 大華美國 MAG7+ -> 備案: Roundhill MAG7 ETF
+    '009812': '1306.T', # 野村日本東證 -> 備案: 日本 TOPIX ETF (1306.JP)
+    '00646': 'IVV',     # 元大 S&P 500 -> 備案: iShares S&P 500 ETF
+    '00662': 'QQQ',     # 富邦 NASDAQ -> 備案: Invesco QQQ
+    '00830': 'SOXX',    # 國泰費城半導體 -> 備案: iShares 半導體 ETF
+    '00757': 'FNGS',    # 統一 FANG+ -> 備案: MicroSectors FANG+ ETN
 }
 
 # ==========================================
@@ -67,9 +67,10 @@ def clean_holding_name(raw_name):
     }
     if name.replace(' ', '') in bad_exact: return None
         
-    # 專殺 00935 的 "電子-..." 與 00646 的 "...消費品"
+    # 專殺 00935 等特殊前綴與 GICS 後綴
     if name.startswith('電子-'): return None
     if name.endswith('消費品'): return None
+    if name.endswith('服務'): return None
         
     # 強效子字串封殺 (包含即剔除)
     bad_substrings = [
@@ -88,7 +89,7 @@ def clean_holding_name(raw_name):
     return name
 
 # ==========================================
-# 4. 雙核心解析引擎與後處理
+# 4. 網頁解析引擎與後處理
 # ==========================================
 def parse_moneydj_table(html_text):
     """針對 MoneyDJ 特製的結構化表格解析器"""
@@ -122,11 +123,10 @@ def parse_moneydj_table(html_text):
                             if 0 < w <= 100:
                                 results.append({"成分股名稱": name, "權重(%)": w})
                         except ValueError: pass
-                        
     return results
 
 def parse_yahoo_json(html_text):
-    """攔截 Yahoo 隱藏 JSON，無痛直取 Top 50"""
+    """攔截 Yahoo 隱藏 JSON，無痛直取多檔清單"""
     results = []
     match = re.search(r'"holdings":\[(.*?)\]', html_text)
     if match:
@@ -143,6 +143,36 @@ def parse_yahoo_json(html_text):
                         if 0 < w <= 100:
                             results.append({"成分股名稱": name, "權重(%)": w})
                     except ValueError: pass
+    return results
+
+def extract_texts_greedily(html_text):
+    """貪婪備援掃描，專剋表頭異常的網頁 (如 CMoney)"""
+    soup = BeautifulSoup(html_text, 'html.parser')
+    blocks = list(soup.stripped_strings)
+    results = []
+    for i, block in enumerate(blocks):
+        if '%' in block:
+            w_str = block.replace('%', '').replace(',', '').strip()
+        elif i + 1 < len(blocks) and blocks[i+1] == '%':
+            w_str = blocks[i].replace(',', '').strip()
+        else:
+            continue
+        try:
+            weight = float(w_str)
+            if not (0 < weight <= 100): continue
+        except ValueError:
+            continue
+            
+        name = None
+        for j in range(1, 6):
+            if i - j < 0: break
+            candidate = clean_holding_name(blocks[i-j])
+            if candidate:
+                name = candidate
+                break
+                
+        if name and weight:
+            results.append({"成分股名稱": name, "權重(%)": weight})
     return results
 
 def process_holdings(ticker, holdings_list):
@@ -175,15 +205,18 @@ def pad_tw_ticker(ticker):
     return t
 
 # ==========================================
-# 5. 爬蟲引擎配置
+# 5. 爬蟲引擎配置 (主動與備案切換)
 # ==========================================
 def get_us_etf_holdings(ticker, override_ticker=None):
     """
-    抓取 YFinance 資料。
-    override_ticker 允許將 1306.T 的結果偽裝成 009812 寫入資料庫。
+    抓取美股/海外資料 (包含替身備案)。
+    override_ticker 允許將替身 (如 1306.T) 偽裝成原始台股代號 (009812) 寫入。
     """
     target_output_ticker = override_ticker if override_ticker else ticker
-    print(f"🔍 正在檢查海外標的: {ticker}" + (f" (作為 {override_ticker} 的替身)" if override_ticker else ""))
+    msg = f"🔍 正在檢查海外標的: {ticker}"
+    if override_ticker:
+        msg = f"🔄 啟動最後備案: 透過替身 {ticker} 抓取 {override_ticker} 的底層資料..."
+    print(msg)
     
     try:
         etf = yf.Ticker(ticker)
@@ -208,18 +241,12 @@ def get_us_etf_holdings(ticker, override_ticker=None):
     return []
 
 def get_tw_etf_holdings(raw_ticker):
+    """
+    【核心邏輯】
+    優先嘗試台灣網站 (Yahoo, MoneyDJ, CMoney)。
+    若全部失敗，且代號存在於替身字典，才啟用海外替身作為備案 (Plan B)。
+    """
     clean_ticker = pad_tw_ticker(raw_ticker)
-    
-    # 【關鍵突破】如果是海外連結型 ETF，直接啟動替身穿透法！
-    if clean_ticker in FEEDER_PROXY_MAP:
-        proxy_ticker = FEEDER_PROXY_MAP[clean_ticker]
-        print(f"🔄 偵測到 {clean_ticker} 為海外/連結型 ETF，啟動底層穿透轉向 {proxy_ticker}...")
-        proxy_results = get_us_etf_holdings(proxy_ticker, override_ticker=clean_ticker)
-        if proxy_results:
-            return proxy_results
-        else:
-            print(f"⚠️ 底層替身 {proxy_ticker} 抓取失敗，退回常規台股網頁掃描...")
-    
     print(f"🔍 正在抓取台股 ETF: {clean_ticker}")
     
     headers = {
@@ -227,46 +254,70 @@ def get_tw_etf_holdings(raw_ticker):
         "Referer": "https://tw.stock.yahoo.com/"
     }
     
-    # 國內第一順位：Yahoo JSON (專攻 0050, 0056，突破 Top 20)
+    final_results = []
+    
+    # [嘗試 1]：Yahoo JSON (專攻 0050, 0056)
     for suffix in ['.TW', '.TWO']:
+        if final_results: break
         try:
             url_y = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
             res = requests.get(url_y, headers=headers, timeout=10)
             if res.status_code == 200:
                 holdings = parse_yahoo_json(res.text)
-                if len(holdings) >= 10: 
-                    res_list = process_holdings(clean_ticker, holdings)
-                    print(f"✅ [來源: Yahoo JSON] 成功抓取 {clean_ticker}，共 {len(res_list)} 檔純淨資料")
-                    time.sleep(1)
-                    return res_list
+                if len(holdings) >= 5: 
+                    final_results = process_holdings(clean_ticker, holdings)
+                    print(f"✅ [來源: Yahoo] 成功抓取 {clean_ticker}，共 {len(final_results)} 檔純淨資料")
         except Exception: pass
 
-    # 國內第二順位：MoneyDJ (專攻其他新股，使用小寫基礎路徑)
-    suffixes_to_try = ['.tw', '.TW', '.two', '.TWO']
-    for suffix in suffixes_to_try:
+    # [嘗試 2]：MoneyDJ (專攻新股，精準測試小寫與大寫)
+    if not final_results:
+        suffixes_to_try = ['.tw', '.TW', '.two', '.TWO']
+        for suffix in suffixes_to_try:
+            if final_results: break
+            try:
+                url_m = f"https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={clean_ticker}{suffix}"
+                res = requests.get(url_m, headers=headers, timeout=10)
+                res.encoding = 'utf-8'
+                if res.status_code == 200:
+                    holdings = parse_moneydj_table(res.text)
+                    if holdings:
+                        final_results = process_holdings(clean_ticker, holdings)
+                        if len(final_results) > 0:
+                            print(f"✅ [來源: MoneyDJ] 成功抓取 {clean_ticker}，共 {len(final_results)} 檔純淨資料")
+            except Exception: pass
+
+    # [嘗試 3]：CMoney (備用)
+    if not final_results:
         try:
-            url_m = f"https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={clean_ticker}{suffix}"
-            res = requests.get(url_m, headers=headers, timeout=10)
-            res.encoding = 'utf-8'
+            url_c = f"https://www.cmoney.tw/etf/tw/{clean_ticker}/fundholding"
+            res = requests.get(url_c, headers=headers, timeout=10)
             if res.status_code == 200:
-                holdings = parse_moneydj_table(res.text)
+                holdings = extract_texts_greedily(res.text)
                 if holdings:
-                    res_list = process_holdings(clean_ticker, holdings)
-                    if len(res_list) > 0:
-                        print(f"✅ [來源: MoneyDJ] 成功抓取 {clean_ticker}，共 {len(res_list)} 檔純淨資料")
-                        time.sleep(1)
-                        return res_list
+                    final_results = process_holdings(clean_ticker, holdings)
+                    if len(final_results) > 0:
+                        print(f"✅ [來源: CMoney] 成功抓取 {clean_ticker}，共 {len(final_results)} 檔純淨資料")
         except Exception: pass
-            
-    print(f"⚠️ {clean_ticker} 查無明細 (可能為剛上市或資料空窗期)。")
+
+    # [備案 Plan B]：台灣網站全軍覆沒，且有設定海外替身時，才啟用替身
+    if not final_results:
+        if clean_ticker in FEEDER_PROXY_MAP:
+            proxy_ticker = FEEDER_PROXY_MAP[clean_ticker]
+            print(f"⚠️ 台灣網站查無 {clean_ticker} 資料，進入備案程序...")
+            proxy_results = get_us_etf_holdings(proxy_ticker, override_ticker=clean_ticker)
+            if proxy_results:
+                return proxy_results
+        
+        print(f"⚠️ {clean_ticker} 查無明細 (可能為剛上市或資料空窗期)。")
+        
     time.sleep(1)
-    return []
+    return final_results
 
 # ==========================================
 # 6. 主程式邏輯
 # ==========================================
 def main():
-    print("🚀 開始執行 ETF 持股更新作業 (底層穿透 Top20 最終版)...")
+    print("🚀 開始執行 ETF 持股更新作業 (台灣優先 + 替身備援版)...")
     
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
