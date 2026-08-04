@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 import warnings
 import time
+import traceback
 from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
@@ -54,24 +55,34 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
     df_tw = conn.read(worksheet="TW_Portfolio", ttl=0)
-    df_tw = df_tw.dropna(subset=['Ticker'])
-    if '名稱' not in df_tw.columns: df_tw['名稱'] = ''
-    if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
-    if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
-    if '類別' not in df_tw.columns: df_tw['類別'] = '台股'
-    PORTFOLIO_TW = df_tw.to_dict('records')
+    if df_tw is not None and not df_tw.empty:
+        df_tw.columns = [str(c).strip() for c in df_tw.columns]
+        df_tw = df_tw.dropna(subset=['Ticker'])
+        if '名稱' not in df_tw.columns: df_tw['名稱'] = ''
+        if 'Shares' not in df_tw.columns: df_tw['Shares'] = 0.0
+        if '出借' not in df_tw.columns: df_tw['出借'] = 0.0
+        if '類別' not in df_tw.columns: df_tw['類別'] = '台股'
+        PORTFOLIO_TW = df_tw.to_dict('records')
+    else:
+        PORTFOLIO_TW = []
+        df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
 except Exception as e:
     PORTFOLIO_TW = []
     df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
 
 try:
     df_us = conn.read(worksheet="US_Portfolio", ttl=0)
-    df_us = df_us.dropna(subset=['Ticker'])
-    if '名稱' not in df_us.columns: df_us['名稱'] = ''
-    if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
-    if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
-    if '類別' not in df_us.columns: df_us['類別'] = '美股'
-    PORTFOLIO_US = df_us.to_dict('records')
+    if df_us is not None and not df_us.empty:
+        df_us.columns = [str(c).strip() for c in df_us.columns]
+        df_us = df_us.dropna(subset=['Ticker'])
+        if '名稱' not in df_us.columns: df_us['名稱'] = ''
+        if 'Shares' not in df_us.columns: df_us['Shares'] = 0.0
+        if '複委託' not in df_us.columns: df_us['複委託'] = 0.0
+        if '類別' not in df_us.columns: df_us['類別'] = '美股'
+        PORTFOLIO_US = df_us.to_dict('records')
+    else:
+        PORTFOLIO_US = []
+        df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 except Exception as e:
     PORTFOLIO_US = []
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
@@ -325,7 +336,7 @@ def process_technical_analysis(sym, name, market):
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
         is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
 
-        # 🚀 新增與修訂：判斷月/季線連續上/下彎 >= 5日，以及站上/跌破 >= 5日
+        # 🚀 判斷月/季線連續上/下彎 >= 5日，以及站上/跌破 >= 5日
         ma20_up_5d = False
         ma_s_up_5d = False
         ma20_dn_5d = False
@@ -346,7 +357,14 @@ def process_technical_analysis(sym, name, market):
             below_ma20_5d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-5, 0))
             above_mas_5d = all(df['Close'].iloc[i] > df['季線'].iloc[i] for i in range(-5, 0))
             below_mas_5d = all(df['Close'].iloc[i] < df['季線'].iloc[i] for i in range(-5, 0))
-        
+
+        # 🚀 新增：近 5 日累計漲跌幅 5% 判定
+        ret_5d = 0.0
+        has_ret_5d = False
+        if len(df) >= 6 and pd.notna(df['Close'].iloc[-6]) and df['Close'].iloc[-6] > 0:
+            ret_5d = ((last_p - df['Close'].iloc[-6]) / df['Close'].iloc[-6]) * 100
+            has_ret_5d = True
+
         high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
         low_52w = df['Low'].tail(252).min() if 'Low' in df.columns else 0.0
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1e-9) * 100) if (high_52w - low_52w) > 0 else 50.0
@@ -357,7 +375,7 @@ def process_technical_analysis(sym, name, market):
         k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-1]) else 50.0
         d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-1]) else 50.0
         pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 50.0
-        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-2]) else 50.0
+        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 50.0
         
         macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
         macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
@@ -399,6 +417,11 @@ def process_technical_analysis(sym, name, market):
         if below_ma20_5d and below_mas_5d: alerts.append("跌破月/季線≥5日")
         elif below_ma20_5d: alerts.append("跌破月線≥5日")
         elif below_mas_5d: alerts.append("跌破季線≥5日")
+
+        # 近 5 日漲跌幅警示加入
+        if has_ret_5d:
+            if ret_5d >= 5.0: alerts.append(f"近5日上漲{ret_5d:.1f}%")
+            elif ret_5d <= -5.0: alerts.append(f"近5日下跌{abs(ret_5d):.1f}%")
         
         if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15:
             alerts.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%")
@@ -438,7 +461,8 @@ def process_technical_analysis(sym, name, market):
             "_ma20_up_5d": ma20_up_5d, "_ma_s_up_5d": ma_s_up_5d,
             "_ma20_dn_5d": ma20_dn_5d, "_ma_s_dn_5d": ma_s_dn_5d,
             "_above_ma20_5d": above_ma20_5d, "_below_ma20_5d": below_ma20_5d,
-            "_above_mas_5d": above_mas_5d, "_below_mas_5d": below_mas_5d
+            "_above_mas_5d": above_mas_5d, "_below_mas_5d": below_mas_5d,
+            "_has_ret_5d": has_ret_5d, "_ret_5d": ret_5d
         }
     except Exception as e: return None
 
@@ -680,6 +704,8 @@ with tab2:
                 below_ma20_5d = res.get('_below_ma20_5d', False)
                 above_mas_5d = res.get('_above_mas_5d', False)
                 below_mas_5d = res.get('_below_mas_5d', False)
+                has_ret_5d = res.get('_has_ret_5d', False)
+                ret_5d = res.get('_ret_5d', 0.0)
 
                 tags = []
                 if w_macd_gold: tags.append("週MACD零下金叉")
@@ -695,6 +721,8 @@ with tab2:
                 elif above_ma20_5d: tags.append("站上月線≥5日")
                 elif above_mas_5d: tags.append("站上季線≥5日")
                 
+                if has_ret_5d and ret_5d >= 5.0: tags.append("近5日上漲≥5%")
+                
                 if w_macd_death: tags.append("週MACD零上死叉")
                 if w_kd_death: tags.append("週KD高檔死叉")
                 if d_macd_death: tags.append("日MACD零上死叉")
@@ -709,9 +737,11 @@ with tab2:
                 if below_ma20_5d and below_mas_5d: tags.append("跌破月季線≥5日")
                 elif below_ma20_5d: tags.append("跌破月線≥5日")
                 elif below_mas_5d: tags.append("跌破季線≥5日")
+                
+                if has_ret_5d and ret_5d <= -5.0: tags.append("近5日下跌≥5%")
 
-                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up_5d * 1) + (ma_s_up_5d * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1)
-                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn_5d * 1) + (ma_s_dn_5d * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1)
+                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up_5d * 1) + (ma_s_up_5d * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
+                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn_5d * 1) + (ma_s_dn_5d * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
                 
                 item_data = {'name': name_disp, 'pe': pe_val, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score}
                 
@@ -767,7 +797,9 @@ with tab2:
         * **站上月/季線 ≥ 5日**：收盤價連續 5 個交易日維持在該均線之上。
         * **跌破月/季線 ≥ 5日**：收盤價連續 5 個交易日維持在該均線之下。
 
-        #### 四、 價格回落與盤整防禦
+        #### 四、 價格回落與漲跌防禦
+        * **近5日上漲 ≥ 5%**：近 5 個交易日累計漲幅達 5% (含) 以上。
+        * **近5日下跌 ≥ 5%**：近 5 個交易日累計跌幅達 5% (含) 以上。
         * **近高點回落 XX%**：距過去 52 週最高價跌幅達 15% (含) 以上。
         * **20日回落 XX%**：距過去 20 日最高價跌幅達 10% (含) 以上。
         * **💤 20日窄幅盤整**：過去 20 日最高與最低價振幅壓縮在 7% (含) 以內。
@@ -779,7 +811,7 @@ with tab2:
         
     if ta_results:
         df_ta = pd.DataFrame(ta_results)
-        df_ta = df_ta.drop(columns=['_raw_kd_d', '_raw_kd_w', '_raw_pe', '_is_break_ma', '_raw_macd_d', '_raw_macd_w', '_ma20_up_5d', '_ma_s_up_5d', '_ma20_dn_5d', '_ma_s_dn_5d', '_above_ma20_5d', '_below_ma20_5d', '_above_mas_5d', '_below_mas_5d'], errors='ignore')
+        df_ta = df_ta.drop(columns=['_raw_kd_d', '_raw_kd_w', '_raw_pe', '_is_break_ma', '_raw_macd_d', '_raw_macd_w', '_ma20_up_5d', '_ma_s_up_5d', '_ma20_dn_5d', '_ma_s_dn_5d', '_above_ma20_5d', '_below_ma20_5d', '_above_mas_5d', '_below_mas_5d', '_has_ret_5d', '_ret_5d'], errors='ignore')
         st.dataframe(
             df_ta, 
             width="stretch",
@@ -939,7 +971,7 @@ with tab_etf:
         err_msg = str(e)
 
     if not read_success:
-        st.error(f"❌ **無法讀取外部 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
+        st.error(f"❌ **無法讀取 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
         st.info("💡 **唯一解決方法**：\n請打開您的 ETF 試算表，點擊右上角的 **「共用 (Share)」**，將一般存取權限改為**「知道連結的人均可檢視 (Anyone with the link)」**。這不會洩漏您的隱私，且能讓程式瞬間讀取！")
     elif df_etf_db is None or df_etf_db.empty:
         st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。請確認爬蟲已成功寫入資料。")
@@ -1079,7 +1111,7 @@ with st.sidebar:
         if st.button("💾 儲存美股變更"):
             with st.spinner("正在寫入美股資料..."):
                 try:
-                    conn.update(worksheet="US_Portfolio", data=edited_us)
+                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
                     st.success("✅ 美股更新成功！請重新整理網頁。")
                 except Exception as e: st.error(f"寫入失敗：{e}")
     else: st.info("美股清單目前為空。")
