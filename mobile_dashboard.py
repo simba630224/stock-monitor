@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="行動隨身投資儀表板", layout="wide")
 
 # ==========================================
-# 0. 輔助函式：強力防呆安全轉換
+# 0. 輔助函式：強力防呆安全轉換與均線位階
 # ==========================================
 def safe_float(val):
     try:
@@ -28,6 +28,27 @@ def safe_float(val):
         return float(val) if pd.notna(val) and str(val).strip() != '' else 0.0
     except:
         return 0.0
+
+def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
+    short_term_name = "月/季線" if pd.notna(ma_s1) and ma_s2 != ma_l1 else "短中線"
+    status = ""
+    if pd.notna(ma_s1) and pd.notna(ma_s2) and ma_s1 > 0 and ma_s2 > 0:
+        if price > ma_s1 and price > ma_s2: status += f"🟢 站穩 {short_term_name}"
+        elif price < ma_s1 and price < ma_s2: status += f"🔴 {short_term_name} 之下"
+        elif price > ma_s2 and price < ma_s1: status += f"🟡 守季線，受月線壓"
+        elif price > ma_s1 and price < ma_s2: status += f"🔵 站月線，臨季線壓"
+    else:
+        status += "均線不足"
+        
+    status += " | "
+    if pd.notna(ma_l1) and pd.notna(ma_l2) and ma_l1 > 0 and ma_l2 > 0:
+        if price > ma_l1 and price > ma_l2: status += f"🟢 長線多頭"
+        elif price < ma_l1 and price < ma_l2: status += f"🔴 長線空頭"
+        elif price > ma_l2 and price < ma_l1: status += f"🟡 守年線"
+        elif price > ma_l1 and price < ma_l2: status += f"🔵 臨年線壓"
+    else:
+        status += "均線不足"
+    return status
 
 # ==========================================
 # 1. 資料庫與清單設定 (Google Sheets 連線)
@@ -148,6 +169,7 @@ def get_fundamental_info(sym):
 
 @st.cache_data(ttl=600)
 def get_stock_data(sym):
+    is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
     try:
         df = yf.download(sym, period="3y", progress=False, threads=False)
         if not df.empty and len(df) >= 2:
@@ -159,9 +181,10 @@ def get_stock_data(sym):
             df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
             df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
             
-            is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
             season_len = 60 if is_tw else 50
-            df['MA_season'] = df['Close'].rolling(season_len, min_periods=1).mean()
+            df['季線'] = df['Close'].rolling(season_len, min_periods=1).mean()
+            df['半年線'] = df['Close'].rolling(season_len*2, min_periods=1).mean()
+            df['年線'] = df['Close'].rolling(season_len*4, min_periods=1).mean()
             
             if 'High' in df.columns and 'Low' in df.columns:
                 low_min = df['Low'].rolling(9, min_periods=1).min()
@@ -204,15 +227,15 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
             yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
             return {
-                "市場": market, "代號": display_ticker, "收盤": curr_p,
-                "季含息報酬": float(ret_1q), "年含息報酬": float(ret_1y),
-                "對大盤": float(rel_val), "殖利率": float(yield_1y), "ROE": float(roe_val) if roe_val is not None else None
+                "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
+                "近一季含息報酬": float(ret_1q), "近一年含息報酬": float(ret_1y),
+                "相對大盤": float(rel_val), "近一年殖利率": float(yield_1y), "ROE": float(roe_val) if roe_val is not None else None
             }
     except: pass
     return None
 
 @st.cache_data(ttl=600)
-def process_technical_analysis(sym, name):
+def process_technical_analysis(sym, name, market):
     try:
         df = get_stock_data(sym)
         if df is None or df.empty or len(df) < 35: return None
@@ -255,11 +278,19 @@ def process_technical_analysis(sym, name):
         except: pass
         
         last_p = float(df['Close'].iloc[-1])
-        ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0
-        ma_season = float(df['MA_season'].iloc[-1]) if pd.notna(df['MA_season'].iloc[-1]) else 0
-        prev_ma_season = float(df['MA_season'].iloc[-2]) if len(df) > 1 and pd.notna(df['MA_season'].iloc[-2]) else 0
+        prev_p = float(df['Close'].iloc[-2]) if len(df) > 1 else last_p
         
-        is_break_ma = (last_p < ma_season and df['Close'].iloc[-2] >= prev_ma_season)
+        ma10 = float(df['MA10'].iloc[-1]) if pd.notna(df['MA10'].iloc[-1]) else 0.0
+        ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0.0
+        ma_season = float(df['季線'].iloc[-1]) if pd.notna(df['季線'].iloc[-1]) else 0.0
+        ma_half = float(df['半年線'].iloc[-1]) if pd.notna(df['半年線'].iloc[-1]) else 0.0
+        ma_year = float(df['年線'].iloc[-1]) if pd.notna(df['年線'].iloc[-1]) else 0.0
+        
+        prev_ma20 = float(df['MA20'].iloc[-2]) if len(df) > 1 and pd.notna(df['MA20'].iloc[-2]) else 0.0
+        prev_ma_season = float(df['季線'].iloc[-2]) if len(df) > 1 and pd.notna(df['季線'].iloc[-2]) else 0.0
+        
+        ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
+        is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
 
         ma20_up_5d = False
         ma_s_up_5d = False
@@ -270,17 +301,17 @@ def process_technical_analysis(sym, name):
         above_mas_5d = False
         below_mas_5d = False
 
-        if len(df) >= 6 and pd.notna(df['MA_season'].iloc[-6]):
+        if len(df) >= 6 and pd.notna(df['季線'].iloc[-6]):
             ma20_up_5d = all(df['MA20'].iloc[i] > df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
-            ma_s_up_5d = all(df['MA_season'].iloc[i] > df['MA_season'].iloc[i-1] for i in range(-1, -6, -1))
+            ma_s_up_5d = all(df['季線'].iloc[i] > df['季線'].iloc[i-1] for i in range(-1, -6, -1))
             
             ma20_dn_5d = all(df['MA20'].iloc[i] < df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
-            ma_s_dn_5d = all(df['MA_season'].iloc[i] < df['MA_season'].iloc[i-1] for i in range(-1, -6, -1))
+            ma_s_dn_5d = all(df['季線'].iloc[i] < df['季線'].iloc[i-1] for i in range(-1, -6, -1))
             
             above_ma20_5d = all(df['Close'].iloc[i] > df['MA20'].iloc[i] for i in range(-5, 0))
             below_ma20_5d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-5, 0))
-            above_mas_5d = all(df['Close'].iloc[i] > df['MA_season'].iloc[i] for i in range(-5, 0))
-            below_mas_5d = all(df['Close'].iloc[i] < df['MA_season'].iloc[i] for i in range(-5, 0))
+            above_mas_5d = all(df['Close'].iloc[i] > df['季線'].iloc[i] for i in range(-5, 0))
+            below_mas_5d = all(df['Close'].iloc[i] < df['季線'].iloc[i] for i in range(-5, 0))
 
         ret_5d = 0.0
         has_ret_5d = False
@@ -360,15 +391,20 @@ def process_technical_analysis(sym, name):
         elif has_reduce: action = "⚠️ 減碼"
 
         alert_str = f"[{action}] " + ("/".join(alerts) if alerts else "趨勢延續")
-        kd_display = f"K:{k_d:.0f}/D:{d_d:.0f}"
 
         f_info = get_fundamental_info(sym)
         pe_val = f_info.get('trailingPE') or f_info.get('forwardPE', 999)
 
         return {
-            "代號": sym.split('.')[0], "🚨警示": alert_str, "價格": last_p, "52週位置": f"{pos_52w:.0f}%", "日KD": kd_display,
+            "市場": market, "標的": f"{name} ({sym})", "狀態警示": alert_str, "均線位階": ma_status_str,
+            "52週位置": f"{pos_52w:.0f}%", "收盤價": last_p,
             "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma,
-            "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status, "_name": name, "_sym": sym
+            "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status, "_name": name, "_sym": sym,
+            "_ma20_up_5d": ma20_up_5d, "_ma_s_up_5d": ma_s_up_5d,
+            "_ma20_dn_5d": ma20_dn_5d, "_ma_s_dn_5d": ma_s_dn_5d,
+            "_above_ma20_5d": above_ma20_5d, "_below_ma20_5d": below_ma20_5d,
+            "_above_mas_5d": above_mas_5d, "_below_mas_5d": below_mas_5d,
+            "_has_ret_5d": has_ret_5d, "_ret_5d": ret_5d
         }
     except: return None
 
@@ -542,30 +578,30 @@ with tab_hl:
         bullish_daily = []  
         bearish_alerts = [] 
         
-        scan_dict = {}
+        scan_list = []
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
                 sym = get_yf_ticker_tw(t)
                 name = str(item.get('名稱', '')).strip()
-                scan_dict[sym] = name if name and name != 'nan' else t
+                scan_list.append((sym, name if name and name != 'nan' else t, '台股'))
                 
         for item in PORTFOLIO_US:
             t = str(item.get('Ticker', '')).strip()
             if t and t != 'nan':
                 name = str(item.get('名稱', '')).strip()
-                scan_dict[t] = name if name and name != 'nan' else t
+                scan_list.append((t, name if name and name != 'nan' else t, '美股'))
 
-        for sym, name in scan_dict.items():
-            res = process_technical_analysis(sym, name)
+        for sym, name, market in scan_list:
+            res = process_technical_analysis(sym, name, market)
             if res:
                 ta_results.append(res)
-                target_options[f"{name}({sym.split('.')[0]})"] = sym
+                target_options[f"{name} ({sym})"] = sym
                 
                 pe_val = res.get('_raw_pe')
                 if pd.isna(pe_val) or pe_val is None: pe_val = 999
-                pe_str = f"{pe_val:.1f}" if pe_val != 999 else "無PE"
-                name_disp = f"{name}({sym.split('.')[0]})"
+                pe_str = f"PE:{pe_val:.1f}" if pe_val != 999 else "無PE"
+                name_disp = f"{name} ({pe_str})"
                 
                 kd_d = res.get('_raw_kd_d', '')
                 kd_w = res.get('_raw_kd_w', '')
@@ -583,10 +619,10 @@ with tab_hl:
                 d_kd_death = "🔴 KD高檔死叉" in kd_d
                 
                 is_break = res.get('_is_break_ma', False)
-                ma20_up = res.get('_ma20_up_5d', False)
-                ma_s_up = res.get('_ma_s_up_5d', False)
-                ma20_dn = res.get('_ma20_dn_5d', False)
-                ma_s_dn = res.get('_ma_s_dn_5d', False)
+                ma20_up_5d = res.get('_ma20_up_5d', False)
+                ma_s_up_5d = res.get('_ma_s_up_5d', False)
+                ma20_dn_5d = res.get('_ma20_dn_5d', False)
+                ma_s_dn_5d = res.get('_ma_s_dn_5d', False)
                 above_ma20_5d = res.get('_above_ma20_5d', False)
                 below_ma20_5d = res.get('_below_ma20_5d', False)
                 above_mas_5d = res.get('_above_mas_5d', False)
@@ -600,9 +636,9 @@ with tab_hl:
                 if d_macd_gold: tags.append("日MACD零下金叉")
                 if d_kd_gold: tags.append("日KD低檔金叉")
                 
-                if ma20_up and ma_s_up: tags.append("月季線上彎≥5日")
-                elif ma20_up: tags.append("月線上彎≥5日")
-                elif ma_s_up: tags.append("季線上彎≥5日")
+                if ma20_up_5d and ma_s_up_5d: tags.append("月季線雙上彎≥5日")
+                elif ma20_up_5d: tags.append("月線上彎≥5日")
+                elif ma_s_up_5d: tags.append("季線上彎≥5日")
                 
                 if above_ma20_5d and above_mas_5d: tags.append("站上月季線≥5日")
                 elif above_ma20_5d: tags.append("站上月線≥5日")
@@ -617,9 +653,9 @@ with tab_hl:
                 
                 if is_break: tags.append("跌破季線")
                 
-                if ma20_dn and ma_s_dn: tags.append("月季線下彎≥5日")
-                elif ma20_dn: tags.append("月線下彎≥5日")
-                elif ma_s_dn: tags.append("季線下彎≥5日")
+                if ma20_dn_5d and ma_s_dn_5d: tags.append("月季線雙下彎≥5日")
+                elif ma20_dn_5d: tags.append("月線下彎≥5日")
+                elif ma_s_dn_5d: tags.append("季線下彎≥5日")
                 
                 if below_ma20_5d and below_mas_5d: tags.append("跌破月季線≥5日")
                 elif below_ma20_5d: tags.append("跌破月線≥5日")
@@ -627,10 +663,10 @@ with tab_hl:
                 
                 if has_ret_5d and ret_5d <= -5.0: tags.append("近5日下跌≥5%")
 
-                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up * 1) + (ma_s_up * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
-                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn * 1) + (ma_s_dn * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
+                bull_score = (w_macd_gold * 4) + (w_kd_gold * 3) + (d_macd_gold * 2) + (d_kd_gold * 1) + (ma20_up_5d * 1) + (ma_s_up_5d * 1) + (above_ma20_5d * 1) + (above_mas_5d * 1) + ((has_ret_5d and ret_5d >= 5.0) * 1)
+                bear_score = (w_macd_death * 4) + (w_kd_death * 3) + (d_macd_death * 2) + (d_kd_death * 1) + (is_break * 1) + (ma20_dn_5d * 1) + (ma_s_dn_5d * 1) + (below_ma20_5d * 1) + (below_mas_5d * 1) + ((has_ret_5d and ret_5d <= -5.0) * 1)
                 
-                item_data = {'name': name_disp, 'pe': pe_val, 'pe_str': pe_str, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score, 'price': res['價格']}
+                item_data = {'name': name_disp, 'pe': pe_val, 'tags': tags, 'bull_score': bull_score, 'bear_score': bear_score}
                 
                 if bear_score >= 3: 
                     bearish_alerts.append(item_data)
@@ -644,22 +680,18 @@ with tab_hl:
         bullish_strong = sorted(bullish_strong, key=lambda x: (-x['bull_score'], x['pe']))[:10]
         bullish_daily = sorted(bullish_daily, key=lambda x: (-x['bull_score'], x['pe']))[:10]
         bearish_alerts = sorted(bearish_alerts, key=lambda x: (-x['bear_score'], x['pe']))[:10]
-        
-    def format_mobile_items(items):
-        if not items: return "> 目前無符合條件標的"
-        res_str = ""
-        for x in items:
-            tags_str = ", ".join(x['tags'])
-            res_str += f"- **{x['name']}**\n  - `[{tags_str}]`\n"
-        return res_str
+
+        def format_items(items):
+            if not items: return "無"
+            return "\n".join([f"• **{x['name']}** `[{', '.join(x['tags'])}]`" for x in items])
 
     st.markdown("### 📊 盤後技術摘要 (Top 10)")
     st.caption("依技術強度優先，同級別低本益比優先顯示。")
     
     with st.container():
-        st.success(f"🔥 **週線強勢區 (波段)**\n\n{format_mobile_items(bullish_strong)}")
-        st.info(f"📈 **日線強勢區 (短線)**\n\n{format_mobile_items(bullish_daily)}")
-        st.error(f"⚠️ **空方風險區 (破線/死叉)**\n\n{format_mobile_items(bearish_alerts)}")
+        st.success(f"🔥 **週線強勢區 (波段)**\n\n{format_items(bullish_strong)}")
+        st.info(f"📈 **日線強勢區 (短線)**\n\n{format_items(bullish_daily)}")
+        st.error(f"⚠️ **空方風險區 (破線/死叉)**\n\n{format_items(bearish_alerts)}")
 
 with tab_comp:
     st.markdown("### 🆚 多檔標的走勢比較")
@@ -703,7 +735,6 @@ with tab_comp:
                 else:
                     st.warning("無法取得選定標的的歷史走勢資料。")
 
-            # 手機版的 Top 10 比較：改為「上下垂直堆疊」顯示，避免表格變太窄
             st.divider()
             st.markdown("### 🧩 比較標的之 Top 10 核心持股")
             
@@ -748,7 +779,7 @@ with tab_comp:
                             st.caption("ℹ️ 暫無有效的權重數值。")
                     else:
                         st.caption("ℹ️ 個別股票或未收錄成分股資料。")
-                    st.write("") # 增加間距
+                    st.write("") 
             else:
                 st.caption("未連線至 ETF 持股資料庫，無法顯示成分股比對。")
 
@@ -788,7 +819,7 @@ with tab2:
         
     if ta_results: 
         df_ta = pd.DataFrame(ta_results)
-        st.dataframe(df_ta[["代號", "🚨警示", "價格", "52週位置"]], width="stretch", hide_index=True, height=350)
+        st.dataframe(df_ta[["標的", "狀態警示", "收盤價", "52週位置"]], width="stretch", hide_index=True, height=350)
 
     st.divider()
     selected_name = st.selectbox("查看詳細線圖：", options=list(target_options.keys()) if target_options else [])
@@ -833,17 +864,16 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            # 🐛 完美對齊：修正上一版本「代號」等標籤未對應到底層字典索引 KeyError 的問題
             st.dataframe(
-                df_perf[["代號", "收盤", "季含息報酬", "年含息報酬", "對大盤", "殖利率", "ROE"]],
+                df_perf[["代號", "最新收盤價", "近一季含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "ROE"]],
                 width="stretch",
                 column_config={
                     "代號": st.column_config.TextColumn("代號"),
-                    "收盤": st.column_config.NumberColumn("收盤", format="%.2f"),
-                    "季含息報酬": st.column_config.NumberColumn("季含息報酬 (%)", format="%+.1f"),
-                    "年含息報酬": st.column_config.NumberColumn("年含息報酬 (%)", format="%+.1f"),
-                    "對大盤": st.column_config.NumberColumn("對大盤 (%)", format="%+.1f"),
-                    "殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
+                    "最新收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
+                    "近一季含息報酬": st.column_config.NumberColumn("季報酬 (%)", format="%+.1f"),
+                    "近一年含息報酬": st.column_config.NumberColumn("年報酬 (%)", format="%+.1f"),
+                    "相對大盤": st.column_config.NumberColumn("對大盤 (%)", format="%+.1f"),
+                    "近一年殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
                     "ROE": st.column_config.NumberColumn("ROE (%)", format="%.1f")
                 },
                 hide_index=True, height=450
