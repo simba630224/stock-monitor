@@ -10,6 +10,8 @@ from datetime import datetime
 import warnings
 import time
 import traceback
+import requests  # 🚀 補上缺漏的套件
+import io        # 🚀 補上缺漏的套件
 from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
@@ -17,7 +19,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
-# 0. 輔助函式：強力防呆安全轉換
+# 0. 輔助函式：強力防呆安全轉換與均線位階
 # ==========================================
 def safe_float(val):
     try:
@@ -620,7 +622,7 @@ with tab1:
     if not df_ind.empty:
         unique_categories = df_ind['類別'].unique().tolist()
         plotly_colors = px.colors.qualitative.Safe + px.colors.qualitative.Plotly 
-        category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, cat in enumerate(unique_categories)}
+        category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, enumerate(unique_categories)}
     
     col_chart, col_fx = st.columns([1, 1])
     with col_chart:
@@ -954,9 +956,9 @@ with tab3:
                     "市場": st.column_config.TextColumn("市場", width="small"),
                     "代號": st.column_config.TextColumn("代號", width="small"),
                     "最新收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                    "近一季含息報酬": st.column_config.NumberColumn("近一季含息報酬 (%)", format="%+.2f"),
-                    "近半年含息報酬": st.column_config.NumberColumn("近半年含息報酬 (%)", format="%+.2f"),
-                    "近一年含息報酬": st.column_config.NumberColumn("近一年含息報酬 (%)", format="%+.2f"),
+                    "近一季報酬": st.column_config.NumberColumn("近一季含息報酬 (%)", format="%+.2f"),
+                    "近半年報酬": st.column_config.NumberColumn("近半年含息報酬 (%)", format="%+.2f"),
+                    "近一年報酬": st.column_config.NumberColumn("近一年含息報酬 (%)", format="%+.2f"),
                     "相對大盤": st.column_config.NumberColumn("相對大盤(1年) (%)", format="%+.2f"),
                     "近一年殖利率": st.column_config.NumberColumn("近一年殖利率 (%)", format="%.2f"),
                     "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
@@ -1033,7 +1035,6 @@ with tab_etf:
                             plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
                             
                             if not plot_df.empty:
-                                # 計算前 10 大持股加總 (因已經從小到大排序，所以取 tail(10))
                                 plot_df_top10 = plot_df.tail(10)
                                 top10_sum = plot_df_top10[weight_col].sum()
                                 
