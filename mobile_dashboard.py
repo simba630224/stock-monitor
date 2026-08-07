@@ -126,13 +126,11 @@ def get_benchmark_returns():
     benchmarks = {'台股': 0.0, '美股': 0.0}
     try:
         tw_hist = yf.Ticker("^TWII").history(period="1y").dropna(subset=['Close'])
-        if len(tw_hist) > 252: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[-252]) / tw_hist['Close'].iloc[-252]) * 100
-        elif not tw_hist.empty: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
+        benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
     except: pass
     try:
         us_hist = yf.Ticker("^GSPC").history(period="1y").dropna(subset=['Close'])
-        if len(us_hist) > 252: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[-252]) / us_hist['Close'].iloc[-252]) * 100
-        elif not us_hist.empty: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
+        benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
     except: pass
     return benchmarks
 
@@ -142,10 +140,6 @@ def get_fundamental_info(sym):
         info = yf.Ticker(sym).info
         return {
             'quoteType': info.get('quoteType'),
-            'beta': info.get('beta'),
-            'grossMargins': info.get('grossMargins'),
-            'operatingMargins': info.get('operatingMargins'),
-            'profitMargins': info.get('profitMargins'),
             'returnOnEquity': info.get('returnOnEquity'),
             'trailingPE': info.get('trailingPE'),
             'forwardPE': info.get('forwardPE')
@@ -330,19 +324,19 @@ def process_technical_analysis(sym, name):
         alerts = []
         if is_break_ma: alerts.append("跌破季線")
         
-        if ma20_up_5d and ma_s_up_5d: alerts.append("月/季線上彎≥5日")
+        if ma20_up_5d and ma_s_up_5d: alerts.append("月季線雙上彎≥5日")
         elif ma20_up_5d: alerts.append("月線上彎≥5日")
         elif ma_s_up_5d: alerts.append("季線上彎≥5日")
         
-        if ma20_dn_5d and ma_s_dn_5d: alerts.append("月/季線下彎≥5日")
+        if ma20_dn_5d and ma_s_dn_5d: alerts.append("月季線雙下彎≥5日")
         elif ma20_dn_5d: alerts.append("月線下彎≥5日")
         elif ma_s_dn_5d: alerts.append("季線下彎≥5日")
         
-        if above_ma20_5d and above_mas_5d: alerts.append("站上月/季線≥5日")
+        if above_ma20_5d and above_mas_5d: alerts.append("站上月季線≥5日")
         elif above_ma20_5d: alerts.append("站上月線≥5日")
         elif above_mas_5d: alerts.append("站上季線≥5日")
         
-        if below_ma20_5d and below_mas_5d: alerts.append("跌破月/季線≥5日")
+        if below_ma20_5d and below_mas_5d: alerts.append("跌破月季線≥5日")
         elif below_ma20_5d: alerts.append("跌破月線≥5日")
         elif below_mas_5d: alerts.append("跌破季線≥5日")
         
@@ -455,9 +449,6 @@ with tab1:
         col_m3.metric("2026 預估股息", f"${total_dividends_2026:,.0f}")
         col_m4.metric("近一年累計股息", f"${total_dividends_1y:,.0f}")
 
-        # ==========================================
-        # 📉 歷史資產防呆寫入與繪圖
-        # ==========================================
         history_error = False
         df_history_to_display = pd.DataFrame()
         try:
@@ -516,8 +507,6 @@ with tab1:
             st.divider()
             st.caption("📊 資產類別佔比")
             df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['類別', '市值'])
-            
-            # 確保不會因為空類別引發 SyntaxError
             unique_categories = df_allocation['類別'].unique().tolist()
             plotly_colors = px.colors.qualitative.Safe + px.colors.qualitative.Plotly 
             category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, cat in enumerate(unique_categories)}
@@ -688,7 +677,7 @@ with tab_comp:
                 period_map = {"半年": "6mo", "一年": "1y", "三年": "3y"}
                 yf_period = period_map[comp_period]
                 
-                comp_data = {}
+                comp_pct_dict = {}
                 for tgt in comp_targets:
                     sym = target_options[tgt]
                     try:
@@ -703,15 +692,18 @@ with tab_comp:
                                     comp_pct_dict[tgt] = ((s / first_p) - 1) * 100
                     except: pass
                 
-                if comp_data:
-                    df_comp = pd.DataFrame(comp_data).ffill().bfill()
-                    if not df_comp.empty:
-                        fig_comp = px.line(df_comp, x=df_comp.index, y=df_comp.columns)
+                if comp_pct_dict:
+                    df_comp_pct = pd.DataFrame(comp_pct_dict).ffill().bfill()
+                    if not df_comp_pct.empty:
+                        fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns)
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), yaxis_title="累計含息報酬率 (%)", xaxis_title=None)
                         st.plotly_chart(fig_comp, use_container_width=True)
+                    else:
+                        st.warning("選定期間內無足夠數據可供繪製比較圖。")
                 else:
-                    st.warning("無法取得歷史資料。")
+                    st.warning("無法取得選定標的的歷史走勢資料。")
 
+            # 手機版的 Top 10 比較：改為「上下垂直堆疊」顯示，避免表格變太窄
             st.divider()
             st.markdown("### 🧩 比較標的之 Top 10 核心持股")
             
@@ -759,7 +751,7 @@ with tab_comp:
                     st.write("") # 增加間距
             else:
                 st.caption("未連線至 ETF 持股資料庫，無法顯示成分股比對。")
-                
+
 with tab2:
     with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
         st.markdown("""
@@ -841,16 +833,17 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
+            # 🐛 完美對齊：修正上一版本「代號」等標籤未對應到底層字典索引 KeyError 的問題
             st.dataframe(
-                df_perf[["代號", "最新收盤價", "近一季含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "ROE"]],
+                df_perf[["代號", "收盤", "季含息報酬", "年含息報酬", "對大盤", "殖利率", "ROE"]],
                 width="stretch",
                 column_config={
                     "代號": st.column_config.TextColumn("代號"),
-                    "最新收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
-                    "近一季含息報酬": st.column_config.NumberColumn("季報酬 (%)", format="%+.1f"),
-                    "近一年含息報酬": st.column_config.NumberColumn("年報酬 (%)", format="%+.1f"),
-                    "相對大盤": st.column_config.NumberColumn("對大盤 (%)", format="%+.1f"),
-                    "近一年殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
+                    "收盤": st.column_config.NumberColumn("收盤", format="%.2f"),
+                    "季含息報酬": st.column_config.NumberColumn("季含息報酬 (%)", format="%+.1f"),
+                    "年含息報酬": st.column_config.NumberColumn("年含息報酬 (%)", format="%+.1f"),
+                    "對大盤": st.column_config.NumberColumn("對大盤 (%)", format="%+.1f"),
+                    "殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
                     "ROE": st.column_config.NumberColumn("ROE (%)", format="%.1f")
                 },
                 hide_index=True, height=450
@@ -909,7 +902,6 @@ with tab_etf:
                         plot_df = df_show.copy()
                         plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                         
-                        # 暴力清洗權重欄位：移除 % 符號、逗點與空白
                         plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                         
