@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
-# 0. 輔助函式：強力防呆安全轉換
+# 0. 輔助函式：強力防呆安全轉換與均線位階
 # ==========================================
 def safe_float(val):
     try:
@@ -387,7 +387,7 @@ def process_technical_analysis(sym, name, market):
         k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-1]) else 50.0
         d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-1]) else 50.0
         pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 50.0
-        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-2]) else 50.0
+        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 50.0
         
         macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
         macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
@@ -887,7 +887,7 @@ with tab2:
 
 with tab_comp:
     st.subheader("🆚 多檔標的走勢比較")
-    st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
+    st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢與核心持股。")
     
     if 'target_options' in locals() and target_options:
         all_options_list = list(target_options.keys())
@@ -904,27 +904,83 @@ with tab_comp:
                 period_map = {"半年": "6mo", "一年": "1y", "三年": "3y"}
                 yf_period = period_map[comp_period]
                 
-                comp_data = {}
+                # 🚀 健壯比對運算：獨立計算各標的起點 %，防止因 missing dates 導致整體 dropna 被清空
+                comp_pct_dict = {}
                 for tgt in comp_targets:
                     sym = target_options[tgt]
                     try:
                         hist = yf.Ticker(sym).history(period=yf_period)
-                        if not hist.empty:
-                            hist.index = pd.to_datetime(hist.index).normalize()
-                            hist = hist[~hist.index.duplicated(keep='last')]
-                            comp_data[tgt] = hist['Close']
+                        if not hist.empty and 'Close' in hist.columns:
+                            s = hist['Close'].dropna()
+                            if len(s) > 0:
+                                s.index = pd.to_datetime(s.index).normalize()
+                                s = s[~s.index.duplicated(keep='last')]
+                                first_p = float(s.iloc[0])
+                                if first_p > 0:
+                                    comp_pct_dict[tgt] = ((s / first_p) - 1) * 100
                     except: pass
                 
-                if comp_data:
-                    df_comp = pd.DataFrame(comp_data)
-                    df_comp = df_comp.ffill().bfill().dropna()
-                    if not df_comp.empty:
-                        df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
+                if comp_pct_dict:
+                    df_comp_pct = pd.DataFrame(comp_pct_dict).ffill().bfill()
+                    if not df_comp_pct.empty:
                         fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計含息報酬率 (%)', 'variable': '標的', 'index': '日期'})
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig_comp, use_container_width=True)
+                    else:
+                        st.warning("選定期間內無足夠數據可供繪製比較圖。")
                 else:
-                    st.warning("無法取得選定標的的歷史資料。")
+                    st.warning("無法取得選定標的的歷史走勢資料。")
+
+            # 🚀 新增：比較標的之 Top 10 核心持股與權重比對區
+            st.divider()
+            st.markdown("### 🧩 比較標的之 Top 10 核心持股與權重")
+            
+            csv_url_comp = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                resp = requests.get(csv_url_comp, headers=headers, timeout=10)
+                resp.raise_for_status()
+                df_etf_comp_db = pd.read_csv(io.StringIO(resp.text)).dropna(how='all')
+            except Exception:
+                df_etf_comp_db = pd.DataFrame()
+
+            if not df_etf_comp_db.empty and len(df_etf_comp_db.columns) >= 3:
+                etf_c = df_etf_comp_db.columns[0]
+                name_c = df_etf_comp_db.columns[1]
+                weight_c = df_etf_comp_db.columns[2]
+                
+                cols_comp = st.columns(len(comp_targets))
+                for idx, tgt in enumerate(comp_targets):
+                    with cols_comp[idx]:
+                        st.markdown(f"#### 📌 {tgt}")
+                        sym = target_options[tgt]
+                        clean_code = sym.split('.')[0]
+                        
+                        # 在成分股資料庫中比對代號或標的名稱
+                        sub_df = df_etf_comp_db[
+                            df_etf_comp_db[etf_c].astype(str).str.strip().str.contains(clean_code, case=False, na=False) |
+                            df_etf_comp_db[etf_c].astype(str).str.strip().apply(lambda x: x in tgt)
+                        ].copy()
+                        
+                        if not sub_df.empty:
+                            sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+                            sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
+                            sub_df = sub_df.dropna(subset=[weight_c]).sort_values(by=weight_c, ascending=False).head(10)
+                            
+                            if not sub_df.empty:
+                                top10_sum = sub_df[weight_c].sum()
+                                st.metric("Top 10 權重合計", f"{top10_sum:.2f}%")
+                                
+                                disp_df = sub_df[[name_c, weight_c]].copy()
+                                disp_df.columns = ["成分股名稱", "權重 (%)"]
+                                disp_df["權重 (%)"] = disp_df["權重 (%)"].apply(lambda x: f"{x:.2f}%")
+                                st.dataframe(disp_df, hide_index=True, use_container_width=True)
+                            else:
+                                st.caption("ℹ️ 暫無有效的權重數值。")
+                        else:
+                            st.caption("ℹ️ 個別股票或尚未收錄成分股資料。")
+            else:
+                st.caption("未連線至 ETF 持股資料庫，無法顯示成分股比對。")
     else:
         st.info("請先確認持股清單並等待資料載入。")
 
