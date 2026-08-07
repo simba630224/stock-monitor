@@ -836,4 +836,4 @@ with tab2:
     with col_select_period:
         period_label = st.selectbox("請選擇顯示範圍：", options=["半年 (150日)", "一年 (252日)", "三年 (完整數據)"], index=0)
     
-    tail_days = 150 if period_label
+    tail_days = 150 if period_label else 0
