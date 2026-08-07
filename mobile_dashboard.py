@@ -10,6 +10,8 @@ from datetime import datetime
 import warnings
 import time
 import traceback
+import requests
+import io
 from streamlit_gsheets import GSheetsConnection
 
 warnings.filterwarnings('ignore')
@@ -124,11 +126,13 @@ def get_benchmark_returns():
     benchmarks = {'台股': 0.0, '美股': 0.0}
     try:
         tw_hist = yf.Ticker("^TWII").history(period="1y").dropna(subset=['Close'])
-        benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
+        if len(tw_hist) > 252: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[-252]) / tw_hist['Close'].iloc[-252]) * 100
+        elif not tw_hist.empty: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
     except: pass
     try:
         us_hist = yf.Ticker("^GSPC").history(period="1y").dropna(subset=['Close'])
-        benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
+        if len(us_hist) > 252: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[-252]) / us_hist['Close'].iloc[-252]) * 100
+        elif not us_hist.empty: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
     except: pass
     return benchmarks
 
@@ -138,6 +142,10 @@ def get_fundamental_info(sym):
         info = yf.Ticker(sym).info
         return {
             'quoteType': info.get('quoteType'),
+            'beta': info.get('beta'),
+            'grossMargins': info.get('grossMargins'),
+            'operatingMargins': info.get('operatingMargins'),
+            'profitMargins': info.get('profitMargins'),
             'returnOnEquity': info.get('returnOnEquity'),
             'trailingPE': info.get('trailingPE'),
             'forwardPE': info.get('forwardPE')
@@ -203,8 +211,8 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
 
             return {
                 "市場": market, "代號": display_ticker, "收盤": curr_p,
-                "季報酬": ret_1q, "年報酬": ret_1y,
-                "對大盤": rel_val, "殖利率": yield_1y, "ROE": roe_val
+                "季含息報酬": float(ret_1q), "年含息報酬": float(ret_1y),
+                "對大盤": float(rel_val), "殖利率": float(yield_1y), "ROE": float(roe_val) if roe_val is not None else None
             }
     except: pass
     return None
@@ -322,19 +330,19 @@ def process_technical_analysis(sym, name):
         alerts = []
         if is_break_ma: alerts.append("跌破季線")
         
-        if ma20_up_5d and ma_s_up_5d: alerts.append("月季線雙上彎≥5日")
+        if ma20_up_5d and ma_s_up_5d: alerts.append("月/季線上彎≥5日")
         elif ma20_up_5d: alerts.append("月線上彎≥5日")
         elif ma_s_up_5d: alerts.append("季線上彎≥5日")
         
-        if ma20_dn_5d and ma_s_dn_5d: alerts.append("月季線雙下彎≥5日")
+        if ma20_dn_5d and ma_s_dn_5d: alerts.append("月/季線下彎≥5日")
         elif ma20_dn_5d: alerts.append("月線下彎≥5日")
         elif ma_s_dn_5d: alerts.append("季線下彎≥5日")
         
-        if above_ma20_5d and above_mas_5d: alerts.append("站上月季線≥5日")
+        if above_ma20_5d and above_mas_5d: alerts.append("站上月/季線≥5日")
         elif above_ma20_5d: alerts.append("站上月線≥5日")
         elif above_mas_5d: alerts.append("站上季線≥5日")
         
-        if below_ma20_5d and below_mas_5d: alerts.append("跌破月季線≥5日")
+        if below_ma20_5d and below_mas_5d: alerts.append("跌破月/季線≥5日")
         elif below_ma20_5d: alerts.append("跌破月線≥5日")
         elif below_mas_5d: alerts.append("跌破季線≥5日")
         
@@ -366,12 +374,7 @@ def process_technical_analysis(sym, name):
         return {
             "代號": sym.split('.')[0], "🚨警示": alert_str, "價格": last_p, "52週位置": f"{pos_52w:.0f}%", "日KD": kd_display,
             "_raw_kd_d": kd_d_status, "_raw_kd_w": kd_w_status, "_raw_pe": pe_val, "_is_break_ma": is_break_ma,
-            "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status, "_name": name, "_sym": sym,
-            "_ma20_up_5d": ma20_up_5d, "_ma_s_up_5d": ma_s_up_5d,
-            "_ma20_dn_5d": ma20_dn_5d, "_ma_s_dn_5d": ma_s_dn_5d,
-            "_above_ma20_5d": above_ma20_5d, "_below_ma20_5d": below_ma20_5d,
-            "_above_mas_5d": above_mas_5d, "_below_mas_5d": below_mas_5d,
-            "_has_ret_5d": has_ret_5d, "_ret_5d": ret_5d
+            "_raw_macd_d": macd_d_status, "_raw_macd_w": macd_w_status, "_name": name, "_sym": sym
         }
     except: return None
 
@@ -513,7 +516,13 @@ with tab1:
             st.divider()
             st.caption("📊 資產類別佔比")
             df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['類別', '市值'])
-            fig_pie = px.pie(df_allocation, values='市值', names='類別', hole=0.4)
+            
+            # 確保不會因為空類別引發 SyntaxError
+            unique_categories = df_allocation['類別'].unique().tolist()
+            plotly_colors = px.colors.qualitative.Safe + px.colors.qualitative.Plotly 
+            category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, cat in enumerate(unique_categories)}
+            
+            fig_pie = px.pie(df_allocation, values='市值', names='類別', hole=0.4, color='類別', color_discrete_map=category_color_map)
             fig_pie.update_traces(textposition='inside', textinfo='percent+label')
             fig_pie.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
@@ -525,13 +534,13 @@ with tab1:
             df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
             dynamic_height = max(300, len(df_mv_sorted) * 35)
             
-            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', color='類別', text_auto='.2s')
+            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', color='類別', text_auto='.2s', color_discrete_map=category_color_map)
             fig_mv_bar.update_layout(height=dynamic_height, margin=dict(l=10, r=10, t=10, b=10), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
             st.plotly_chart(fig_mv_bar, use_container_width=True)
 
             st.caption("📊 各標的預估股息分佈 (TWD)")
             df_div_sorted = df_ind.sort_values(by='預估股息', ascending=True)
-            fig_div_bar = px.bar(df_div_sorted, x='預估股息', y='標的與股數', orientation='h', color='類別', text_auto='.2s')
+            fig_div_bar = px.bar(df_div_sorted, x='預估股息', y='標的與股數', orientation='h', color='類別', text_auto='.2s', color_discrete_map=category_color_map)
             fig_div_bar.update_layout(height=dynamic_height, margin=dict(l=10, r=10, t=10, b=10), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
@@ -684,23 +693,73 @@ with tab_comp:
                     sym = target_options[tgt]
                     try:
                         hist = yf.Ticker(sym).history(period=yf_period)
-                        if not hist.empty:
-                            hist.index = pd.to_datetime(hist.index).normalize()
-                            hist = hist[~hist.index.duplicated(keep='last')]
-                            comp_data[tgt] = hist['Close']
+                        if not hist.empty and 'Close' in hist.columns:
+                            s = hist['Close'].dropna()
+                            if len(s) > 0:
+                                s.index = pd.to_datetime(s.index).normalize()
+                                s = s[~s.index.duplicated(keep='last')]
+                                first_p = float(s.iloc[0])
+                                if first_p > 0:
+                                    comp_pct_dict[tgt] = ((s / first_p) - 1) * 100
                     except: pass
                 
                 if comp_data:
-                    df_comp = pd.DataFrame(comp_data)
-                    df_comp = df_comp.ffill().bfill().dropna()
+                    df_comp = pd.DataFrame(comp_data).ffill().bfill()
                     if not df_comp.empty:
-                        df_comp_pct = (df_comp / df_comp.iloc[0] - 1) * 100
-                        fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns)
-                        fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), yaxis_title="累計報酬率 (%)", xaxis_title=None)
+                        fig_comp = px.line(df_comp, x=df_comp.index, y=df_comp.columns)
+                        fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), yaxis_title="累計含息報酬率 (%)", xaxis_title=None)
                         st.plotly_chart(fig_comp, use_container_width=True)
                 else:
                     st.warning("無法取得歷史資料。")
 
+            st.divider()
+            st.markdown("### 🧩 比較標的之 Top 10 核心持股")
+            
+            csv_url_comp = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                resp = requests.get(csv_url_comp, headers=headers, timeout=10)
+                resp.raise_for_status()
+                df_etf_comp_db = pd.read_csv(io.StringIO(resp.text)).dropna(how='all')
+            except Exception:
+                df_etf_comp_db = pd.DataFrame()
+
+            if not df_etf_comp_db.empty and len(df_etf_comp_db.columns) >= 3:
+                etf_c = df_etf_comp_db.columns[0]
+                name_c = df_etf_comp_db.columns[1]
+                weight_c = df_etf_comp_db.columns[2]
+                
+                for tgt in comp_targets:
+                    st.markdown(f"#### 📌 {tgt}")
+                    sym = target_options[tgt]
+                    clean_code = sym.split('.')[0]
+                    
+                    sub_df = df_etf_comp_db[
+                        df_etf_comp_db[etf_c].astype(str).str.strip().str.contains(clean_code, case=False, na=False) |
+                        df_etf_comp_db[etf_c].astype(str).str.strip().apply(lambda x: x in tgt)
+                    ].copy()
+                    
+                    if not sub_df.empty:
+                        sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+                        sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
+                        sub_df = sub_df.dropna(subset=[weight_c]).sort_values(by=weight_c, ascending=False).head(10)
+                        
+                        if not sub_df.empty:
+                            top10_sum = sub_df[weight_c].sum()
+                            st.caption(f"**Top 10 權重合計：{top10_sum:.2f}%**")
+                            
+                            disp_df = sub_df[[name_c, weight_c]].copy()
+                            disp_df.columns = ["成分股名稱", "權重 (%)"]
+                            disp_df["權重 (%)"] = disp_df["權重 (%)"].apply(lambda x: f"{x:.2f}%")
+                            st.dataframe(disp_df, hide_index=True, use_container_width=True)
+                        else:
+                            st.caption("ℹ️ 暫無有效的權重數值。")
+                    else:
+                        st.caption("ℹ️ 個別股票或未收錄成分股資料。")
+                    st.write("") # 增加間距
+            else:
+                st.caption("未連線至 ETF 持股資料庫，無法顯示成分股比對。")
+                
 with tab2:
     with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
         st.markdown("""
@@ -783,16 +842,15 @@ with tab3:
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
             st.dataframe(
-                df_perf,
+                df_perf[["代號", "最新收盤價", "近一季含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "ROE"]],
                 width="stretch",
                 column_config={
-                    "市場": st.column_config.TextColumn("市場"),
                     "代號": st.column_config.TextColumn("代號"),
-                    "收盤": st.column_config.NumberColumn("收盤", format="%.2f"),
-                    "季報酬": st.column_config.NumberColumn("季報酬 (%)", format="%+.1f"),
-                    "年報酬": st.column_config.NumberColumn("年報酬 (%)", format="%+.1f"),
-                    "對大盤": st.column_config.NumberColumn("對大盤(1年) (%)", format="%+.1f"),
-                    "殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
+                    "最新收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
+                    "近一季含息報酬": st.column_config.NumberColumn("季報酬 (%)", format="%+.1f"),
+                    "近一年含息報酬": st.column_config.NumberColumn("年報酬 (%)", format="%+.1f"),
+                    "相對大盤": st.column_config.NumberColumn("對大盤 (%)", format="%+.1f"),
+                    "近一年殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
                     "ROE": st.column_config.NumberColumn("ROE (%)", format="%.1f")
                 },
                 hide_index=True, height=450
@@ -807,7 +865,10 @@ with tab_etf:
     csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
     
     try:
-        df_etf_db = pd.read_csv(csv_url)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
+        response = requests.get(csv_url, headers=headers, timeout=15)
+        response.raise_for_status() 
+        df_etf_db = pd.read_csv(io.StringIO(response.text))
         read_success = True
         err_msg = ""
     except Exception as e:
@@ -848,15 +909,21 @@ with tab_etf:
                         plot_df = df_show.copy()
                         plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                         
+                        # 暴力清洗權重欄位：移除 % 符號、逗點與空白
                         plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                         
                         plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
                         
                         if not plot_df.empty:
-                            plot_df['文字標籤'] = plot_df[weight_col].apply(lambda x: f"{x:.2f}%")
+                            plot_df_top10 = plot_df.tail(10)
+                            top10_sum = plot_df_top10[weight_col].sum()
                             
-                            fig_etf = px.bar(plot_df, x=weight_col, y=name_col, orientation='h', title=f"{selected_etf} 核心持股", text='文字標籤')
+                            st.markdown(f"#### 🎯 前十大持股佔比總和： **{top10_sum:.2f}%**")
+                            
+                            plot_df_top10['文字標籤'] = plot_df_top10[weight_col].apply(lambda x: f"{x:.2f}%")
+                            
+                            fig_etf = px.bar(plot_df_top10, x=weight_col, y=name_col, orientation='h', title=f"{selected_etf} 核心持股", text='文字標籤')
                             fig_etf.update_traces(textposition='outside')
                             fig_etf.update_yaxes(type='category') 
                             fig_etf.update_layout(height=400, yaxis_title=None, xaxis_title="%", margin=dict(l=10, r=10, t=30, b=10))
