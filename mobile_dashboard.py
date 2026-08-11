@@ -111,7 +111,7 @@ else:
     df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
 # ==========================================
-# 2. 核心抓取與計算邏輯
+# 2. 核心抓取與計算邏輯 (與 PC 版 100% 對齊)
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
@@ -287,6 +287,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
+                # 🚀 格式與 PC 版 100% 統一，確保 Cache 完全相容
                 return {
                     "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
                     "近一季含息報酬": float(ret_1q), "近半年含息報酬": float(ret_6m), "近一年含息報酬": float(ret_1y),
@@ -296,7 +297,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
         except: time.sleep(1)
     return None
 
-# 🚀 終極重構：解除天數限制，單一真相來源，PC/手機 100% 同步
 @st.cache_data(ttl=900)
 def process_technical_analysis(sym, name, market):
     try:
@@ -384,8 +384,8 @@ def process_technical_analysis(sym, name, market):
         k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-1]) else 50.0
         d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-1]) else 50.0
         
-        macd_d = float(df['MACD'].iloc[-1]) if 'MACD' in df.columns and pd.notna(df['MACD'].iloc[-1]) else 0.0
-        macds_d = float(df['MACD_Signal'].iloc[-1]) if 'MACD_Signal' in df.columns and pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
+        macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
+        macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
 
         w_macd_gold, w_kd_gold = False, False
         d_macd_gold, d_kd_gold = False, False
@@ -511,6 +511,7 @@ def process_technical_analysis(sym, name, market):
         except:
             beta_str = "無"
 
+        # 🚀 格式與 PC 版 100% 統一，確保 Cache 完全相容
         return {
             "市場": market, "標的": f"{name} ({sym})", "代號": sym.split('.')[0], 
             "狀態警示": alert_str, "🚨警示": alert_str, "均線位階": ma_status_str,
@@ -527,7 +528,7 @@ def process_technical_analysis(sym, name, market):
         return None
 
 # ==========================================
-# 3. 網頁 UI 渲染
+# 3. 手機版隨身 UI 渲染
 # ==========================================
 st.title("📱 行動投資隨身儀表板")
 
@@ -847,8 +848,6 @@ with tab_comp:
                     st.write("") 
             else:
                 st.caption("未連線至 ETF 持股資料庫，無法顯示成分股比對。")
-    else:
-        st.info("請先確認持股清單並等待資料載入。")
 
 with tab2:
     with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
@@ -871,8 +870,8 @@ with tab2:
         
     if ta_results: 
         df_ta = pd.DataFrame(ta_results)
-        df_ta = df_ta.drop(columns=['tags', 'bull_score', 'bear_score', '_raw_pe', '_sym', '_name'], errors='ignore')
-        # 🚀 確保不會再因為找不到 key 報錯，動態篩選出存在於 DataFrame 的欄位
+        
+        # 🚀 確保手機版不會因 KeyError 崩潰，動態篩選出存在於 DataFrame 的欄位
         display_cols = ["標的", "🚨警示", "收盤價", "52週位置"]
         display_cols = [c for c in display_cols if c in df_ta.columns]
         
@@ -901,6 +900,8 @@ with tab2:
                 fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['Close'], mode='lines', name='收盤價'), row=1, col=1)
                 
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
+            if '季線' in df_plot.columns:
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name="季線"), row=1, col=1)
             
             if 'K_d' in df_plot.columns:
                 fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='yellow', width=1.2), name='K'), row=2, col=1)
@@ -910,8 +911,7 @@ with tab2:
             st.plotly_chart(fig_tech)
 
 with tab3:
-    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**超額大盤表現 (Alpha)**、**基本面財報指標**與**近一年真實配息紀錄**。")
-    with st.spinner("正在計算各標的績效與配息資料..."):
+    with st.spinner("精算回報率中..."):
         bench_returns = get_benchmark_returns()
         perf_results = []
         scan_list = []
@@ -930,8 +930,9 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            # 🚀 確保手機版不會因 KeyError 崩潰，動態比對欄位
-            display_cols = ["代號", "收盤", "季含息報酬", "年含息報酬", "對大盤", "殖利率", "ROE"]
+            
+            # 🚀 解決 KeyError：用動態過濾對齊 PC 版傳來的完整字典，再於手機端精簡顯示名稱
+            display_cols = ["代號", "最新收盤價", "近一季含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "ROE"]
             display_cols = [c for c in display_cols if c in df_perf.columns]
             
             st.dataframe(
@@ -939,12 +940,12 @@ with tab3:
                 width="stretch",
                 column_config={
                     "代號": st.column_config.TextColumn("代號"),
-                    "收盤": st.column_config.NumberColumn("收盤", format="%.2f"),
-                    "季含息報酬": st.column_config.NumberColumn("季含息報酬 (%)", format="%+.1f"),
-                    "年含息報酬": st.column_config.NumberColumn("年含息報酬 (%)", format="%+.1f"),
-                    "對大盤": st.column_config.NumberColumn("對大盤 (%)", format="%+.1f"),
-                    "殖利率": st.column_config.NumberColumn("殖利率 (%)", format="%.1f"),
-                    "ROE": st.column_config.NumberColumn("ROE (%)", format="%.1f")
+                    "最新收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
+                    "近一季含息報酬": st.column_config.NumberColumn("季報酬(%)", format="%+.1f"),
+                    "近一年含息報酬": st.column_config.NumberColumn("年報酬(%)", format="%+.1f"),
+                    "相對大盤": st.column_config.NumberColumn("對大盤(%)", format="%+.1f"),
+                    "近一年殖利率": st.column_config.NumberColumn("殖利率(%)", format="%.1f"),
+                    "ROE": st.column_config.NumberColumn("ROE(%)", format="%.1f")
                 },
                 hide_index=True, height=450
             )
