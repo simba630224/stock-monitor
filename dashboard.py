@@ -203,7 +203,6 @@ def get_stock_data(sym):
                 df = df[available_cols].astype(float).dropna(subset=['Close'])
                 if 'Close' not in df.columns: continue
                 
-                # min_periods=1 確保新股也能計算 MA10, MA20
                 df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
                 df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
                 if is_tw:
@@ -297,12 +296,11 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
         except: time.sleep(1)
     return None
 
-# 🚀 終極重構：單一真相來源 (Single Source of Truth)，確保指標標籤一致且防呆不報錯
+# 🚀 終極重構：單一真相來源 (嚴格限制強勢買進與強制賣出條件)
 @st.cache_data(ttl=900)
 def process_technical_analysis(sym, name, market):
     try:
         df = get_stock_data(sym)
-        # 解除 35 天的限制！只要有 >=2 天的資料，新 ETF 就能進來分析，不會再全部消失！
         if df is None or df.empty or len(df) < 2: 
             return None
             
@@ -357,7 +355,6 @@ def process_technical_analysis(sym, name, market):
         above_ma20_5d, below_ma20_5d = False, False
         above_mas_5d, below_mas_5d = False, False
 
-        # 🚀 分開檢查 MA20 與季線，避免新股季線 NaN 時連 MA20 都不判定
         if len(df) >= 6:
             if pd.notna(df['MA20'].iloc[-6]):
                 ma20_up_5d = all(df['MA20'].iloc[i] > df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
@@ -389,8 +386,7 @@ def process_technical_analysis(sym, name, market):
         
         macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
         macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
-        
-        # 指標交叉計算
+
         w_macd_gold, w_kd_gold = False, False
         d_macd_gold, d_kd_gold = False, False
         w_macd_death, w_kd_death = False, False
@@ -412,12 +408,25 @@ def process_technical_analysis(sym, name, market):
         bull_score = 0
         bear_score = 0
 
-        # 🚀 分數與標籤對應中心 (Single Source of Truth)
-        if w_macd_gold: tags.append("週MACD金叉"); bull_score += 4
-        if w_kd_gold: tags.append("週KD金叉"); bull_score += 3
-        if d_macd_gold: tags.append("日MACD金叉"); bull_score += 2
-        if d_kd_gold: tags.append("日KD金叉"); bull_score += 1
-        
+        # 🚀 嚴謹判斷：定義「週低檔金叉」與「週高檔死叉」
+        has_w_macd_low_gold = w_macd_gold and (macd_w < 0)
+        has_w_kd_low_gold = w_kd_gold and (k_w < 30)
+        has_w_macd_high_death = w_macd_death and (macd_w > 0)
+        has_w_kd_high_death = w_kd_death and (k_w > 70)
+
+        if w_macd_gold:
+            tags.append("週MACD零下金叉" if has_w_macd_low_gold else "週MACD一般金叉")
+            bull_score += 4
+        if w_kd_gold:
+            tags.append("週KD低檔金叉" if has_w_kd_low_gold else "週KD一般金叉")
+            bull_score += 3
+        if d_macd_gold:
+            tags.append("日MACD零下金叉" if macd_d < 0 else "日MACD一般金叉")
+            bull_score += 2
+        if d_kd_gold:
+            tags.append("日KD低檔金叉" if k_d < 30 else "日KD一般金叉")
+            bull_score += 1
+            
         if ma20_up_5d and ma_s_up_5d: tags.append("月季線雙上彎≥5日"); bull_score += 2
         elif ma20_up_5d: tags.append("月線上彎≥5日"); bull_score += 1
         elif ma_s_up_5d: tags.append("季線上彎≥5日"); bull_score += 1
@@ -427,12 +436,20 @@ def process_technical_analysis(sym, name, market):
         elif above_mas_5d: tags.append("站上季線≥5日"); bull_score += 1
         
         if has_ret_5d and ret_5d >= 5.0: tags.append(f"近5日上漲{ret_5d:.1f}%"); bull_score += 1
-        
-        if w_macd_death: tags.append("週MACD死叉"); bear_score += 4
-        if w_kd_death: tags.append("週KD死叉"); bear_score += 3
-        if d_macd_death: tags.append("日MACD死叉"); bear_score += 2
-        if d_kd_death: tags.append("日KD死叉"); bear_score += 1
-        
+
+        if w_macd_death:
+            tags.append("週MACD零上死叉" if has_w_macd_high_death else "週MACD一般死叉")
+            bear_score += 4
+        if w_kd_death:
+            tags.append("週KD高檔死叉" if has_w_kd_high_death else "週KD一般死叉")
+            bear_score += 3
+        if d_macd_death:
+            tags.append("日MACD零上死叉" if macd_d > 0 else "日MACD一般死叉")
+            bear_score += 2
+        if d_kd_death:
+            tags.append("日KD高檔死叉" if k_d > 70 else "日KD一般死叉")
+            bear_score += 1
+            
         if is_break_ma: tags.append("跌破短中線"); bear_score += 1
         
         if ma20_dn_5d and ma_s_dn_5d: tags.append("月季線雙下彎≥5日"); bear_score += 2
@@ -453,18 +470,34 @@ def process_technical_analysis(sym, name, market):
             amp_20d = (high_20d - low_20d) / low_20d
             if amp_20d <= 0.07: tags.append(f"💤20日窄幅盤整")
 
+        # 🚀 嚴謹判定：是否具備週指標強勢條件
+        is_strong_buy_eligible = has_w_macd_low_gold or has_w_kd_low_gold
+        is_strong_sell_eligible = has_w_macd_high_death or has_w_kd_high_death
+
         if bull_score > bear_score:
-            action = "[🚀 強勢買進]" if bull_score >= 3 else "[📈 短多轉折]"
+            if bull_score >= 3 and is_strong_buy_eligible:
+                action = "[🚀 強勢買進]"
+            else:
+                action = "[📈 短多轉折]"
         elif bear_score > bull_score:
-            action = "[🛑 強制賣出]" if bear_score >= 3 else "[⚠️ 弱勢減碼]"
+            if bear_score >= 3 and is_strong_sell_eligible:
+                action = "[🛑 強制賣出]"
+            else:
+                action = "[⚠️ 弱勢減碼]"
         else:
-            if bull_score == 0 and bear_score == 0: action = "[➖ 趨勢延續]"
-            elif bull_score >= 3: action = "[⚔️ 多空交戰(偏強)]"
-            else: action = "[⚔️ 多空交戰(偏弱)]"
+            if bull_score == 0 and bear_score == 0: 
+                action = "[➖ 趨勢延續]"
+            elif bull_score >= 3 and is_strong_buy_eligible: 
+                action = "[⚔️ 多空交戰(偏強)]"
+            elif bear_score >= 3 and is_strong_sell_eligible:
+                action = "[⚔️ 多空交戰(偏弱)]"
+            elif bull_score > 0:
+                action = "[⚔️ 多空交戰(震盪)]"
+            else:
+                action = "[⚔️ 多空交戰]"
 
         alert_str = f"{action} " + ", ".join(tags) if tags else action
 
-        # 🚀 新股基本面防呆：強制保護 float() 轉換異常
         f_info = get_fundamental_info(sym)
         pe_val = f_info.get('trailingPE')
         try:
@@ -481,14 +514,15 @@ def process_technical_analysis(sym, name, market):
             beta_str = "無"
 
         return {
-            "市場": market, "標的": f"{name} ({sym})", "狀態警示": alert_str, "均線位階": ma_status_str,
+            "市場": market, "標的": f"{name} ({sym})", "代號": sym.split('.')[0], 
+            "狀態警示": alert_str, "🚨警示": alert_str, "均線位階": ma_status_str,
             "52週位置": f"{pos_52w:.1f} %", "Beta": beta_str, 
             "日KD": f"K:{k_d:.1f}/D:{d_d:.1f}",
             "週KD": f"K:{k_w:.1f}/D:{d_w:.1f}",
             "日MACD": f"DIF:{macd_d:.2f}",
             "週MACD": f"DIF:{macd_w:.2f}",
             "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
-            "tags": tags, "bull_score": bull_score, "bear_score": bear_score,
+            "tags": tags, "bull_score": bull_score, "bear_score": bear_score, "action": action,
             "_raw_pe": pe_val, "_sym": sym, "_name": name
         }
     except Exception as e: 
@@ -686,7 +720,8 @@ with tab2:
         
         bullish_strong = [] 
         bullish_daily = []  
-        bearish_alerts = [] 
+        bearish_strong = [] 
+        bearish_daily = []
         
         scan_list = []
         for item in PORTFOLIO_TW:
@@ -714,47 +749,52 @@ with tab2:
                 
                 bull_score = res.get('bull_score', 0)
                 bear_score = res.get('bear_score', 0)
+                action = res.get('action', '')
                 
                 item_data = {'name': name_disp, 'pe': pe_val if pd.notna(pe_val) and pe_val is not None else 999, 'tags': res.get('tags', []), 'bull_score': bull_score, 'bear_score': bear_score}
                 
-                if bear_score >= 3: 
-                    bearish_alerts.append(item_data)
-                elif bull_score >= 3: 
+                # 🚀 嚴謹判定分類 (Single Source of Truth)
+                if "[🚀 強勢買進]" in action:
                     bullish_strong.append(item_data)
-                elif bear_score > 0: 
-                    bearish_alerts.append(item_data)
-                elif bull_score > 0: 
+                elif "[📈 短多轉折]" in action:
                     bullish_daily.append(item_data)
+                elif "[🛑 強制賣出]" in action:
+                    bearish_strong.append(item_data)
+                elif "[⚠️ 弱勢減碼]" in action:
+                    bearish_daily.append(item_data)
 
+        # 排序：多空分數高者優先，同分則低 PE 優先
         bullish_strong = sorted(bullish_strong, key=lambda x: (-x['bull_score'], x['pe']))[:10]
         bullish_daily = sorted(bullish_daily, key=lambda x: (-x['bull_score'], x['pe']))[:10]
-        bearish_alerts = sorted(bearish_alerts, key=lambda x: (-x['bear_score'], x['pe']))[:10]
+        bearish_strong = sorted(bearish_strong, key=lambda x: (-x['bear_score'], x['pe']))[:10]
+        bearish_daily = sorted(bearish_daily, key=lambda x: (-x['bear_score'], x['pe']))[:10]
 
         def format_items(items):
             if not items: return "無"
             return "\n".join([f"• **{x['name']}** `[{', '.join(x['tags'])}]`" for x in items])
 
     st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 10)")
-    st.caption("篩選邏輯：統一依照多空分數排名，分數越高者排名越前；分數相同時 **本益比 (PE) 低者優先**。")
+    st.caption("篩選邏輯：依多空評分嚴格分級，同級別中分數高者與低本益比 (PE) 者優先顯示。")
     
     col_sum1, col_sum2 = st.columns(2)
     with col_sum1:
-        st.success(f"**☀️ 多方強勢區 (分數優先)**\n\n"
+        st.success(f"**☀️ 多方強勢區**\n\n"
                    f"🔥 **[🚀 強勢買進] Top 10**：\n{format_items(bullish_strong)}\n\n"
                    f"📈 **[📈 短多轉折] Top 10**：\n{format_items(bullish_daily)}")
     with col_sum2:
-        st.error(f"**⛈️ 空方風險區 (分數優先)**\n\n"
-                 f"⚠️ **[🛑 強制賣出 / 弱勢減碼] Top 10**：\n{format_items(bearish_alerts)}")
+        st.error(f"**⛈️ 空方風險區**\n\n"
+                 f"🛑 **[🛑 強制賣出] Top 10**：\n{format_items(bearish_strong)}\n\n"
+                 f"⚠️ **[⚠️ 弱勢減碼] Top 10**：\n{format_items(bearish_daily)}")
 
     st.divider()
     st.markdown("### 📋 完整技術分析清單")
     with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
         st.markdown("""
-        #### 一、 綜合動作評級 (依多空分數判定)
-        * **[🚀 強勢買進]**：多方分數 ≥ 3 (例：週線級別金叉、多重均線上彎)。
-        * **[📈 短多轉折]**：多方分數 1~2 (例：日線級別金叉、單一短均線站上)。
-        * **[🛑 強制賣出]**：空方分數 ≥ 3 (例：週線死叉、高點回落達 15%、多重破線)。
-        * **[⚠️ 弱勢減碼]**：空方分數 1~2 (例：日線死叉、短均線下彎、回落 10%)。
+        #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
+        * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
+        * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者，如日線金叉或分數雖高但欠缺週低檔金叉)。
+        * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
+        * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者，如日線死叉或分數雖高但欠缺週高檔死叉)。
         * **[⚔️ 多空交戰]**：同時觸發多空條件，依分數較高者顯示偏強或偏弱。
         * **[➖ 趨勢延續]**：無明顯多空觸發訊號。
 
