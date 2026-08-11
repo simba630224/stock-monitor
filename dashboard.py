@@ -203,6 +203,7 @@ def get_stock_data(sym):
                 df = df[available_cols].astype(float).dropna(subset=['Close'])
                 if 'Close' not in df.columns: continue
                 
+                # min_periods=1 確保新股也能計算 MA10, MA20
                 df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
                 df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
                 if is_tw:
@@ -250,6 +251,9 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                     if len(valid_hist) > days_back:
                         past_p = float(valid_hist.iloc[-days_back])
                         return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else 0.0
+                    elif len(valid_hist) > 0:
+                        past_p = float(valid_hist.iloc[0])
+                        return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else 0.0
                     return 0.0
 
                 ret_1q = calc_ret(63)
@@ -267,7 +271,11 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                 is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper() or 'MUTUALFUND' in str(f_info.get('quoteType', '')).upper()
                 
                 roe_raw = f_info.get('returnOnEquity')
-                roe_val = roe_raw * 100 if roe_raw is not None and not is_etf else None
+                roe_val = None
+                if roe_raw is not None and not is_etf:
+                    try:
+                        roe_val = float(roe_raw) * 100
+                    except: pass
 
                 div_records = []
                 tot_div = 0.0
@@ -284,30 +292,30 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns):
                     "市場": market, "代號": display_ticker, "最新收盤價": curr_p,
                     "近一季含息報酬": float(ret_1q), "近半年含息報酬": float(ret_6m), "近一年含息報酬": float(ret_1y),
                     "相對大盤": float(rel_val), "近一年殖利率": float(yield_1y), "總配息金額": float(tot_div),
-                    "近一年配息明細": div_history_str, "ROE": float(roe_val) if roe_val is not None else None
+                    "近一年配息明細": div_history_str, "ROE": roe_val
                 }
         except: time.sleep(1)
     return None
 
-# 🚀 終極重構：單一真相來源 (Single Source of Truth)，統一管理所有的警示標籤與多空分數
+# 🚀 終極重構：單一真相來源 (Single Source of Truth)，確保指標標籤一致且防呆不報錯
 @st.cache_data(ttl=900)
 def process_technical_analysis(sym, name, market):
     try:
         df = get_stock_data(sym)
-        if df is None or df.empty or len(df) < 35: return None
+        # 解除 35 天的限制！只要有 >=2 天的資料，新 ETF 就能進來分析，不會再全部消失！
+        if df is None or df.empty or len(df) < 2: 
+            return None
             
         has_enough_weekly = False
         k_w, d_w, macd_w, macds_w = 0.0, 0.0, 0.0, 0.0
         
         try:
-            agg_dict = {'Close': 'last'}
-            if 'Open' in df.columns: agg_dict['Open'] = 'first'
-            if 'High' in df.columns: agg_dict['High'] = 'max'
-            if 'Low' in df.columns: agg_dict['Low'] = 'min'
-            if 'Volume' in df.columns: agg_dict['Volume'] = 'sum'
+            agg_dict = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+            available_cols = [c for c in agg_dict.keys() if c in df.columns]
+            agg_dict = {c: agg_dict[c] for c in available_cols}
             
             df_w = df.resample('W-FRI').agg(agg_dict).dropna(subset=['Close'])
-            if len(df_w) >= 15: 
+            if len(df_w) >= 2: 
                 has_enough_weekly = True
                 if 'High' in df_w.columns and 'Low' in df_w.columns:
                     low_min_w = df_w['Low'].rolling(9, min_periods=1).min()
@@ -323,8 +331,8 @@ def process_technical_analysis(sym, name, market):
                 df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
                 df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
                 
-                k_w = float(df_w['K_w'].iloc[-1]) if pd.notna(df_w['K_w'].iloc[-1]) else 0.0
-                d_w = float(df_w['D_w'].iloc[-1]) if pd.notna(df_w['D_w'].iloc[-1]) else 0.0
+                k_w = float(df_w['K_w'].iloc[-1]) if pd.notna(df_w['K_w'].iloc[-1]) else 50.0
+                d_w = float(df_w['D_w'].iloc[-1]) if pd.notna(df_w['D_w'].iloc[-1]) else 50.0
                 macd_w = float(df_w['MACD'].iloc[-1]) if pd.notna(df_w['MACD'].iloc[-1]) else 0.0
                 macds_w = float(df_w['MACD_Signal'].iloc[-1]) if pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0.0
         except: pass
@@ -344,24 +352,24 @@ def process_technical_analysis(sym, name, market):
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
         is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
 
-        ma20_up_5d = False
-        ma_s_up_5d = False
-        ma20_dn_5d = False
-        ma_s_dn_5d = False
-        above_ma20_5d = False
-        below_ma20_5d = False
-        above_mas_5d = False
-        below_mas_5d = False
+        ma20_up_5d, ma_s_up_5d = False, False
+        ma20_dn_5d, ma_s_dn_5d = False, False
+        above_ma20_5d, below_ma20_5d = False, False
+        above_mas_5d, below_mas_5d = False, False
 
-        if len(df) >= 6 and pd.notna(df['季線'].iloc[-6]):
-            ma20_up_5d = all(df['MA20'].iloc[i] > df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
-            ma_s_up_5d = all(df['季線'].iloc[i] > df['季線'].iloc[i-1] for i in range(-1, -6, -1))
-            ma20_dn_5d = all(df['MA20'].iloc[i] < df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
-            ma_s_dn_5d = all(df['季線'].iloc[i] < df['季線'].iloc[i-1] for i in range(-1, -6, -1))
-            above_ma20_5d = all(df['Close'].iloc[i] > df['MA20'].iloc[i] for i in range(-5, 0))
-            below_ma20_5d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-5, 0))
-            above_mas_5d = all(df['Close'].iloc[i] > df['季線'].iloc[i] for i in range(-5, 0))
-            below_mas_5d = all(df['Close'].iloc[i] < df['季線'].iloc[i] for i in range(-5, 0))
+        # 🚀 分開檢查 MA20 與季線，避免新股季線 NaN 時連 MA20 都不判定
+        if len(df) >= 6:
+            if pd.notna(df['MA20'].iloc[-6]):
+                ma20_up_5d = all(df['MA20'].iloc[i] > df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
+                ma20_dn_5d = all(df['MA20'].iloc[i] < df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
+                above_ma20_5d = all(df['Close'].iloc[i] > df['MA20'].iloc[i] for i in range(-5, 0))
+                below_ma20_5d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-5, 0))
+            
+            if pd.notna(df['季線'].iloc[-6]):
+                ma_s_up_5d = all(df['季線'].iloc[i] > df['季線'].iloc[i-1] for i in range(-1, -6, -1))
+                ma_s_dn_5d = all(df['季線'].iloc[i] < df['季線'].iloc[i-1] for i in range(-1, -6, -1))
+                above_mas_5d = all(df['Close'].iloc[i] > df['季線'].iloc[i] for i in range(-5, 0))
+                below_mas_5d = all(df['Close'].iloc[i] < df['季線'].iloc[i] for i in range(-5, 0))
 
         ret_5d = 0.0
         has_ret_5d = False
@@ -378,30 +386,33 @@ def process_technical_analysis(sym, name, market):
         
         k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-1]) else 50.0
         d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-1]) else 50.0
-        pk_d = float(df['K_d'].iloc[-2]) if len(df) > 1 and 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-2]) else 50.0
-        pd_d = float(df['D_d'].iloc[-2]) if len(df) > 1 and 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-2]) else 50.0
         
         macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
         macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
-        pmacd_d = float(df['MACD'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD'].iloc[-2]) else 0.0
-        pmacds_d = float(df['MACD_Signal'].iloc[-2]) if len(df) > 1 and pd.notna(df['MACD_Signal'].iloc[-2]) else 0.0
+        
+        # 指標交叉計算
+        w_macd_gold, w_kd_gold = False, False
+        d_macd_gold, d_kd_gold = False, False
+        w_macd_death, w_kd_death = False, False
+        d_macd_death, d_kd_death = False, False
 
-        # KD / MACD 狀態判定
-        w_macd_gold = has_enough_weekly and macd_w > macds_w and pmacd_w <= pmacds_w
-        w_kd_gold = has_enough_weekly and k_w > d_w and pk_w <= pd_w
-        d_macd_gold = macd_d > macds_d and pmacd_d <= pmacds_d
-        d_kd_gold = k_d > d_d and pk_d <= pd_d
+        if has_enough_weekly and len(df_w) > 1:
+            w_macd_gold = macd_w > macds_w and float(df_w['MACD'].iloc[-2]) <= float(df_w['MACD_Signal'].iloc[-2])
+            w_kd_gold = k_w > d_w and float(df_w['K_w'].iloc[-2]) <= float(df_w['D_w'].iloc[-2])
+            w_macd_death = macd_w < macds_w and float(df_w['MACD'].iloc[-2]) >= float(df_w['MACD_Signal'].iloc[-2])
+            w_kd_death = k_w < d_w and float(df_w['K_w'].iloc[-2]) >= float(df_w['D_w'].iloc[-2])
 
-        w_macd_death = has_enough_weekly and macd_w < macds_w and pmacd_w >= pmacds_w
-        w_kd_death = has_enough_weekly and k_w < d_w and pk_w >= pd_w
-        d_macd_death = macd_d < macds_d and pmacd_d >= pmacds_d
-        d_kd_death = k_d < d_d and pk_d >= pd_d
+        if len(df) > 1:
+            d_macd_gold = macd_d > macds_d and float(df['MACD'].iloc[-2]) <= float(df['MACD_Signal'].iloc[-2])
+            d_kd_gold = k_d > d_d and float(df['K_d'].iloc[-2]) <= float(df['D_d'].iloc[-2])
+            d_macd_death = macd_d < macds_d and float(df['MACD'].iloc[-2]) >= float(df['MACD_Signal'].iloc[-2])
+            d_kd_death = k_d < d_d and float(df['K_d'].iloc[-2]) >= float(df['D_d'].iloc[-2])
 
         tags = []
         bull_score = 0
         bear_score = 0
 
-        # 🚀 統一計算標籤與分數 (Single Source of Truth)
+        # 🚀 分數與標籤對應中心 (Single Source of Truth)
         if w_macd_gold: tags.append("週MACD金叉"); bull_score += 4
         if w_kd_gold: tags.append("週KD金叉"); bull_score += 3
         if d_macd_gold: tags.append("日MACD金叉"); bull_score += 2
@@ -442,7 +453,6 @@ def process_technical_analysis(sym, name, market):
             amp_20d = (high_20d - low_20d) / low_20d
             if amp_20d <= 0.07: tags.append(f"💤20日窄幅盤整")
 
-        # 🚀 根據統一分數產生唯一的動作警示 (Action)
         if bull_score > bear_score:
             action = "[🚀 強勢買進]" if bull_score >= 3 else "[📈 短多轉折]"
         elif bear_score > bull_score:
@@ -452,25 +462,37 @@ def process_technical_analysis(sym, name, market):
             elif bull_score >= 3: action = "[⚔️ 多空交戰(偏強)]"
             else: action = "[⚔️ 多空交戰(偏弱)]"
 
-        alert_str = f"{action} " + ", ".join(tags)
+        alert_str = f"{action} " + ", ".join(tags) if tags else action
 
+        # 🚀 新股基本面防呆：強制保護 float() 轉換異常
         f_info = get_fundamental_info(sym)
         pe_val = f_info.get('trailingPE')
-        pe_str = f"{float(pe_val):.1f}" if pe_val is not None and pd.notna(pe_val) else "無"
+        try:
+            pe_val = float(pe_val)
+            pe_str = f"{pe_val:.1f}" if pd.notna(pe_val) else "無"
+        except:
+            pe_val = None
+            pe_str = "無"
+            
         beta_val = f_info.get('beta')
-        beta_str = f"{float(beta_val):.2f}" if beta_val is not None and pd.notna(beta_val) else "無"
+        try:
+            beta_str = f"{float(beta_val):.2f}" if pd.notna(float(beta_val)) else "無"
+        except:
+            beta_str = "無"
 
         return {
-            "市場": market, "標的": f"{name} ({sym})", "代號": sym.split('.')[0], 
-            "狀態警示": alert_str, "🚨警示": alert_str, "均線位階": ma_status_str,
-            "52週位置": f"{pos_52w:.1f} %", "收盤價": last_p, "價格": last_p, "Beta": beta_str, "P/E": pe_str,
-            "日KD": f"K:{k_d:.1f}/D:{d_d:.1f}", "週KD": f"K:{k_w:.1f}/D:{d_w:.1f}",
-            "日MACD": f"DIF:{macd_d:.2f}", "週MACD": f"DIF:{macd_w:.2f}",
-            "MA20": ma20, "季線": ma_season,
+            "市場": market, "標的": f"{name} ({sym})", "狀態警示": alert_str, "均線位階": ma_status_str,
+            "52週位置": f"{pos_52w:.1f} %", "Beta": beta_str, 
+            "日KD": f"K:{k_d:.1f}/D:{d_d:.1f}",
+            "週KD": f"K:{k_w:.1f}/D:{d_w:.1f}",
+            "日MACD": f"DIF:{macd_d:.2f}",
+            "週MACD": f"DIF:{macd_w:.2f}",
+            "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
             "tags": tags, "bull_score": bull_score, "bear_score": bear_score,
             "_raw_pe": pe_val, "_sym": sym, "_name": name
         }
-    except Exception as e: return None
+    except Exception as e: 
+        return None
 
 # ==========================================
 # 3. 網頁 UI 渲染
@@ -687,13 +709,13 @@ with tab2:
                 target_options[f"{name} ({sym})"] = sym
                 
                 pe_val = res.get('_raw_pe')
-                pe_str = f"PE:{pe_val:.1f}" if pd.notna(pe_val) and pe_val != 999 else "無PE"
+                pe_str = f"PE:{pe_val:.1f}" if pd.notna(pe_val) and pe_val is not None else "無PE"
                 name_disp = f"{name} ({pe_str})"
                 
                 bull_score = res.get('bull_score', 0)
                 bear_score = res.get('bear_score', 0)
                 
-                item_data = {'name': name_disp, 'pe': pe_val if pd.notna(pe_val) else 999, 'tags': res.get('tags', []), 'bull_score': bull_score, 'bear_score': bear_score}
+                item_data = {'name': name_disp, 'pe': pe_val if pd.notna(pe_val) and pe_val is not None else 999, 'tags': res.get('tags', []), 'bull_score': bull_score, 'bear_score': bear_score}
                 
                 if bear_score >= 3: 
                     bearish_alerts.append(item_data)
@@ -746,9 +768,11 @@ with tab2:
         
     if ta_results:
         df_ta = pd.DataFrame(ta_results)
-        df_ta = df_ta.drop(columns=['tags', 'bull_score', 'bear_score', '_raw_pe', '_sym', '_name', '🚨警示', '代號', '價格'], errors='ignore')
+        display_cols = ["市場", "標的", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
+        display_cols = [c for c in display_cols if c in df_ta.columns]
+        
         st.dataframe(
-            df_ta, 
+            df_ta[display_cols], 
             width="stretch",
             column_config={
                 "市場": st.column_config.TextColumn("市場", width="small"),
@@ -788,7 +812,8 @@ with tab2:
                 
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name="季線"), row=1, col=1)
+            if '季線' in df_plot.columns:
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name="季線"), row=1, col=1)
             
             if 'K_d' in df_plot.columns:
                 fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值'), row=2, col=1)
@@ -796,10 +821,11 @@ with tab2:
             fig_tech.add_hline(y=80, line_dash="dash", line_color="red", row=2, col=1)
             fig_tech.add_hline(y=20, line_dash="dash", line_color="green", row=2, col=1)
             
-            macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
-            fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD'), row=3, col=1)
-            fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal'), row=3, col=1)
+            if 'MACD_Hist' in df_plot.columns:
+                macd_colors = ['red' if val >= 0 else 'green' for val in df_plot['MACD_Hist']]
+                fig_tech.add_trace(go.Bar(x=df_plot.index, y=df_plot['MACD_Hist'], marker_color=macd_colors, name='OSC'), row=3, col=1)
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD'], line=dict(color='blue', width=1.5), name='MACD'), row=3, col=1)
+                fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MACD_Signal'], line=dict(color='orange', width=1.5), name='Signal'), row=3, col=1)
             
             fig_tech.update_layout(xaxis_rangeslider_visible=False, height=800, margin=dict(t=40, b=0, l=0, r=0))
             st.plotly_chart(fig_tech, use_container_width=True)
