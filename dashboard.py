@@ -48,7 +48,7 @@ def format_display_name(name_raw, sym_raw):
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # 🛑 終極防呆：請將您的 Technical_DB 試算表網址貼在引號內！
-TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
+TECHNICAL_DB_URL = "" 
 
 def load_and_standardize_portfolio(worksheet_name, default_category):
     try:
@@ -167,12 +167,13 @@ def get_fx_data():
 def get_benchmark_returns():
     benchmarks = {'台股': 0.0, '美股': 0.0}
     try:
-        tw_hist = yf.Ticker("^TWII").history(period="1y").dropna(subset=['Close'])
+        # 使用 auto_adjust=True 保證大盤比較也是含息
+        tw_hist = yf.Ticker("^TWII").history(period="1y", auto_adjust=True).dropna(subset=['Close'])
         if len(tw_hist) > 252: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[-252]) / tw_hist['Close'].iloc[-252]) * 100
         elif not tw_hist.empty: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
     except: pass
     try:
-        us_hist = yf.Ticker("^GSPC").history(period="1y").dropna(subset=['Close'])
+        us_hist = yf.Ticker("^GSPC").history(period="1y", auto_adjust=True).dropna(subset=['Close'])
         if len(us_hist) > 252: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[-252]) / us_hist['Close'].iloc[-252]) * 100
         elif not us_hist.empty: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
     except: pass
@@ -191,9 +192,10 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
-# 🚀 絕對防禦版的績效計算引擎
+# 🚀 絕對防禦版的績效計算引擎 (已確認使用 auto_adjust=True，保證是含息報酬)
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
+    # 預設回傳值，確保不報錯
     result = {
         "市場": market, "代號": display_ticker, "顯示名稱": display_name, "收盤價": 0.0,
         "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
@@ -204,6 +206,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
         try:
             time.sleep(0.3)
             tk = yf.Ticker(sym)
+            # auto_adjust=True 即代表經過除權息調整，算出的報酬就是「含息報酬(Total Return)」
             hist = tk.history(period="2y", auto_adjust=True) 
             if not hist.empty and len(hist['Close'].dropna()) > 0:
                 valid_hist = hist['Close'].dropna()
@@ -219,7 +222,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                     return 0.0
 
                 ret_1q = calc_ret(63)
-                ret_6m = calc_ret(126)
+                ret_6m = calc_ret(126) # 半年期含息報酬
                 
                 if len(valid_hist) > 252:
                     ret_1y = ((curr_p - float(valid_hist.iloc[-252])) / float(valid_hist.iloc[-252])) * 100
@@ -464,7 +467,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 絕對防禦直讀版)
+# TAB 2: 技術分析掃描
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -474,7 +477,6 @@ with tab2:
         st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 44 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
-            # 🚀 終極防呆機制：確保欄位實體存在才進行轉型，絕對避免 AttributeError
             for col in ['bull_score', 'bear_score']:
                 if col not in df_db.columns: df_db[col] = 0
                 df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
@@ -482,15 +484,12 @@ with tab2:
             if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
             df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
             
-            # 字串欄位處理防呆 (清洗 nan)
             for col in ['action', 'tags', '_name', '_sym', '標的']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
 
-            # 新增格式化顯示名稱欄位
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
 
-            # 建立選項，排除空值 (只認有效的 sym 才能畫圖)
             target_options = {}
             for _, row in df_db.iterrows():
                 sym = str(row.get('_sym', '')).strip()
@@ -498,7 +497,6 @@ with tab2:
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
 
-            # 分級 Top 10 清單
             bullish_strong = df_db[df_db['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
             bullish_daily = df_db[df_db['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
             bearish_strong = df_db[df_db['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
@@ -519,7 +517,7 @@ with tab2:
                 return "\n".join(res)
 
             st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 10)")
-            st.caption("篩選邏輯：由後端 `main.py` 每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
+            st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
             
             col_sum1, col_sum2 = st.columns(2)
             with col_sum1:
@@ -612,13 +610,13 @@ with tab2:
                     st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 3: 標的比較 (🚀 解除資料庫依賴，解決空白問題)
+# TAB 3: 標的比較
 # ------------------------------------------
 with tab_comp:
     st.subheader("🆚 多檔標的走勢比較")
     st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
     
-    # 🚀 直接從持股清單抓取選項，保證一定有資料，不依賴 Technical_DB
+    # 從持股清單抓取選項
     comp_options = {}
     for item in PORTFOLIO_TW:
         sym_raw = str(item.get('Ticker', '')).strip()
@@ -638,8 +636,7 @@ with tab_comp:
         
         comp_col1, comp_col2 = st.columns([3, 1])
         with comp_col1:
-            # 🚀 移除 default，解決「清空後無法選擇」的死鎖問題
-            comp_targets = st.multiselect("請選擇比較標的 (最多4檔)：", options=all_options_list, max_selections=4)
+            comp_targets = st.multiselect("請選擇比較標的 (最多4檔)：", options=all_options_list, max_selections=4, key="comp_ms")
         with comp_col2:
             comp_period = st.radio("比較期間", ["半年", "一年", "三年"], horizontal=True, index=1)
             
@@ -652,7 +649,8 @@ with tab_comp:
                 for tgt in comp_targets:
                     sym = comp_options[tgt]
                     try:
-                        hist = yf.Ticker(sym).history(period=yf_period)
+                        # 🚀 yfinance 預設 auto_adjust=True，計算結果為含息報酬
+                        hist = yf.Ticker(sym).history(period=yf_period, auto_adjust=True)
                         if not hist.empty and 'Close' in hist.columns:
                             s = hist['Close'].dropna()
                             if len(s) > 0:
@@ -666,6 +664,7 @@ with tab_comp:
                 if comp_pct_dict:
                     df_comp_pct = pd.DataFrame(comp_pct_dict).ffill().bfill()
                     if not df_comp_pct.empty:
+                        # 🚀 嚴格標示為「含息報酬率」
                         fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計含息報酬率 (%)', 'variable': '標的', 'index': '日期'})
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig_comp, use_container_width=True)
@@ -696,17 +695,17 @@ with tab_comp:
                         sym = comp_options[tgt]
                         clean_code = sym.split('.')[0]
                         
-                        sub_df = df_etf_comp_db[
-                            df_etf_comp_db[etf_c].astype(str).str.strip().str.contains(rf'\b{clean_code}\b', case=False, na=False, regex=True) |
-                            df_etf_comp_db[etf_c].astype(str).str.strip().apply(lambda x: x in tgt)
-                        ].copy()
+                        # 🚀 精準篩選：避免包含其他代號相似的 ETF
+                        db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.replace(r'\.TW.*', '', regex=True)
+                        sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                         
                         if not sub_df.empty:
+                            sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
                             sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                             sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
                             sub_df = sub_df.dropna(subset=[weight_c])
                             
-                            # 🚀 核心修正：強制去重，避免資料庫有重複數據導致台積電出現兩次、加總破百！
+                            # 🚀 終極去重邏輯：直接依權重排序後刪除重複成分股名稱，確保絕不重複加總！
                             sub_df = sub_df.sort_values(by=weight_c, ascending=False).drop_duplicates(subset=[name_c], keep='first').head(10)
                             
                             if not sub_df.empty:
@@ -723,10 +722,10 @@ with tab_comp:
     else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 
 # ------------------------------------------
-# TAB 4: 績效與觀察總覽 (🚀 獨立抓取，保證資料絕對不遺失)
+# TAB 4: 績效與觀察總覽
 # ------------------------------------------
 with tab3:
-    st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**基本面財報指標**與**真實配息紀錄**。")
+    st.markdown("一覽所有持股與觀察清單的**短中長線含息報酬率**、**基本面財報指標**與**真實配息紀錄**。")
     with st.spinner("正在計算各標的績效與配息資料..."):
         bench_returns = get_benchmark_returns()
         perf_results = []
@@ -749,7 +748,8 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            display_cols = ["顯示名稱", "收盤價", "近一季含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "近一年配息明細", "ROE"]
+            # 🚀 確實將「近半年含息報酬」加入顯示清單
+            display_cols = ["顯示名稱", "收盤價", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "近一年配息明細", "ROE"]
             display_cols = [c for c in display_cols if c in df_perf.columns]
             
             if not df_perf.empty:
@@ -759,9 +759,10 @@ with tab3:
                     column_config={
                         "顯示名稱": st.column_config.TextColumn("標的"),
                         "收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
-                        "近一季含息報酬": st.column_config.NumberColumn("季報酬(%)", format="%+.1f"),
-                        "近一年含息報酬": st.column_config.NumberColumn("年報酬(%)", format="%+.1f"),
-                        "相對大盤": st.column_config.NumberColumn("對大盤(%)", format="%+.1f"),
+                        "近一季含息報酬": st.column_config.NumberColumn("近一季含息報酬(%)", format="%+.1f"),
+                        "近半年含息報酬": st.column_config.NumberColumn("近半年含息報酬(%)", format="%+.1f"),
+                        "近一年含息報酬": st.column_config.NumberColumn("近一年含息報酬(%)", format="%+.1f"),
+                        "相對大盤": st.column_config.NumberColumn("對大盤(1年)(%)", format="%+.1f"),
                         "近一年殖利率": st.column_config.NumberColumn("殖利率(%)", format="%.1f"),
                         "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
                         "ROE": st.column_config.NumberColumn("ROE(%)", format="%.1f")
@@ -772,7 +773,7 @@ with tab3:
                 st.info("尚無可顯示的績效資料。")
 
 # ------------------------------------------
-# TAB 5: ETF 持股 (🚀 修正重複資料問題)
+# TAB 5: ETF 持股
 # ------------------------------------------
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
@@ -820,14 +821,14 @@ with tab_etf:
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
                         plot_df = plot_df.dropna(subset=[weight_col])
                         
-                        # 🚀 核心修正：強制去重，避免資料庫有重複數據導致相同成分股被加兩次
+                        # 🚀 終極去重邏輯：直接依照權重大小排序後，剔除重複出現的成分股名稱，最後再取 Top 10！
                         plot_df = plot_df.sort_values(by=weight_col, ascending=False).drop_duplicates(subset=[name_col], keep='first').head(10)
                         
                         if not plot_df.empty:
                             top10_sum = plot_df[weight_col].sum()
                             st.markdown(f"#### 🎯 前十大持股權重總和： **{top10_sum:.2f}%**")
                             
-                            # 為了水平長條圖美觀，將最大的排在最上面
+                            # 反轉排序讓長條圖最大的在最上面
                             plot_df_top10 = plot_df.sort_values(by=weight_col, ascending=True)
                             plot_df_top10['文字標籤'] = plot_df_top10[weight_col].apply(lambda x: f"{x:.2f}%")
                             
