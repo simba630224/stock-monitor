@@ -14,14 +14,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          
       - name: 安裝套件
         run: |
-          pip install --upgrade pip
-          pip install yfinance pandas requests mplfinance
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests mplfinance gspread google-auth
+          
       - name: 執行分析
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SHEET_CSV_TW_URL: ${{ secrets.SHEET_CSV_TW_URL }}
           SHEET_CSV_US_URL: ${{ secrets.SHEET_CSV_US_URL }}
+          TECHNICAL_DB_URL: ${{ secrets.TECHNICAL_DB_URL }}
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
         run: python main.py
