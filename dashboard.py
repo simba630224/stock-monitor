@@ -191,10 +191,9 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
-# 🚀 絕對防禦版的績效計算引擎 (保證回傳字典，不崩潰缺件)
+# 🚀 絕對防禦版的績效計算引擎
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
-    # 預設回傳值，即使抓不到資料也能安全渲染表格
     result = {
         "市場": market, "代號": display_ticker, "顯示名稱": display_name, "收盤價": 0.0,
         "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
@@ -254,7 +253,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                 })
                 return result
         except: time.sleep(1)
-    # 如果抓取失敗，回傳安全的預設值
     return result
 
 @st.cache_data(ttl=300)
@@ -473,7 +471,7 @@ with tab2:
         df_db = load_technical_db()
         
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 43 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 44 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
             # 🚀 終極防呆機制：確保欄位實體存在才進行轉型，絕對避免 AttributeError
@@ -484,10 +482,10 @@ with tab2:
             if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
             df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
             
-            # 字串欄位處理防呆 (取代 nan)
+            # 字串欄位處理防呆 (清洗 nan)
             for col in ['action', 'tags', '_name', '_sym', '標的']:
                 if col not in df_db.columns: df_db[col] = ""
-                df_db[col] = df_db[col].astype(str).replace('nan', '').fillna("")
+                df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
 
             # 新增格式化顯示名稱欄位
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
@@ -614,13 +612,13 @@ with tab2:
                     st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 3: 標的比較 (🚀 解除資料庫依賴)
+# TAB 3: 標的比較 (🚀 解除資料庫依賴，解決空白問題)
 # ------------------------------------------
 with tab_comp:
     st.subheader("🆚 多檔標的走勢比較")
     st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
     
-    # 🚀 直接從持股清單抓取選項，不依賴 Technical_DB
+    # 🚀 直接從持股清單抓取選項，保證一定有資料，不依賴 Technical_DB
     comp_options = {}
     for item in PORTFOLIO_TW:
         sym_raw = str(item.get('Ticker', '')).strip()
@@ -637,11 +635,11 @@ with tab_comp:
             
     if comp_options:
         all_options_list = list(comp_options.keys())
-        default_selections = all_options_list[:2] if len(all_options_list) >= 2 else None
         
         comp_col1, comp_col2 = st.columns([3, 1])
         with comp_col1:
-            comp_targets = st.multiselect("請選擇比較標的 (最多4檔)：", options=all_options_list, default=default_selections, max_selections=4)
+            # 🚀 移除 default，解決「清空後無法選擇」的死鎖問題
+            comp_targets = st.multiselect("請選擇比較標的 (最多4檔)：", options=all_options_list, max_selections=4)
         with comp_col2:
             comp_period = st.radio("比較期間", ["半年", "一年", "三年"], horizontal=True, index=1)
             
@@ -699,14 +697,17 @@ with tab_comp:
                         clean_code = sym.split('.')[0]
                         
                         sub_df = df_etf_comp_db[
-                            df_etf_comp_db[etf_c].astype(str).str.strip().str.contains(clean_code, case=False, na=False) |
+                            df_etf_comp_db[etf_c].astype(str).str.strip().str.contains(rf'\b{clean_code}\b', case=False, na=False, regex=True) |
                             df_etf_comp_db[etf_c].astype(str).str.strip().apply(lambda x: x in tgt)
                         ].copy()
                         
                         if not sub_df.empty:
                             sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                             sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
-                            sub_df = sub_df.dropna(subset=[weight_c]).sort_values(by=weight_c, ascending=False).head(10)
+                            sub_df = sub_df.dropna(subset=[weight_c])
+                            
+                            # 🚀 核心修正：強制去重，避免資料庫有重複數據導致台積電出現兩次、加總破百！
+                            sub_df = sub_df.sort_values(by=weight_c, ascending=False).drop_duplicates(subset=[name_c], keep='first').head(10)
                             
                             if not sub_df.empty:
                                 top10_sum = sub_df[weight_c].sum()
@@ -722,7 +723,7 @@ with tab_comp:
     else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 
 # ------------------------------------------
-# TAB 4: 績效與觀察總覽 (🚀 獨立抓取，保證資料不遺失)
+# TAB 4: 績效與觀察總覽 (🚀 獨立抓取，保證資料絕對不遺失)
 # ------------------------------------------
 with tab3:
     st.markdown("一覽所有持股與觀察清單的**短中長線報酬率**、**基本面財報指標**與**真實配息紀錄**。")
@@ -771,7 +772,7 @@ with tab3:
                 st.info("尚無可顯示的績效資料。")
 
 # ------------------------------------------
-# TAB 5: ETF 持股
+# TAB 5: ETF 持股 (🚀 修正重複資料問題)
 # ------------------------------------------
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
@@ -817,12 +818,17 @@ with tab_etf:
                         plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                         plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
-                        plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=True)
+                        plot_df = plot_df.dropna(subset=[weight_col])
+                        
+                        # 🚀 核心修正：強制去重，避免資料庫有重複數據導致相同成分股被加兩次
+                        plot_df = plot_df.sort_values(by=weight_col, ascending=False).drop_duplicates(subset=[name_col], keep='first').head(10)
                         
                         if not plot_df.empty:
-                            plot_df_top10 = plot_df.tail(10)
-                            top10_sum = plot_df_top10[weight_col].sum()
+                            top10_sum = plot_df[weight_col].sum()
                             st.markdown(f"#### 🎯 前十大持股權重總和： **{top10_sum:.2f}%**")
+                            
+                            # 為了水平長條圖美觀，將最大的排在最上面
+                            plot_df_top10 = plot_df.sort_values(by=weight_col, ascending=True)
                             plot_df_top10['文字標籤'] = plot_df_top10[weight_col].apply(lambda x: f"{x:.2f}%")
                             
                             fig_etf = px.bar(plot_df_top10, x=weight_col, y=name_col, orientation='h', title=f"<b>{selected_etf} 核心持股佔比 (%)</b>", text='文字標籤')
