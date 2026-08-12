@@ -34,6 +34,10 @@ def safe_float(val):
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# 🛑 終極防呆：請直接將您新建的 Technical_DB 試算表網址貼在下方的引號內！
+# 例如: TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/1A2B3C4D..."
+TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
+
 def load_and_standardize_portfolio(worksheet_name, default_category):
     try:
         df = conn.read(worksheet=worksheet_name, ttl=0)
@@ -83,23 +87,27 @@ df_us = load_and_standardize_portfolio("US_Portfolio", "美股")
 PORTFOLIO_US = df_us.to_dict('records') if not df_us.empty else []
 if df_us.empty: df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
-# 🚀 讀取 Technical_DB (預先算好的技術分析資料庫)
+# 🚀 讀取預先算好的技術分析資料庫 (已建立完美相容防禦)
 @st.cache_data(ttl=60)
 def load_technical_db():
+    db_url = TECHNICAL_DB_URL.strip() or st.secrets.get("TECHNICAL_DB_URL")
+    
+    if db_url:
+        try:
+            df_db = conn.read(spreadsheet=db_url, ttl=60)
+            if df_db is not None and not df_db.empty:
+                df_db.columns = [str(c).strip() for c in df_db.columns]
+                return df_db
+        except Exception as e:
+            st.error(f"讀取 Technical_DB 時發生連線錯誤，請確認網址與共用權限。({e})")
+            return pd.DataFrame()
+            
+    # 若沒有提供獨立網址，嘗試從預設試算表中尋找
     try:
         df_db = conn.read(worksheet="Technical_DB", ttl=60)
         if df_db is not None and not df_db.empty:
             df_db.columns = [str(c).strip() for c in df_db.columns]
             return df_db
-    except: pass
-    
-    try:
-        db_url = st.secrets.get("TECHNICAL_DB_URL") or st.secrets.get("connections", {}).get("gsheets", {}).get("spreadsheet")
-        if db_url:
-            df_db = conn.read(spreadsheet=db_url, ttl=60)
-            if df_db is not None and not df_db.empty:
-                df_db.columns = [str(c).strip() for c in df_db.columns]
-                return df_db
     except: pass
     
     return pd.DataFrame()
@@ -364,15 +372,15 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 直讀 Technical_DB)
+# TAB 2: 技術分析掃描 (🚀 直接秒速讀取 Technical_DB)
 # ------------------------------------------
 with tab2:
     df_db = load_technical_db()
     
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認 GitHub Actions 已成功執行並寫入資料。")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 42 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
-        # 🚀 嚴格保護防禦：檢查每個必備欄位，若無則預設填充，再進行轉型
+        # 🚀 嚴格保護防禦：檢查每個必備欄位，確保絕對不引發 KeyError 或 AttributeError
         for col in ['bull_score', 'bear_score']:
             if col not in df_db.columns:
                 df_db[col] = 0
@@ -388,16 +396,15 @@ with tab2:
                 df_db[col] = ""
             df_db[col] = df_db[col].astype(str).fillna("")
 
-        # 建立選項
+        # 建立選項，排除空值與無效名稱
         target_options = {}
         for _, row in df_db.iterrows():
             sym = row['_sym'].strip()
             name = row['_name'].strip()
-            # 排除幽靈值
             if sym and name and sym.lower() not in ['nan', 'none'] and name.lower() not in ['nan', 'none']:
                 target_options[f"{name} ({sym})"] = sym
 
-        # 分級 Top 10 清單
+        # 分級 Top 10 清單 (即使查無資料也會回傳空 DataFrame，不會崩潰)
         bullish_strong = df_db[df_db['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
         bullish_daily = df_db[df_db['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
         bearish_strong = df_db[df_db['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
@@ -408,14 +415,17 @@ with tab2:
             res = []
             for _, r in sub_df.iterrows():
                 pe_val = r['_raw_pe']
-                pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
+                try:
+                    pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
+                except:
+                    pe_str = "無PE"
                 tags_str = r['tags']
                 name_disp = r['_name'] if r['_name'] else r['標的']
                 res.append(f"• **{name_disp} ({pe_str})** `[{tags_str}]`")
             return "\n".join(res)
 
         st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 10)")
-        st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
+        st.caption("篩選邏輯：由後端 `main.py` 每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
         
         col_sum1, col_sum2 = st.columns(2)
         with col_sum1:
@@ -433,9 +443,18 @@ with tab2:
             st.markdown("""
             #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
             * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
-            * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
+            * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者，如日線金叉或分數雖高但欠缺週低檔金叉)。
             * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
-            * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者)。
+            * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者，如日線死叉或分數雖高但欠缺週高檔死叉)。
+            * **[⚔️ 多空交戰]**：同時觸發多空條件，依分數較高者顯示偏強或偏弱。
+            * **[➖ 趨勢延續]**：無明顯多空觸發訊號。
+
+            #### 二、 標籤名詞定義
+            * **指標交叉**：KD/MACD 日線或週線發生黃金交叉(金叉)或死亡交叉(死叉)。
+            * **均線轉折**：月線或季線連續 5 個交易日遞增(上彎)或遞減(下彎)。
+            * **價格穿越**：收盤價連續 5 個交易日維持在均線之上(站上)或之下(跌破)。
+            * **短期動能**：近 5 個交易日累計漲/跌幅達 5% (含) 以上。
+            * **高檔回落**：距過去 52 週最高價跌幅達 15% (或 20日最高價回落 10%)。
             """)
 
         display_cols = ["市場", "標的", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
