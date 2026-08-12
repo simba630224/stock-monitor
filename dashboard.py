@@ -9,7 +9,6 @@ import re
 from datetime import datetime
 import warnings
 import time
-import traceback
 import requests
 import io
 from streamlit_gsheets import GSheetsConnection
@@ -47,8 +46,8 @@ def format_display_name(name_raw, sym_raw):
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 🛑 終極防呆：請將您的 Technical_DB 試算表網址貼在引號內！
-TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
+# 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
+TECHNICAL_DB_URL = "" 
 
 def load_and_standardize_portfolio(worksheet_name, default_category):
     try:
@@ -167,7 +166,6 @@ def get_fx_data():
 def get_benchmark_returns():
     benchmarks = {'台股': 0.0, '美股': 0.0}
     try:
-        # 使用 auto_adjust=True 保證大盤比較也是含息
         tw_hist = yf.Ticker("^TWII").history(period="1y", auto_adjust=True).dropna(subset=['Close'])
         if len(tw_hist) > 252: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[-252]) / tw_hist['Close'].iloc[-252]) * 100
         elif not tw_hist.empty: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
@@ -192,10 +190,8 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
-# 🚀 絕對防禦版的績效計算引擎 (已確認使用 auto_adjust=True，保證是含息報酬)
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
-    # 預設回傳值，確保不報錯
     result = {
         "市場": market, "代號": display_ticker, "顯示名稱": display_name, "收盤價": 0.0,
         "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
@@ -206,7 +202,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
         try:
             time.sleep(0.3)
             tk = yf.Ticker(sym)
-            # auto_adjust=True 即代表經過除權息調整，算出的報酬就是「含息報酬(Total Return)」
             hist = tk.history(period="2y", auto_adjust=True) 
             if not hist.empty and len(hist['Close'].dropna()) > 0:
                 valid_hist = hist['Close'].dropna()
@@ -222,7 +217,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                     return 0.0
 
                 ret_1q = calc_ret(63)
-                ret_6m = calc_ret(126) # 半年期含息報酬
+                ret_6m = calc_ret(126)
                 
                 if len(valid_hist) > 252:
                     ret_1y = ((curr_p - float(valid_hist.iloc[-252])) / float(valid_hist.iloc[-252])) * 100
@@ -467,7 +462,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描
+# TAB 2: 技術分析掃描 (🚀 直讀 Technical_DB)
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -535,11 +530,9 @@ with tab2:
                 st.markdown("""
                 #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
                 * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
-                * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者，如日線金叉或分數雖高但欠缺週低檔金叉)。
+                * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
                 * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
-                * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者，如日線死叉或分數雖高但欠缺週高檔死叉)。
-                * **[⚔️ 多空交戰]**：同時觸發多空條件，依分數較高者顯示偏強或偏弱。
-                * **[➖ 趨勢延續]**：無明顯多空觸發訊號。
+                * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者)。
                 """)
 
             display_cols = ["市場", "顯示名稱", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
@@ -610,13 +603,12 @@ with tab2:
                     st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 3: 標的比較
+# TAB 3: 標的比較 (🚀 解除依賴)
 # ------------------------------------------
 with tab_comp:
     st.subheader("🆚 多檔標的走勢比較")
     st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
     
-    # 從持股清單抓取選項
     comp_options = {}
     for item in PORTFOLIO_TW:
         sym_raw = str(item.get('Ticker', '')).strip()
@@ -649,7 +641,6 @@ with tab_comp:
                 for tgt in comp_targets:
                     sym = comp_options[tgt]
                     try:
-                        # 🚀 yfinance 預設 auto_adjust=True，計算結果為含息報酬
                         hist = yf.Ticker(sym).history(period=yf_period, auto_adjust=True)
                         if not hist.empty and 'Close' in hist.columns:
                             s = hist['Close'].dropna()
@@ -664,7 +655,6 @@ with tab_comp:
                 if comp_pct_dict:
                     df_comp_pct = pd.DataFrame(comp_pct_dict).ffill().bfill()
                     if not df_comp_pct.empty:
-                        # 🚀 嚴格標示為「含息報酬率」
                         fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計含息報酬率 (%)', 'variable': '標的', 'index': '日期'})
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig_comp, use_container_width=True)
@@ -676,7 +666,7 @@ with tab_comp:
             
             csv_url_comp = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
             try:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                headers = {'User-Agent': 'Mozilla/5.0'}
                 resp = requests.get(csv_url_comp, headers=headers, timeout=10)
                 resp.raise_for_status()
                 df_etf_comp_db = pd.read_csv(io.StringIO(resp.text)).dropna(how='all')
@@ -695,18 +685,17 @@ with tab_comp:
                         sym = comp_options[tgt]
                         clean_code = sym.split('.')[0]
                         
-                        # 🚀 精準篩選：避免包含其他代號相似的 ETF
                         db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.replace(r'\.TW.*', '', regex=True)
                         sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                         
                         if not sub_df.empty:
                             sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
+                            # 🚀 終極去重：先刪除舊的重複成分股 (保留最新的一筆)，再排序取前10
+                            sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last')
+                            
                             sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                             sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
-                            sub_df = sub_df.dropna(subset=[weight_c])
-                            
-                            # 🚀 終極去重邏輯：直接依權重排序後刪除重複成分股名稱，確保絕不重複加總！
-                            sub_df = sub_df.sort_values(by=weight_c, ascending=False).drop_duplicates(subset=[name_c], keep='first').head(10)
+                            sub_df = sub_df.dropna(subset=[weight_c]).sort_values(by=weight_c, ascending=False).head(10)
                             
                             if not sub_df.empty:
                                 top10_sum = sub_df[weight_c].sum()
@@ -722,7 +711,7 @@ with tab_comp:
     else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 
 # ------------------------------------------
-# TAB 4: 績效與觀察總覽
+# TAB 4: 績效與觀察總覽 (🚀 獨立抓取與含息)
 # ------------------------------------------
 with tab3:
     st.markdown("一覽所有持股與觀察清單的**短中長線含息報酬率**、**基本面財報指標**與**真實配息紀錄**。")
@@ -748,7 +737,6 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            # 🚀 確實將「近半年含息報酬」加入顯示清單
             display_cols = ["顯示名稱", "收盤價", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "近一年配息明細", "ROE"]
             display_cols = [c for c in display_cols if c in df_perf.columns]
             
@@ -773,7 +761,7 @@ with tab3:
                 st.info("尚無可顯示的績效資料。")
 
 # ------------------------------------------
-# TAB 5: ETF 持股
+# TAB 5: ETF 持股 (🚀 終極去重邏輯)
 # ------------------------------------------
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
@@ -781,7 +769,7 @@ with tab_etf:
     
     csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(csv_url, headers=headers, timeout=15)
         response.raise_for_status() 
         df_etf_db = pd.read_csv(io.StringIO(response.text)).dropna(how='all')
@@ -817,18 +805,18 @@ with tab_etf:
                     try:
                         plot_df = df_show.copy()
                         plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
+                        
+                        # 🚀 終極去重邏輯：先刪除舊的重複成分股 (保留最新的一筆)，再排序取前10，絕對不重複！
+                        plot_df = plot_df.drop_duplicates(subset=[name_col], keep='last')
+                        
                         plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
-                        plot_df = plot_df.dropna(subset=[weight_col])
-                        
-                        # 🚀 終極去重邏輯：直接依照權重大小排序後，剔除重複出現的成分股名稱，最後再取 Top 10！
-                        plot_df = plot_df.sort_values(by=weight_col, ascending=False).drop_duplicates(subset=[name_col], keep='first').head(10)
+                        plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=False).head(10)
                         
                         if not plot_df.empty:
                             top10_sum = plot_df[weight_col].sum()
                             st.markdown(f"#### 🎯 前十大持股權重總和： **{top10_sum:.2f}%**")
                             
-                            # 反轉排序讓長條圖最大的在最上面
                             plot_df_top10 = plot_df.sort_values(by=weight_col, ascending=True)
                             plot_df_top10['文字標籤'] = plot_df_top10[weight_col].apply(lambda x: f"{x:.2f}%")
                             
