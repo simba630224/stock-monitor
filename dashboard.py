@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="個人投資組合與技術分析儀表板", layout="wide")
 
 # ==========================================
-# 0. 輔助函式：強力防呆安全轉換與數值解析
+# 0. 輔助函式：強力防呆安全轉換
 # ==========================================
 def safe_float(val):
     try:
@@ -87,7 +87,6 @@ if df_us.empty: df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複
 @st.cache_data(ttl=60)
 def load_technical_db():
     try:
-        # 1. 優先透過主要連線讀取 Technical_DB 工作表
         df_db = conn.read(worksheet="Technical_DB", ttl=60)
         if df_db is not None and not df_db.empty:
             df_db.columns = [str(c).strip() for c in df_db.columns]
@@ -95,7 +94,6 @@ def load_technical_db():
     except: pass
     
     try:
-        # 2. 備用方案：若有獨立網址則讀取獨立試算表
         db_url = st.secrets.get("TECHNICAL_DB_URL") or st.secrets.get("connections", {}).get("gsheets", {}).get("spreadsheet")
         if db_url:
             df_db = conn.read(spreadsheet=db_url, ttl=60)
@@ -366,48 +364,58 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 直接秒速讀取 Technical_DB)
+# TAB 2: 技術分析掃描 (🚀 直讀 Technical_DB)
 # ------------------------------------------
 with tab2:
     df_db = load_technical_db()
     
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認 GitHub Actions 的 `main.py` 已成功執行一次。")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認 GitHub Actions 已成功執行並寫入資料。")
     else:
-        # 安全清洗與轉型
-        df_db['bull_score'] = pd.to_numeric(df_db.get('bull_score', 0), errors='coerce').fillna(0)
-        df_db['bear_score'] = pd.to_numeric(df_db.get('bear_score', 0), errors='coerce').fillna(0)
-        df_db['_raw_pe'] = pd.to_numeric(df_db.get('_raw_pe'), errors='coerce')
+        # 🚀 嚴格保護防禦：檢查每個必備欄位，若無則預設填充，再進行轉型
+        for col in ['bull_score', 'bear_score']:
+            if col not in df_db.columns:
+                df_db[col] = 0
+            df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
+            
+        if '_raw_pe' not in df_db.columns:
+            df_db['_raw_pe'] = np.nan
+        df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
         
+        # 字串欄位處理防呆
+        for col in ['action', 'tags', '_name', '_sym', '標的']:
+            if col not in df_db.columns:
+                df_db[col] = ""
+            df_db[col] = df_db[col].astype(str).fillna("")
+
+        # 建立選項
         target_options = {}
         for _, row in df_db.iterrows():
-            sym = str(row.get('_sym', '')).strip()
-            name = str(row.get('_name', '')).strip()
-            if sym and name and sym != 'nan' and name != 'nan':
+            sym = row['_sym'].strip()
+            name = row['_name'].strip()
+            # 排除幽靈值
+            if sym and name and sym.lower() not in ['nan', 'none'] and name.lower() not in ['nan', 'none']:
                 target_options[f"{name} ({sym})"] = sym
 
         # 分級 Top 10 清單
-        bullish_strong = df_db[df_db['action'].astype(str).str.contains(r'\[🚀 強勢買進\]')].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-        bullish_daily = df_db[df_db['action'].astype(str).str.contains(r'\[📈 短多轉折\]')].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-        bearish_strong = df_db[df_db['action'].astype(str).str.contains(r'\[🛑 強制賣出\]')].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
-        bearish_daily = df_db[df_db['action'].astype(str).str.contains(r'\[⚠️ 弱勢減碼\]')].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+        bullish_strong = df_db[df_db['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+        bullish_daily = df_db[df_db['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+        bearish_strong = df_db[df_db['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+        bearish_daily = df_db[df_db['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
 
         def format_db_items(sub_df):
             if sub_df.empty: return "無"
             res = []
             for _, r in sub_df.iterrows():
-                pe_val = r.get('_raw_pe')
-                try:
-                    pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) and str(pe_val).strip() not in ['', 'nan', 'None'] else "無PE"
-                except:
-                    pe_str = "無PE"
-                name_val = r.get('_name') or r.get('標的', '未知')
-                tags_str = str(r.get('tags', ''))
-                res.append(f"• **{name_val} ({pe_str})** `[{tags_str}]`")
+                pe_val = r['_raw_pe']
+                pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
+                tags_str = r['tags']
+                name_disp = r['_name'] if r['_name'] else r['標的']
+                res.append(f"• **{name_disp} ({pe_str})** `[{tags_str}]`")
             return "\n".join(res)
 
         st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 10)")
-        st.caption("篩選邏輯：由後端 `main.py` 每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
+        st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
         
         col_sum1, col_sum2 = st.columns(2)
         with col_sum1:
@@ -425,18 +433,9 @@ with tab2:
             st.markdown("""
             #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
             * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
-            * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者，如日線金叉或分數雖高但欠缺週低檔金叉)。
+            * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
             * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
-            * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者，如日線死叉或分數雖高但欠缺週高檔死叉)。
-            * **[⚔️ 多空交戰]**：同時觸發多空條件，依分數較高者顯示偏強或偏弱。
-            * **[➖ 趨勢延續]**：無明顯多空觸發訊號。
-
-            #### 二、 標籤名詞定義
-            * **指標交叉**：KD/MACD 日線或週線發生黃金交叉(金叉)或死亡交叉(死叉)。
-            * **均線轉折**：月線或季線連續 5 個交易日遞增(上彎)或遞減(下彎)。
-            * **價格穿越**：收盤價連續 5 個交易日維持在均線之上(站上)或之下(跌破)。
-            * **短期動能**：近 5 個交易日累計漲/跌幅達 5% (含) 以上。
-            * **高檔回落**：距過去 52 週最高價跌幅達 15% (或 20日最高價回落 10%)。
+            * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者)。
             """)
 
         display_cols = ["市場", "標的", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
@@ -516,7 +515,7 @@ with tab_comp:
         for _, row in df_db_comp.iterrows():
             sym = str(row.get('_sym', '')).strip()
             name = str(row.get('_name', '')).strip()
-            if sym and name and sym != 'nan' and name != 'nan': comp_options[f"{name} ({sym})"] = sym
+            if sym and name and sym.lower() not in ['nan', 'none']: comp_options[f"{name} ({sym})"] = sym
             
     if comp_options:
         all_options_list = list(comp_options.keys())
@@ -615,7 +614,7 @@ with tab3:
         disp_p_cols = [c for c in disp_p_cols if c in df_db_perf.columns]
         st.dataframe(df_db_perf[disp_p_cols], hide_index=True, use_container_width=True, height=500)
     else:
-        st.info("資料庫讀取中...")
+        st.info("資料庫未包含足夠資訊，請等待排程更新。")
 
 # ------------------------------------------
 # TAB 5: ETF 持股
