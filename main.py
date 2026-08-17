@@ -256,7 +256,7 @@ def process_technical_analysis(sym, name, market, strategy):
         bull_score = 0
         bear_score = 0
 
-        # 🚀 20日 / 50日 創高破低監控邏輯
+        # 🚀 20日 / 50日 創高破低監控邏輯 (短線進出強訊號)
         if 'High' in df.columns and 'Low' in df.columns:
             if len(df) >= 20:
                 h_20 = df['High'].tail(20).max()
@@ -391,7 +391,7 @@ def process_technical_analysis(sym, name, market, strategy):
             "週MACD": f"DIF:{macd_w:.2f}",
             "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
             "tags": tags, "bull_score": bull_score, "bear_score": bear_score, "action": action,
-            "_raw_pe": pe_val, "_sym": sym, "_name": name, "策略": strategy  # 🚀 記錄策略屬性
+            "_raw_pe": pe_val, "_sym": sym, "_name": name, "策略": strategy
         }
     except Exception as e:
         print(f"處理 {sym} 發生錯誤: {e}")
@@ -458,7 +458,18 @@ def format_items(items):
     res_str = ""
     for x in items:
         tags_str = ", ".join(x['tags'])
-        safe_name = str(x['_name']).replace('<', '').replace('>', '').replace('&', 'and')
+        
+        # 🚀 嚴格攔截 nan，若名稱為空則顯示 Ticker
+        raw_name = str(x.get('_name', '')).strip()
+        sym = str(x.get('_sym', '')).strip()
+        clean_sym = sym.split('.')[0] 
+        
+        if raw_name.lower() in ['nan', 'none', '']:
+            display_title = clean_sym
+        else:
+            display_title = f"{raw_name} ({clean_sym})"
+            
+        safe_name = display_title.replace('<', '').replace('>', '').replace('&', 'and')
         res_str += f"• <b>{safe_name}</b> (PE:{x['P/E']})\n   └ <code>[{tags_str}]</code>\n"
     return res_str
 
@@ -486,25 +497,47 @@ def main():
 
     update_technical_db(all_results)
 
+    # 🚀 Telegram 訊息改版：區分短線進出與一般波段
     for market in ['台股', '美股']:
         market_results = [x for x in all_results if x['市場'] == market]
         if not market_results: continue
         
-        sb = sorted([x for x in market_results if "[🚀 強勢買進]" in x["action"]], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        shb = sorted([x for x in market_results if "[📈 短多轉折]" in x["action"]], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        fs = sorted([x for x in market_results if "[🛑 強制賣出]" in x["action"]], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        wr = sorted([x for x in market_results if "[⚠️ 弱勢減碼]" in x["action"]], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        
-        if not any([sb, shb, fs, wr]): continue
+        # 分流：短線標的 vs 一般標的
+        short_term_results = [x for x in market_results if '短' in str(x.get('策略', ''))]
+        normal_results = [x for x in market_results if '短' not in str(x.get('策略', ''))]
         
         msg = f"📁 <b>【{market}】技術判定</b>\n\n"
-        if sb: msg += f"🔥 <b>[🚀 強勢買進] Top 10</b>\n{format_items(sb)}\n\n"
-        if shb: msg += f"📈 <b>[📈 短多轉折] Top 10</b>\n{format_items(shb)}\n\n"
-        if fs: msg += f"🛑 <b>[🛑 強制賣出] Top 10</b>\n{format_items(fs)}\n\n"
-        if wr: msg += f"⚠️ <b>[⚠️ 弱勢減碼] Top 10</b>\n{format_items(wr)}\n\n"
+        has_content = False
         
-        send_tg_text(msg.strip())
-        time.sleep(1)
+        # ⚡ 1. 短線進出專區 (判斷總分)
+        if short_term_results:
+            bullish_short = sorted([x for x in short_term_results if x['bull_score'] >= x['bear_score']], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))
+            bearish_short = sorted([x for x in short_term_results if x['bull_score'] < x['bear_score']], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))
+            
+            if bullish_short or bearish_short:
+                msg += f"⚡ <b>短線進出專區 (創高破底)</b>\n"
+                if bullish_short: msg += f"🚀 <b>短線偏多 / 創高動能</b>\n{format_items(bullish_short)}\n"
+                if bearish_short: msg += f"🩸 <b>短線偏空 / 破底風險</b>\n{format_items(bearish_short)}\n"
+                msg += "\n"
+                has_content = True
+
+        # 📈 2. 一般波段與長線投資 (依動作標籤)
+        sb = sorted([x for x in normal_results if "[🚀 強勢買進]" in x["action"]], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
+        shb = sorted([x for x in normal_results if "[📈 短多轉折]" in x["action"]], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
+        fs = sorted([x for x in normal_results if "[🛑 強制賣出]" in x["action"]], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
+        wr = sorted([x for x in normal_results if "[⚠️ 弱勢減碼]" in x["action"]], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
+        
+        if any([sb, shb, fs, wr]):
+            msg += f"📈 <b>波段與長期投資 (Top 10)</b>\n"
+            if sb: msg += f"🔥 <b>[🚀 強勢買進]</b>\n{format_items(sb)}\n"
+            if shb: msg += f"📈 <b>[📈 短多轉折]</b>\n{format_items(shb)}\n"
+            if fs: msg += f"🛑 <b>[🛑 強制賣出]</b>\n{format_items(fs)}\n"
+            if wr: msg += f"⚠️ <b>[⚠️ 弱勢減碼]</b>\n{format_items(wr)}\n"
+            has_content = True
+        
+        if has_content:
+            send_tg_text(msg.strip())
+            time.sleep(1)
         
     print("🎉 掃描作業完成！")
 
