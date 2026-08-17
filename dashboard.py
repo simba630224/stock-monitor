@@ -47,7 +47,7 @@ def format_display_name(name_raw, sym_raw):
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
-TECHNICAL_DB_URL = "" 
+TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
 
 def load_and_standardize_portfolio(worksheet_name, default_category):
     try:
