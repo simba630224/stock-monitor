@@ -42,7 +42,7 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與安全快取模組 (🚀 解決打字清空與覆蓋問題)
+# 1. 資料庫連線與安全快取模組
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -51,7 +51,6 @@ TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCw
 
 def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
-        # 強制從 Google Sheets 獲取最新資料
         df = conn.read(worksheet=worksheet_name, ttl=0)
         if df is None or df.empty:
             return pd.DataFrame()
@@ -76,9 +75,7 @@ def fetch_and_clean_portfolio(worksheet_name, default_category):
             
         if 'Ticker' in df.columns:
             df['Ticker'] = df['Ticker'].astype(str).str.strip()
-            # 解決 Pandas 把 2330 存成 2330.0 的浮點數陷阱
             df['Ticker'] = df['Ticker'].str.replace(r'\.0$', '', regex=True)
-            # 自動補零防禦 (例如輸入 50 自動變成 0050)
             if default_category == '台股':
                 df['Ticker'] = df['Ticker'].apply(lambda x: x.zfill(4) if x.isdigit() and len(x) < 4 else x)
             df = df[~df['Ticker'].str.lower().isin(['nan', 'none', 'null', '<na>', ''])]
@@ -108,7 +105,6 @@ def fetch_and_clean_portfolio(worksheet_name, default_category):
     except Exception:
         return pd.DataFrame()
 
-# 🚀 使用 @st.cache_data 完美阻斷編輯重置問題，取代危險的 session_state
 @st.cache_data(ttl=600)
 def get_tw_portfolio():
     df = fetch_and_clean_portfolio("TW_Portfolio", "台股")
@@ -334,7 +330,6 @@ st.title("📊 個人投資組合與技術分析儀表板")
 col_btn, col_time = st.columns([1, 4])
 with col_btn:
     if st.button("🔄 強制刷新報價"):
-        # 🚀 完美清除快取，保證能抓到 Google Sheets 外部的最新修改
         st.cache_data.clear()
         st.rerun()
 with col_time:
@@ -511,14 +506,14 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 
+# TAB 2: 技術分析掃描 (🚀 加上前端即時對映，0 秒同步「短線」)
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
         df_db = load_technical_db()
         
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 46 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 47 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
             for col in ['bull_score', 'bear_score']:
@@ -531,6 +526,28 @@ with tab2:
             for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
+
+            # 🚀 關鍵零時差對映：拿最新 PORTFOLIO_TW/US 裡的策略，覆蓋 df_db 裡的舊策略
+            strategy_map = {}
+            for item in PORTFOLIO_TW:
+                t = str(item.get('Ticker', '')).strip().upper()
+                s = str(item.get('策略', '')).strip()
+                if t:
+                    strategy_map[t] = s
+                    strategy_map[get_yf_ticker_tw(t)] = s
+            for item in PORTFOLIO_US:
+                t = str(item.get('Ticker', '')).strip().upper()
+                s = str(item.get('策略', '')).strip()
+                if t: strategy_map[t] = s
+
+            def resolve_strategy(row):
+                sym = str(row.get('_sym', '')).strip().upper()
+                clean_sym = sym.split('.')[0]
+                if sym in strategy_map and strategy_map[sym]: return strategy_map[sym]
+                if clean_sym in strategy_map and strategy_map[clean_sym]: return strategy_map[clean_sym]
+                return str(row.get('策略', '')).strip()
+
+            df_db['策略'] = df_db.apply(resolve_strategy, axis=1)
 
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
 
@@ -956,10 +973,10 @@ with tab4:
                     st.write(row['Notes'])
 
 # ------------------------------------------
-# 側邊欄：持股管理
+# 側邊欄：持股管理 (🚀 結合 Enter 防呆 + 清洗保護)
 # ------------------------------------------
-st.sidebar.warning("⚠️ 若您剛剛在 Google Sheets 外部修改過資料，請務必先點擊網頁上方的 **[🔄 強制刷新報價]**，以免資料互相覆蓋！")
-st.sidebar.info("💡 **編輯提示**：輸入完畢後，請務必先按【Enter】鍵或點擊表格空白處，再點擊儲存按鈕！")
+st.sidebar.warning("⚠️ 若在 Google Sheets 外部修改，請先按上方 **[🔄 強制刷新報價]**。")
+st.sidebar.info("💡 **編輯提示**：修改完畢後，請先按一下【Enter】鍵或點擊表格空白處，再點擊儲存按鈕！")
 
 with st.sidebar:
     st.header("📝 持股與觀察名單管理")
@@ -973,7 +990,6 @@ with st.sidebar:
         if st.button("💾 儲存台股變更"):
             with st.spinner("正在清洗並寫入台股資料..."):
                 try:
-                    # 🚀 終極空值防禦與格式化
                     clean_tw = edited_df_tw.copy()
                     clean_tw['Ticker'] = clean_tw['Ticker'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
                     clean_tw['Ticker'] = clean_tw['Ticker'].apply(lambda x: x.zfill(4) if x.isdigit() and len(x) < 4 else x)
@@ -981,7 +997,7 @@ with st.sidebar:
                     clean_tw = clean_tw.fillna("") 
                     
                     conn.update(worksheet="TW_Portfolio", data=clean_tw)
-                    st.cache_data.clear() # 🚀 清除快取確保下次讀到最新
+                    st.cache_data.clear() # 清除快取以加載最新資料
                     st.success("✅ 台股更新成功！")
                     time.sleep(1)
                     st.rerun()
@@ -999,14 +1015,13 @@ with st.sidebar:
         if st.button("💾 儲存美股變更"):
             with st.spinner("正在清洗並寫入美股資料..."):
                 try:
-                    # 🚀 終極空值防禦與格式化
                     clean_us = edited_df_us.copy()
                     clean_us['Ticker'] = clean_us['Ticker'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
                     clean_us = clean_us[~clean_us['Ticker'].str.lower().isin(['nan', 'none', 'null', ''])]
                     clean_us = clean_us.fillna("")
                     
                     conn.update(worksheet="US_Portfolio", data=clean_us)
-                    st.cache_data.clear() # 🚀 清除快取確保下次讀到最新
+                    st.cache_data.clear() # 清除快取以加載最新資料
                     st.success("✅ 美股更新成功！")
                     time.sleep(1)
                     st.rerun()
