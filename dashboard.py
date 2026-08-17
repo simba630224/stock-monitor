@@ -31,10 +31,10 @@ def safe_float(val):
 def format_display_name(name_raw, sym_raw):
     """絕對乾淨的名稱格式化：防殺所有 nan 與空值"""
     sym = str(sym_raw).strip() if pd.notna(sym_raw) else ""
-    if sym.lower() in ['nan', 'none', '']: sym = ""
+    if sym.lower() in ['nan', 'none', 'null', '']: sym = ""
     
     name = str(name_raw).strip() if pd.notna(name_raw) else ""
-    if name.lower() in ['nan', 'none', '']: name = ""
+    if name.lower() in ['nan', 'none', 'null', '']: name = ""
     
     if name and sym: return f"{name} ({sym})"
     if not name and sym: return sym
@@ -42,12 +42,12 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與資料讀取
+# 1. 資料庫連線與資料讀取 (🚀 絕對淨化邏輯)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 🛑 終極防呆：請將您的 Technical_DB 試算表網址貼在引號內！
-TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
+# 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
+TECHNICAL_DB_URL = "" 
 
 def load_and_standardize_portfolio(worksheet_name, default_category):
     try:
@@ -66,7 +66,7 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
             elif cl in ['shares', '股數', '持有股數', '庫存', '數量']: col_map[c] = 'Shares'
             elif cl in ['出借', '借券', '複委託']: col_map[c] = '出借' if default_category == '台股' else '複委託'
             elif cl in ['類別', 'category', '分類', '市場']: col_map[c] = '類別'
-            elif cl in ['策略', '短線', '交易屬性']: col_map[c] = '策略' # 🚀 新增策略欄位讀取
+            elif cl in ['策略', '短線', '交易屬性']: col_map[c] = '策略'
             
         df = df.rename(columns=col_map)
         
@@ -74,21 +74,24 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
             df = df.rename(columns={df.columns[0]: 'Ticker'})
             
         if 'Ticker' in df.columns:
-            df = df.dropna(subset=['Ticker'])
-            df = df[df['Ticker'].astype(str).str.strip() != '']
+            # 🚀 終極讀取防禦：徹底消滅所有被字串化的空值變體
+            df['Ticker'] = df['Ticker'].astype(str).str.strip()
+            df = df[~df['Ticker'].str.lower().isin(['nan', 'none', 'null', '<na>', ''])]
         else:
             return pd.DataFrame()
             
         if '名稱' not in df.columns: df['名稱'] = ''
+        df['名稱'] = df['名稱'].astype(str).replace(['nan', 'None', 'NaN', 'null'], '')
+        
         if 'Shares' not in df.columns: df['Shares'] = 0.0
         if '策略' not in df.columns: df['策略'] = ''
+        df['策略'] = df['策略'].astype(str).replace(['nan', 'None', 'NaN', 'null'], '')
         
         if default_category == '台股' and '出借' not in df.columns: df['出借'] = 0.0
         elif default_category == '美股' and '複委託' not in df.columns: df['複委託'] = 0.0
         
         if '類別' not in df.columns: df['類別'] = default_category
         
-        # 確保順序美觀
         ordered_cols = ['Ticker', '名稱', 'Shares', '出借' if default_category=='台股' else '複委託', '類別', '策略']
         df = df.reindex(columns=[c for c in ordered_cols if c in df.columns] + [c for c in df.columns if c not in ordered_cols])
         return df
@@ -318,7 +321,7 @@ with tab1:
         for item in PORTFOLIO_TW:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none']: continue
+                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
                 ticker = get_yf_ticker_tw(ticker_str)
                 asset_type = str(item.get('類別', '台股')).strip()
                 if not asset_type or asset_type.lower() == 'nan': asset_type = '台股未分類'
@@ -344,7 +347,7 @@ with tab1:
         for item in PORTFOLIO_US:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none']: continue
+                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
                 asset_type = str(item.get('類別', '美股')).strip()
                 if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
                 
@@ -467,7 +470,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 直讀 Technical_DB，雙區塊顯示)
+# TAB 2: 技術分析掃描
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -477,7 +480,6 @@ with tab2:
         st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 44 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
-            # 🚀 終極防呆機制：確保欄位實體存在才進行轉型，絕對避免 AttributeError
             for col in ['bull_score', 'bear_score']:
                 if col not in df_db.columns: df_db[col] = 0
                 df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
@@ -485,15 +487,12 @@ with tab2:
             if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
             df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
             
-            # 字串欄位處理防呆 (清洗 nan)
             for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
                 if col not in df_db.columns: df_db[col] = ""
-                df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
+                df_db[col] = df_db[col].astype(str).replace(['nan', 'None', 'null'], '').fillna("")
 
-            # 新增格式化顯示名稱欄位
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
 
-            # 建立選項，排除空值 (只認有效的 sym 才能畫圖)
             target_options = {}
             for _, row in df_db.iterrows():
                 sym = str(row.get('_sym', '')).strip()
@@ -515,12 +514,11 @@ with tab2:
                     res.append(f"• **{name_disp} ({pe_str})** `[{tags_str}]`")
                 return "\n".join(res)
 
-            # 🚀 區分「短線進出」與「一般波段」
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
             df_short = df_db[is_short_term]
             df_normal = df_db[~is_short_term]
 
-            st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") # 🚀 依要求移除「盤後」二字
+            st.markdown("### 📊 技術亮點與警示摘要 (Top 10)")
             st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
 
             # ⚡ 第一區塊：短線進出專區
@@ -638,24 +636,23 @@ with tab2:
                     st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 3: 標的比較 (🚀 解除依賴，防死鎖)
+# TAB 3: 標的比較
 # ------------------------------------------
 with tab_comp:
     st.subheader("🆚 多檔標的走勢比較")
     st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
     
-    # 從持股清單抓取選項
     comp_options = {}
     for item in PORTFOLIO_TW:
         sym_raw = str(item.get('Ticker', '')).strip()
-        if sym_raw and sym_raw.lower() not in ['nan', 'none']:
+        if sym_raw and sym_raw.lower() not in ['nan', 'none', '']:
             sym = get_yf_ticker_tw(sym_raw)
             disp_name = format_display_name(item.get('名稱'), sym_raw)
             comp_options[disp_name] = sym
             
     for item in PORTFOLIO_US:
         sym_raw = str(item.get('Ticker', '')).strip()
-        if sym_raw and sym_raw.lower() not in ['nan', 'none']:
+        if sym_raw and sym_raw.lower() not in ['nan', 'none', '']:
             disp_name = format_display_name(item.get('名稱'), sym_raw)
             comp_options[disp_name] = sym_raw
             
@@ -677,7 +674,6 @@ with tab_comp:
                 for tgt in comp_targets:
                     sym = comp_options[tgt]
                     try:
-                        # 🚀 yfinance 預設 auto_adjust=True，計算結果為含息報酬
                         hist = yf.Ticker(sym).history(period=yf_period, auto_adjust=True)
                         if not hist.empty and 'Close' in hist.columns:
                             s = hist['Close'].dropna()
@@ -692,7 +688,6 @@ with tab_comp:
                 if comp_pct_dict:
                     df_comp_pct = pd.DataFrame(comp_pct_dict).ffill().bfill()
                     if not df_comp_pct.empty:
-                        # 🚀 嚴格標示為「含息報酬率」
                         fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計含息報酬率 (%)', 'variable': '標的', 'index': '日期'})
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig_comp, use_container_width=True)
@@ -723,7 +718,6 @@ with tab_comp:
                         sym = comp_options[tgt]
                         clean_code = sym.split('.')[0]
                         
-                        # 精準比對
                         db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.replace(r'\.TW.*', '', regex=True)
                         sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                         
@@ -733,7 +727,6 @@ with tab_comp:
                             sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
                             sub_df = sub_df.dropna(subset=[weight_c])
                             
-                            # 🚀 終極去重邏輯：先留最新一筆、再排序，保證總和正確不疊加！
                             sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last').sort_values(by=weight_c, ascending=False).head(10)
                             
                             if not sub_df.empty:
@@ -761,12 +754,12 @@ with tab3:
         
         for item in PORTFOLIO_TW:
             t = str(item.get('Ticker', '')).strip()
-            if t and t.lower() not in ['nan', 'none']: 
+            if t and t.lower() not in ['nan', 'none', '']: 
                 scan_list.append((get_yf_ticker_tw(t), t, '台股', item.get('名稱', '')))
                 
         for item in PORTFOLIO_US:
             t = str(item.get('Ticker', '')).strip()
-            if t and t.lower() not in ['nan', 'none']: 
+            if t and t.lower() not in ['nan', 'none', '']: 
                 scan_list.append((t, t, '美股', item.get('名稱', '')))
                 
         for sym, display_ticker, market, raw_name in scan_list:
@@ -776,7 +769,6 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            # 🚀 確實將「近半年含息報酬」加入顯示清單
             display_cols = ["顯示名稱", "收盤價", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "近一年配息明細", "ROE"]
             display_cols = [c for c in display_cols if c in df_perf.columns]
             
@@ -845,13 +837,11 @@ with tab_etf:
                     try:
                         plot_df = df_show.copy()
                         plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
-                        
-                        # 🚀 終極去重邏輯：先留最新一筆、再排序取前10，絕對不重複！
-                        plot_df = plot_df.drop_duplicates(subset=[name_col], keep='last')
-                        
                         plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
-                        plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=False).head(10)
+                        plot_df = plot_df.dropna(subset=[weight_col])
+                        
+                        plot_df = plot_df.drop_duplicates(subset=[name_col], keep='last').sort_values(by=weight_col, ascending=False).head(10)
                         
                         if not plot_df.empty:
                             top10_sum = plot_df[weight_col].sum()
@@ -921,7 +911,7 @@ with tab4:
                     st.write(row['Notes'])
 
 # ------------------------------------------
-# 側邊欄：持股管理
+# 側邊欄：持股管理 (🚀 儲存前強制清除幽靈空值)
 # ------------------------------------------
 with st.sidebar:
     st.header("📝 持股與觀察名單管理")
@@ -929,15 +919,18 @@ with st.sidebar:
     
     st.subheader("🇹🇼 台股清單")
     if not df_tw.empty:
-        # 🚀 確保側邊欄表格有「策略」欄位
         cols_tw = ['Ticker', '名稱', 'Shares', '出借', '類別', '策略']
         df_tw = df_tw.reindex(columns=[c for c in cols_tw if c in df_tw.columns] + [c for c in df_tw.columns if c not in cols_tw])
         
         edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
         if st.button("💾 儲存台股變更"):
-            with st.spinner("正在寫入台股資料..."):
+            with st.spinner("正在清洗並寫入台股資料..."):
                 try:
-                    conn.update(worksheet="TW_Portfolio", data=edited_df_tw)
+                    # 🚀 終極空值防禦：儲存前剔除幽靈空值
+                    clean_tw = edited_df_tw.copy()
+                    clean_tw['Ticker'] = clean_tw['Ticker'].astype(str).str.strip()
+                    clean_tw = clean_tw[~clean_tw['Ticker'].str.lower().isin(['nan', 'none', 'null', ''])]
+                    conn.update(worksheet="TW_Portfolio", data=clean_tw)
                     st.success("✅ 台股更新成功！請重新整理網頁。")
                 except Exception as e: st.error(f"寫入失敗：{e}")
     else: st.info("台股清單目前為空。")
@@ -946,15 +939,18 @@ with st.sidebar:
 
     st.subheader("🇺🇸 美股清單")
     if not df_us.empty:
-        # 🚀 確保側邊欄表格有「策略」欄位
         cols_us = ['Ticker', '名稱', 'Shares', '複委託', '類別', '策略']
         df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in cols_us])
         
         edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
         if st.button("💾 儲存美股變更"):
-            with st.spinner("正在寫入美股資料..."):
+            with st.spinner("正在清洗並寫入美股資料..."):
                 try:
-                    conn.update(worksheet="US_Portfolio", data=edited_df_us)
+                    # 🚀 終極空值防禦：儲存前剔除幽靈空值
+                    clean_us = edited_df_us.copy()
+                    clean_us['Ticker'] = clean_us['Ticker'].astype(str).str.strip()
+                    clean_us = clean_us[~clean_us['Ticker'].str.lower().isin(['nan', 'none', 'null', ''])]
+                    conn.update(worksheet="US_Portfolio", data=clean_us)
                     st.success("✅ 美股更新成功！請重新整理網頁。")
                 except Exception as e: st.error(f"寫入失敗：{e}")
     else: st.info("美股清單目前為空。")
