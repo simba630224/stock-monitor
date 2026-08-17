@@ -42,16 +42,16 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與 Session State 狀態管理 (🚀 解決打字清空與覆蓋問題)
+# 1. 資料庫連線與安全快取模組 (🚀 解決打字清空與覆蓋問題)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
 TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
 
-def load_and_standardize_portfolio(worksheet_name, default_category):
+def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
-        # 使用 ttl=0 確保每次呼叫都是從 Google Sheets 拿最熱騰騰的資料
+        # 強制從 Google Sheets 獲取最新資料
         df = conn.read(worksheet=worksheet_name, ttl=0)
         if df is None or df.empty:
             return pd.DataFrame()
@@ -76,8 +76,11 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
             
         if 'Ticker' in df.columns:
             df['Ticker'] = df['Ticker'].astype(str).str.strip()
-            # 🚀 解決 Google Sheets 把 2330 存成 2330.0 的浮點數陷阱
+            # 解決 Pandas 把 2330 存成 2330.0 的浮點數陷阱
             df['Ticker'] = df['Ticker'].str.replace(r'\.0$', '', regex=True)
+            # 自動補零防禦 (例如輸入 50 自動變成 0050)
+            if default_category == '台股':
+                df['Ticker'] = df['Ticker'].apply(lambda x: x.zfill(4) if x.isdigit() and len(x) < 4 else x)
             df = df[~df['Ticker'].str.lower().isin(['nan', 'none', 'null', '<na>', ''])]
         else:
             return pd.DataFrame()
@@ -105,19 +108,21 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
     except Exception:
         return pd.DataFrame()
 
-# 🚀 使用 Session State 綁定，保證 st.data_editor 編輯到一半絕對不會被清空
-if "tw_portfolio" not in st.session_state:
-    st.session_state.tw_portfolio = load_and_standardize_portfolio("TW_Portfolio", "台股")
-    if st.session_state.tw_portfolio.empty:
-        st.session_state.tw_portfolio = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別", "策略"])
+# 🚀 使用 @st.cache_data 完美阻斷編輯重置問題，取代危險的 session_state
+@st.cache_data(ttl=600)
+def get_tw_portfolio():
+    df = fetch_and_clean_portfolio("TW_Portfolio", "台股")
+    if df.empty: df = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別", "策略"])
+    return df
 
-if "us_portfolio" not in st.session_state:
-    st.session_state.us_portfolio = load_and_standardize_portfolio("US_Portfolio", "美股")
-    if st.session_state.us_portfolio.empty:
-        st.session_state.us_portfolio = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別", "策略"])
+@st.cache_data(ttl=600)
+def get_us_portfolio():
+    df = fetch_and_clean_portfolio("US_Portfolio", "美股")
+    if df.empty: df = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別", "策略"])
+    return df
 
-df_tw = st.session_state.tw_portfolio
-df_us = st.session_state.us_portfolio
+df_tw = get_tw_portfolio()
+df_us = get_us_portfolio()
 
 PORTFOLIO_TW = df_tw.to_dict('records') if not df_tw.empty else []
 PORTFOLIO_US = df_us.to_dict('records') if not df_us.empty else []
@@ -329,10 +334,8 @@ st.title("📊 個人投資組合與技術分析儀表板")
 col_btn, col_time = st.columns([1, 4])
 with col_btn:
     if st.button("🔄 強制刷新報價"):
+        # 🚀 完美清除快取，保證能抓到 Google Sheets 外部的最新修改
         st.cache_data.clear()
-        # 🚀 刷新時一併清除記憶體內的快取清單，讓網頁真正抓取 Google Sheets 最新進度
-        if "tw_portfolio" in st.session_state: del st.session_state["tw_portfolio"]
-        if "us_portfolio" in st.session_state: del st.session_state["us_portfolio"]
         st.rerun()
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -351,201 +354,3 @@ with tab1:
 
         for item in PORTFOLIO_TW:
             if pd.notna(item.get('Ticker')):
-                ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
-                ticker = get_yf_ticker_tw(ticker_str)
-                asset_type = str(item.get('類別', '台股')).strip()
-                if not asset_type or asset_type.lower() == 'nan': asset_type = '台股未分類'
-                
-                price, div_2026, div_1y = get_basic_data(ticker)
-                shares_own = safe_float(item.get('Shares'))
-                shares_lent = safe_float(item.get('出借'))
-                total_shares = shares_own + shares_lent
-                
-                if price > 0 and total_shares > 0:
-                    val = price * total_shares
-                    div_tot_2026 = div_2026 * total_shares
-                    div_tot_1y = div_1y * total_shares
-                    total_market_value += val
-                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                    total_dividends_2026 += div_tot_2026
-                    total_dividends_1y += div_tot_1y
-                    
-                    disp_qty = f"{int(total_shares/1000)}張" if total_shares >= 1000 and total_shares % 1000 == 0 else f"{total_shares:g}股"
-                    display_name = format_display_name(item.get('名稱'), ticker_str)
-                    individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '股息': div_tot_2026, '類別': asset_type, '總股數': total_shares})
-
-        for item in PORTFOLIO_US:
-            if pd.notna(item.get('Ticker')):
-                ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
-                asset_type = str(item.get('類別', '美股')).strip()
-                if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
-                
-                price, div_2026, div_1y = get_basic_data(ticker_str)
-                shares_own = safe_float(item.get('Shares'))
-                shares_sub = safe_float(item.get('複委託'))
-                total_shares = shares_own + shares_sub
-                
-                if price > 0 and total_shares > 0:
-                    val = price * total_shares * usdtwd
-                    div_tot_2026 = div_2026 * total_shares * usdtwd
-                    div_tot_1y = div_1y * total_shares * usdtwd
-                    total_market_value += val
-                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                    total_dividends_2026 += div_tot_2026
-                    total_dividends_1y += div_tot_1y
-                    
-                    disp_qty = f"{total_shares:g}股"
-                    display_name = format_display_name(item.get('名稱'), ticker_str)
-                    individual_holdings.append({'標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", '總市值': val, '股息': div_tot_2026, '類別': asset_type, '總股數': total_shares})
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
-    col2.metric("2026 預估股息 (TWD)", f"${total_dividends_2026:,.0f}")
-    col3.metric("近一年累計股息 (TWD)", f"${total_dividends_1y:,.0f}")
-    col4.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
-
-    df_history = load_value_history()
-    df_history_to_display = pd.DataFrame()
-    history_error = False
-    
-    if not df_history.empty:
-        df_history.columns = [str(c).strip().replace(' ', '_') for c in df_history.columns]
-        df_history = df_history.loc[:, ~df_history.columns.duplicated()]
-        
-        if 'Date' in df_history.columns and 'Total_Value' in df_history.columns:
-            df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-            df_history = df_history.dropna(subset=['Date'])
-            df_history['Total_Value'] = pd.to_numeric(df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce').fillna(0)
-            
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            now_time = datetime.now().strftime('%H:%M:%S')
-            
-            if len(df_history) >= 1:
-                if today_str in df_history['Date'].values:
-                    idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
-                    existing_val = safe_float(df_history.at[idx, 'Total_Value'])
-                    if abs(existing_val - total_market_value) > 1:
-                        df_history.at[idx, 'Total_Value'] = total_market_value
-                        df_history.at[idx, 'Last_Updated'] = now_time
-                        try:
-                            df_history = df_history.fillna("") # 🚀 寫入前強制防呆空值
-                            conn.update(worksheet="Value_History", data=df_history)
-                            st.cache_data.clear() 
-                        except: pass
-                else:
-                    new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
-                    df_history = pd.concat([df_history, new_row], ignore_index=True)
-                    try:
-                        df_history = df_history.fillna("")
-                        conn.update(worksheet="Value_History", data=df_history)
-                        st.cache_data.clear()
-                    except: pass
-                df_history_to_display = df_history
-            else: history_error = True
-        else: history_error = True
-    else: history_error = True
-
-    if history_error or df_history_to_display.empty or 'Total_Value' not in df_history_to_display.columns:
-        df_history_to_display = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value, 'Last_Updated': datetime.now().strftime('%H:%M:%S')}])
-
-    st.divider()
-
-    if not df_history_to_display.empty and len(df_history_to_display) > 1:
-        st.subheader("📈 總市值每日變化趨勢")
-        df_history_to_display['Total_Value'] = pd.to_numeric(df_history_to_display['Total_Value'], errors='coerce').fillna(0)
-        fig_hist = px.line(df_history_to_display, x='Date', y='Total_Value', text='Total_Value', markers=True)
-        fig_hist.update_traces(textposition="top center", texttemplate='%{text:,.0f}')
-        fig_hist.update_layout(yaxis_title="總市值 (TWD)", xaxis_title="日期", margin=dict(t=30, b=0, l=0, r=0), height=350)
-        st.plotly_chart(fig_hist, use_container_width=True)
-
-    st.divider()
-    
-    df_ind = pd.DataFrame(individual_holdings)
-    category_color_map = {}
-    if not df_ind.empty:
-        unique_categories = df_ind['類別'].unique().tolist()
-        plotly_colors = px.colors.qualitative.Safe + px.colors.qualitative.Plotly 
-        category_color_map = {cat: plotly_colors[i % len(plotly_colors)] for i, cat in enumerate(unique_categories)}
-    
-    col_chart, col_fx = st.columns([1, 1])
-    with col_chart:
-        st.subheader("資產配置佔比")
-        if asset_allocation:
-            df_allocation = pd.DataFrame(list(asset_allocation.items()), columns=['資產類別', '市值 (TWD)'])
-            fig_pie = px.pie(df_allocation, values='市值 (TWD)', names='資產類別', hole=0.4, color='資產類別', color_discrete_map=category_color_map)
-            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-            fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
-            st.plotly_chart(fig_pie, use_container_width=True)
-        
-    with col_fx:
-        st.subheader("USD/TWD 匯率走勢 (1年)")
-        fx_data = get_fx_data()
-        if not fx_data.empty:
-            fig_fx = go.Figure()
-            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['Close'], mode='lines', name='USD/TWD', line=dict(color='white' if st.get_option('theme.base') == 'dark' else 'black', width=2)))
-            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA20'], mode='lines', name='MA20 (月線)', line=dict(color='#3498db', dash='dash')))
-            fig_fx.add_trace(go.Scatter(x=fx_data.index, y=fx_data['MA60'], mode='lines', name='MA60 (季線)', line=dict(color='#e74c3c', dash='dot')))
-            fig_fx.update_layout(margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            st.plotly_chart(fig_fx, use_container_width=True)
-
-    st.divider()
-
-    st.subheader("📊 各標的總市值與股息分佈")
-    if not df_ind.empty:
-        col_bar1, col_bar2 = st.columns(2)
-        with col_bar1:
-            df_mv_sorted = df_ind.sort_values(by='總市值', ascending=True)
-            fig_mv_bar = px.bar(df_mv_sorted, x='總市值', y='標的與股數', orientation='h', title='各標的總市值 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
-            fig_mv_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_mv_sorted['標的與股數']})
-            st.plotly_chart(fig_mv_bar, use_container_width=True)
-            
-        with col_bar2:
-            df_div_sorted = df_ind.sort_values(by='股息', ascending=True)
-            fig_div_bar = px.bar(df_div_sorted, x='股息', y='標的與股數', orientation='h', title='各標的預估股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
-            fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
-            st.plotly_chart(fig_div_bar, use_container_width=True)
-
-# ------------------------------------------
-# TAB 2: 技術分析掃描 
-# ------------------------------------------
-with tab2:
-    with st.spinner("載入技術分析資料庫中..."):
-        df_db = load_technical_db()
-        
-    if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 45 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
-    else:
-        try:
-            for col in ['bull_score', 'bear_score']:
-                if col not in df_db.columns: df_db[col] = 0
-                df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
-                
-            if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
-            df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
-            
-            for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
-                if col not in df_db.columns: df_db[col] = ""
-                df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
-
-            df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
-
-            target_options = {}
-            for _, row in df_db.iterrows():
-                sym = str(row.get('_sym', '')).strip()
-                disp_name = row.get('顯示名稱', '')
-                if sym and sym.lower() not in ['nan', 'none', '']:
-                    target_options[disp_name] = sym
-
-            def format_db_items(sub_df):
-                if sub_df.empty: return "無"
-                res = []
-                for _, r in sub_df.iterrows():
-                    pe_val = r.get('_raw_pe')
-                    try:
-                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
-                    except:
-                        pe_str = "無PE"
-                    tags_str = r.get('tags', '')
-                    name_disp = r.get('顯示名稱', '未知')
