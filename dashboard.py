@@ -802,4 +802,182 @@ with tab3:
                         "近一年含息報酬": st.column_config.NumberColumn("近一年含息報酬(%)", format="%+.1f"),
                         "相對大盤": st.column_config.NumberColumn("對大盤(1年)(%)", format="%+.1f"),
                         "近一年殖利率": st.column_config.NumberColumn("殖利率(%)", format="%.1f"),
-                        "總配息金額": st.column_config.NumberColumn("近
+                        "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
+                        "ROE": st.column_config.NumberColumn("ROE(%)", format="%.1f")
+                    },
+                    hide_index=True, height=600
+                )
+            else:
+                st.info("尚無可顯示的績效資料。")
+
+# ------------------------------------------
+# TAB 5: ETF 持股
+# ------------------------------------------
+with tab_etf:
+    st.subheader("🧩 ETF Top 10 持股分析")
+    st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
+    
+    csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(csv_url, headers=headers, timeout=15)
+        response.raise_for_status() 
+        df_etf_db = pd.read_csv(io.StringIO(response.text)).dropna(how='all')
+        read_success = True
+    except Exception as e:
+        df_etf_db = pd.DataFrame()
+        read_success = False
+        err_msg = str(e)
+
+    if not read_success:
+        st.error(f"❌ **無法讀取外部 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
+    elif df_etf_db is None or df_etf_db.empty:
+        st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。")
+    else:
+        etf_col = df_etf_db.columns[0]
+        name_col = df_etf_db.columns[1]
+        weight_col = df_etf_db.columns[2]
+        
+        raw_etfs = df_etf_db[etf_col].dropna().astype(str).str.strip().unique().tolist()
+        etf_options = [x for x in raw_etfs if x and x.lower() not in ['etf', 'etf代號', 'ticker', 'nan', 'none'] and '代號' not in x]
+        
+        if etf_options:
+            col_etf1, col_etf2 = st.columns([1, 2])
+            with col_etf1:
+                selected_etf = st.selectbox("👉 請選擇要查詢持股比例的 ETF：", options=etf_options, key="pc_etf_select")
+                
+            if selected_etf:
+                df_show = df_etf_db[df_etf_db[etf_col].astype(str).str.strip() == selected_etf].copy()
+                with col_etf1:
+                    st.dataframe(df_show, hide_index=True, use_container_width=True)
+                
+                with col_etf2:
+                    try:
+                        plot_df = df_show.copy()
+                        plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
+                        
+                        plot_df = plot_df.drop_duplicates(subset=[name_col], keep='last')
+                        
+                        plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+                        plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
+                        plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=False).head(10)
+                        
+                        if not plot_df.empty:
+                            top10_sum = plot_df[weight_col].sum()
+                            st.markdown(f"#### 🎯 前十大持股權重總和： **{top10_sum:.2f}%**")
+                            
+                            plot_df_top10 = plot_df.sort_values(by=weight_col, ascending=True)
+                            plot_df_top10['文字標籤'] = plot_df_top10[weight_col].apply(lambda x: f"{x:.2f}%")
+                            
+                            fig_etf = px.bar(plot_df_top10, x=weight_col, y=name_col, orientation='h', title=f"<b>{selected_etf} 核心持股佔比 (%)</b>", text='文字標籤')
+                            fig_etf.update_traces(textposition='outside')
+                            fig_etf.update_yaxes(type='category') 
+                            fig_etf.update_layout(yaxis_title=None, xaxis_title="持股比例 (%)", height=450, margin=dict(l=10, r=10, t=40, b=10))
+                            st.plotly_chart(fig_etf, use_container_width=True)
+                    except Exception as ex:
+                        st.warning(f"圖表繪製發生錯誤：{ex}")
+
+# ------------------------------------------
+# TAB 6: 每日看盤心得
+# ------------------------------------------
+with tab4:
+    st.subheader("📖 每日看盤心得紀錄")
+    df_journal = load_trading_journal()
+    journal_error = False
+    
+    if not df_journal.empty:
+        if 'Date' in df_journal.columns:
+            df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_journal = df_journal.dropna(subset=['Date'])
+            if len(df_journal) < 1: journal_error = True
+        else: journal_error = True
+    else: journal_error = True
+
+    if journal_error:
+        st.info("💡 提示：若要啟用「每日看盤心得」功能，請在您的 Google 試算表中確認 `Trading_Journal` 格式是否正確。")
+    else:
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        now_time = datetime.now().strftime('%H:%M:%S')
+
+        existing_note = ""
+        if today_str in df_journal['Date'].values:
+            existing_note = str(df_journal.loc[df_journal['Date'] == today_str, 'Notes'].iloc[0])
+            if existing_note == 'nan': existing_note = ""
+
+        with st.form("journal_form"):
+            note_input = st.text_area(f"撰寫 {today_str} 的看盤心得：", value=existing_note, height=150)
+            if st.form_submit_button("💾 儲存心得"):
+                with st.spinner("儲存中..."):
+                    if today_str in df_journal['Date'].values:
+                        idx = df_journal.index[df_journal['Date'] == today_str].tolist()[0]
+                        df_journal.at[idx, 'Notes'] = note_input
+                        df_journal.at[idx, 'Last_Updated'] = now_time
+                    else:
+                        new_row = pd.DataFrame([{'Date': today_str, 'Notes': note_input, 'Last_Updated': now_time}])
+                        df_journal = pd.concat([df_journal, new_row], ignore_index=True)
+                    try:
+                        conn.update(worksheet="Trading_Journal", data=df_journal)
+                        st.cache_data.clear() # 🚀 清除快取確保下次讀到最新
+                        st.success("✅ 心得儲存成功！")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e: st.error(f"寫入失敗：{e}")
+        
+        st.divider()
+        st.subheader("📚 歷史心得回顧")
+        if not df_journal.empty:
+            df_history_show = df_journal.sort_values(by='Date', ascending=False)
+            for _, row in df_history_show.iterrows():
+                with st.expander(f"📅 {row['Date']} (最後更新: {row.get('Last_Updated', '')})"):
+                    st.write(row['Notes'])
+
+# ------------------------------------------
+# 側邊欄：持股管理 (🚀 儲存前強制清除幽靈空值 + 快取控制)
+# ------------------------------------------
+with st.sidebar:
+    st.header("📝 持股與觀察名單管理")
+    st.markdown("想要追蹤某檔股票嗎？**新增代號並將股數設為 0**，它就會自動加入技術分析掃描！")
+    
+    st.subheader("🇹🇼 台股清單")
+    if not df_tw.empty:
+        cols_tw = ['Ticker', '名稱', 'Shares', '出借', '類別', '策略']
+        df_tw = df_tw.reindex(columns=[c for c in cols_tw if c in df_tw.columns] + [c for c in df_tw.columns if c not in cols_tw])
+        
+        edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
+        if st.button("💾 儲存台股變更"):
+            with st.spinner("正在清洗並寫入台股資料..."):
+                try:
+                    # 🚀 終極空值防禦：儲存前剔除幽靈空值
+                    clean_tw = edited_df_tw.copy()
+                    clean_tw['Ticker'] = clean_tw['Ticker'].astype(str).str.strip()
+                    clean_tw = clean_tw[~clean_tw['Ticker'].str.lower().isin(['nan', 'none', 'null', ''])]
+                    conn.update(worksheet="TW_Portfolio", data=clean_tw)
+                    st.cache_data.clear() # 🚀 清除快取確保下次讀到最新
+                    st.success("✅ 台股更新成功！")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("台股清單目前為空。")
+
+    st.divider()
+
+    st.subheader("🇺🇸 美股清單")
+    if not df_us.empty:
+        cols_us = ['Ticker', '名稱', 'Shares', '複委託', '類別', '策略']
+        df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in cols_us])
+        
+        edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
+        if st.button("💾 儲存美股變更"):
+            with st.spinner("正在清洗並寫入美股資料..."):
+                try:
+                    # 🚀 終極空值防禦：儲存前剔除幽靈空值
+                    clean_us = edited_df_us.copy()
+                    clean_us['Ticker'] = clean_us['Ticker'].astype(str).str.strip()
+                    clean_us = clean_us[~clean_us['Ticker'].str.lower().isin(['nan', 'none', 'null', ''])]
+                    conn.update(worksheet="US_Portfolio", data=clean_us)
+                    st.cache_data.clear() # 🚀 清除快取確保下次讀到最新
+                    st.success("✅ 美股更新成功！")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e: st.error(f"寫入失敗：{e}")
+    else: st.info("美股清單目前為空。")
