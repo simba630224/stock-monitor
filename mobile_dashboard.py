@@ -9,7 +9,6 @@ import re
 from datetime import datetime
 import warnings
 import time
-import traceback
 import requests
 import io
 from streamlit_gsheets import GSheetsConnection
@@ -32,10 +31,10 @@ def safe_float(val):
 def format_display_name(name_raw, sym_raw):
     """絕對乾淨的名稱格式化：防殺所有 nan 與空值"""
     sym = str(sym_raw).strip() if pd.notna(sym_raw) else ""
-    if sym.lower() in ['nan', 'none', '']: sym = ""
+    if sym.lower() in ['nan', 'none', 'null', '']: sym = ""
     
     name = str(name_raw).strip() if pd.notna(name_raw) else ""
-    if name.lower() in ['nan', 'none', '']: name = ""
+    if name.lower() in ['nan', 'none', 'null', '']: name = ""
     
     if name and sym: return f"{name} ({sym})"
     if not name and sym: return sym
@@ -43,14 +42,14 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與資料讀取
+# 1. 資料庫連線與安全快取模組 (🚀 解決打字清空與覆蓋問題)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 🛑 終極防呆：請將您的 Technical_DB 試算表網址貼在引號內！
+# 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
 TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
 
-def load_and_standardize_portfolio(worksheet_name, default_category):
+def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
         df = conn.read(worksheet=worksheet_name, ttl=0)
         if df is None or df.empty:
@@ -61,12 +60,13 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
         
         col_map = {}
         for c in df.columns:
-            cl = c.lower()
+            cl = str(c).strip().lower()
             if cl in ['ticker', 'symbol', '代號', '股票代號', '標的代號']: col_map[c] = 'Ticker'
             elif cl in ['name', '名稱', '標的名稱', '股票名稱']: col_map[c] = '名稱'
             elif cl in ['shares', '股數', '持有股數', '庫存', '數量']: col_map[c] = 'Shares'
             elif cl in ['出借', '借券', '複委託']: col_map[c] = '出借' if default_category == '台股' else '複委託'
             elif cl in ['類別', 'category', '分類', '市場']: col_map[c] = '類別'
+            elif cl in ['策略', '短線', '交易屬性']: col_map[c] = '策略'
             
         df = df.rename(columns=col_map)
         
@@ -74,50 +74,87 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
             df = df.rename(columns={df.columns[0]: 'Ticker'})
             
         if 'Ticker' in df.columns:
-            df = df.dropna(subset=['Ticker'])
-            df = df[df['Ticker'].astype(str).str.strip() != '']
+            df['Ticker'] = df['Ticker'].astype(str).str.strip()
+            df['Ticker'] = df['Ticker'].str.replace(r'\.0$', '', regex=True)
+            # 自動補零防禦 (例如輸入 50 自動變成 0050)
+            if default_category == '台股':
+                df['Ticker'] = df['Ticker'].apply(lambda x: x.zfill(4) if x.isdigit() and len(x) < 4 else x)
+            df = df[~df['Ticker'].str.lower().isin(['nan', 'none', 'null', '<na>', ''])]
         else:
             return pd.DataFrame()
             
         if '名稱' not in df.columns: df['名稱'] = ''
+        df['名稱'] = df['名稱'].astype(str).replace(['nan', 'None', 'NaN', 'null', '<NA>'], '')
+        
         if 'Shares' not in df.columns: df['Shares'] = 0.0
+        df['Shares'] = pd.to_numeric(df['Shares'], errors='coerce').fillna(0.0)
+        
+        if '策略' not in df.columns: df['策略'] = ''
+        df['策略'] = df['策略'].astype(str).replace(['nan', 'None', 'NaN', 'null', '<NA>'], '')
         
         if default_category == '台股' and '出借' not in df.columns: df['出借'] = 0.0
         elif default_category == '美股' and '複委託' not in df.columns: df['複委託'] = 0.0
         
+        if '出借' in df.columns: df['出借'] = pd.to_numeric(df['出借'], errors='coerce').fillna(0.0)
+        if '複委託' in df.columns: df['複委託'] = pd.to_numeric(df['複委託'], errors='coerce').fillna(0.0)
+        
         if '類別' not in df.columns: df['類別'] = default_category
         
+        ordered_cols = ['Ticker', '名稱', 'Shares', '出借' if default_category=='台股' else '複委託', '類別', '策略']
+        df = df.reindex(columns=[c for c in ordered_cols if c in df.columns] + [c for c in df.columns if c not in ordered_cols])
         return df
     except Exception:
         return pd.DataFrame()
 
-df_tw = load_and_standardize_portfolio("TW_Portfolio", "台股")
+@st.cache_data(ttl=600)
+def get_tw_portfolio():
+    df = fetch_and_clean_portfolio("TW_Portfolio", "台股")
+    if df.empty: df = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別", "策略"])
+    return df
+
+@st.cache_data(ttl=600)
+def get_us_portfolio():
+    df = fetch_and_clean_portfolio("US_Portfolio", "美股")
+    if df.empty: df = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別", "策略"])
+    return df
+
+df_tw = get_tw_portfolio()
+df_us = get_us_portfolio()
+
 PORTFOLIO_TW = df_tw.to_dict('records') if not df_tw.empty else []
-if df_tw.empty: df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
-
-df_us = load_and_standardize_portfolio("US_Portfolio", "美股")
 PORTFOLIO_US = df_us.to_dict('records') if not df_us.empty else []
-if df_us.empty: df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=600)
 def load_technical_db():
     db_url = TECHNICAL_DB_URL.strip() or st.secrets.get("TECHNICAL_DB_URL")
     if db_url:
         try:
-            df_db = conn.read(spreadsheet=db_url, ttl=60)
+            df_db = conn.read(spreadsheet=db_url, ttl=600)
             if df_db is not None and not df_db.empty:
                 df_db.columns = [str(c).strip() for c in df_db.columns]
                 return df_db
         except Exception as e:
-            st.error(f"讀取 Technical_DB 時發生連線錯誤，請確認網址。({e})")
+            st.error(f"讀取 Technical_DB 失敗，請確認網址。({e})")
             return pd.DataFrame()
     try:
-        df_db = conn.read(worksheet="Technical_DB", ttl=60)
+        df_db = conn.read(worksheet="Technical_DB", ttl=600)
         if df_db is not None and not df_db.empty:
             df_db.columns = [str(c).strip() for c in df_db.columns]
             return df_db
     except: pass
     return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def load_value_history():
+    try:
+        return conn.read(worksheet="Value_History", ttl=600)
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def load_trading_journal():
+    try:
+        return conn.read(worksheet="Trading_Journal", ttl=600)
+    except: return pd.DataFrame()
 
 # ==========================================
 # 2. 輕量即時行情與線圖抓取
@@ -191,7 +228,6 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
-# 🚀 獨立防禦版績效計算引擎 (已確認使用 auto_adjust=True，保證是含息報酬)
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
     result = {
@@ -219,7 +255,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                     return 0.0
 
                 ret_1q = calc_ret(63)
-                ret_6m = calc_ret(126) # 🚀 新增：半年期含息報酬
+                ret_6m = calc_ret(126) 
                 
                 if len(valid_hist) > 252:
                     ret_1y = ((curr_p - float(valid_hist.iloc[-252])) / float(valid_hist.iloc[-252])) * 100
@@ -315,7 +351,7 @@ with tab1:
         for item in PORTFOLIO_TW:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none']: continue
+                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
                 ticker = get_yf_ticker_tw(ticker_str)
                 asset_type = str(item.get('類別', '台股未分類')).strip()
                 if not asset_type or asset_type.lower() == 'nan': asset_type = '台股未分類'
@@ -339,7 +375,7 @@ with tab1:
         for item in PORTFOLIO_US:
             if pd.notna(item.get('Ticker')):
                 ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none']: continue
+                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
                 asset_type = str(item.get('類別', '美股未分類')).strip()
                 if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
                 
@@ -367,39 +403,46 @@ with tab1:
         col_m3.metric("2026 預估股息", f"${total_dividends_2026:,.0f}")
         col_m4.metric("近一年累計股息", f"${total_dividends_1y:,.0f}")
 
-        history_error = False
+        df_history = load_value_history()
         df_history_to_display = pd.DataFrame()
-        try:
-            df_history = conn.read(worksheet="Value_History", ttl=0)
-            if df_history is not None and not df_history.empty:
-                df_history.columns = [str(c).strip().replace(' ', '_') for c in df_history.columns]
-                df_history = df_history.loc[:, ~df_history.columns.duplicated()]
+        history_error = False
+        
+        if not df_history.empty:
+            df_history.columns = [str(c).strip().replace(' ', '_') for c in df_history.columns]
+            df_history = df_history.loc[:, ~df_history.columns.duplicated()]
+            
+            if 'Date' in df_history.columns and 'Total_Value' in df_history.columns:
+                df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+                df_history = df_history.dropna(subset=['Date'])
+                df_history['Total_Value'] = pd.to_numeric(df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce').fillna(0)
                 
-                if 'Date' in df_history.columns and 'Total_Value' in df_history.columns:
-                    df_history['Date'] = pd.to_datetime(df_history['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-                    df_history = df_history.dropna(subset=['Date'])
-                    df_history['Total_Value'] = pd.to_numeric(df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce').fillna(0)
-                    
-                    today_str = datetime.now().strftime('%Y-%m-%d')
-                    now_time = datetime.now().strftime('%H:%M:%S')
-                    
-                    if len(df_history) >= 1:
-                        if today_str in df_history['Date'].values:
-                            idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
-                            existing_val = safe_float(df_history.at[idx, 'Total_Value'])
-                            if abs(existing_val - total_market_value) > 1:
-                                df_history.at[idx, 'Total_Value'] = total_market_value
-                                df_history.at[idx, 'Last_Updated'] = now_time
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                now_time = datetime.now().strftime('%H:%M:%S')
+                
+                if len(df_history) >= 1:
+                    if today_str in df_history['Date'].values:
+                        idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
+                        existing_val = safe_float(df_history.at[idx, 'Total_Value'])
+                        if abs(existing_val - total_market_value) > 1:
+                            df_history.at[idx, 'Total_Value'] = total_market_value
+                            df_history.at[idx, 'Last_Updated'] = now_time
+                            try:
+                                df_history = df_history.fillna("")
                                 conn.update(worksheet="Value_History", data=df_history)
-                        else:
-                            new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
-                            df_history = pd.concat([df_history, new_row], ignore_index=True)
+                                st.cache_data.clear()
+                            except: pass
+                    else:
+                        new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+                        df_history = pd.concat([df_history, new_row], ignore_index=True)
+                        try:
+                            df_history = df_history.fillna("")
                             conn.update(worksheet="Value_History", data=df_history)
-                        df_history_to_display = df_history
-                    else: history_error = True
+                            st.cache_data.clear()
+                        except: pass
+                    df_history_to_display = df_history
                 else: history_error = True
             else: history_error = True
-        except Exception: history_error = True
+        else: history_error = True
 
         if history_error or df_history_to_display.empty or 'Total_Value' not in df_history_to_display.columns:
             df_history_to_display = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value}])
@@ -443,13 +486,13 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB HL: 技術亮點摘要 (🚀 直讀 Technical_DB)
+# TAB HL: 技術亮點摘要 
 # ------------------------------------------
 with tab_hl:
     df_db = load_technical_db()
     
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 第 44 行已填入 `TECHNICAL_DB_URL`\n2. GitHub Actions 已寫入資料")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 第 46 行已填入 `TECHNICAL_DB_URL`\n2. GitHub Actions 已寫入資料")
     else:
         try:
             for col in ['bull_score', 'bear_score']:
@@ -459,22 +502,18 @@ with tab_hl:
             if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
             df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
             
-            for col in ['action', 'tags', '_name', '_sym', '標的']:
+            for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
 
-            target_options = {}
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
+
+            target_options = {}
             for _, row in df_db.iterrows():
                 sym = str(row.get('_sym', '')).strip()
                 disp_name = row.get('顯示名稱', '')
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
-
-            bullish_strong = df_db[df_db['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bullish_daily = df_db[df_db['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_strong = df_db[df_db['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_daily = df_db[df_db['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
 
             def format_mobile_items(sub_df):
                 if sub_df.empty: return "> 目前無符合條件標的"
@@ -490,17 +529,43 @@ with tab_hl:
                     res += f"- **{name_disp}** ({pe_str})\n  - `[{tags_str}]`\n"
                 return res
 
-            st.markdown("### 📊 盤後技術摘要")
+            is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
+            df_short = df_db[is_short_term]
+            df_normal = df_db[~is_short_term]
+
+            st.markdown("### 📊 技術亮點與警示摘要")
+            
+            # ⚡ 第一區塊：短線專區
+            st.markdown("#### ⚡ 短線進出專區 (創高破底)")
+            if not df_short.empty:
+                bullish_short = df_short[df_short['bull_score'] >= df_short['bear_score']].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True])
+                bearish_short = df_short[df_short['bull_score'] < df_short['bear_score']].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True])
+                
+                with st.container():
+                    st.success(f"**🚀 短線偏多 / 創高動能**\n\n{format_mobile_items(bullish_short)}")
+                    st.error(f"**🩸 短線偏空 / 破底風險**\n\n{format_mobile_items(bearish_short)}")
+            else:
+                st.info("尚無短線標的。請於側邊欄「策略」標註『短線』啟用此區。")
+
+            st.divider()
+
+            # 📈 第二區塊：波段與長線
+            st.markdown("#### 📈 波段與長期投資 (Top 10)")
+            bullish_strong = df_normal[df_normal['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bullish_daily = df_normal[df_normal['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bearish_strong = df_normal[df_normal['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bearish_daily = df_normal[df_normal['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+
             with st.container():
                 st.success(f"🔥 **[🚀 強勢買進]**\n\n{format_mobile_items(bullish_strong)}")
                 st.info(f"📈 **[📈 短多轉折]**\n\n{format_mobile_items(bullish_daily)}")
                 st.error(f"🛑 **[🛑 強制賣出]**\n\n{format_mobile_items(bearish_strong)}")
                 st.warning(f"⚠️ **[⚠️ 弱勢減碼]**\n\n{format_mobile_items(bearish_daily)}")
         except Exception as e:
-            st.error("摘要產生錯誤，請檢查資料庫格式。")
+            st.error("摘要產生錯誤，請檢查資料庫。")
 
 # ------------------------------------------
-# TAB 3: 多檔走勢比較 (🚀 解除依賴，防死鎖，終極去重)
+# TAB 3: 多檔走勢比較 
 # ------------------------------------------
 with tab_comp:
     st.markdown("### 🆚 標的走勢比較")
@@ -521,8 +586,6 @@ with tab_comp:
             
     if comp_options:
         all_options_list = list(comp_options.keys())
-        
-        # 🚀 移除 default 防止死鎖
         comp_targets = st.multiselect("選擇標的 (最多4檔)：", options=all_options_list, max_selections=4, key="m_comp_ms")
         comp_period = st.selectbox("比較期間", ["半年", "一年", "三年"], index=1)
             
@@ -575,23 +638,20 @@ with tab_comp:
                     sym = comp_options[tgt]
                     clean_code = sym.split('.')[0]
                     
-                    # 精準比對
                     db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.replace(r'\.TW.*', '', regex=True)
                     sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                     
                     if not sub_df.empty:
                         sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
-                        
-                        # 🚀 終極去重邏輯：先留最新、再去重複，保證不疊加
-                        sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last')
-                        
                         sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
-                        sub_df = sub_df.dropna(subset=[weight_c]).sort_values(by=weight_c, ascending=False).head(10)
+                        sub_df = sub_df.dropna(subset=[weight_c])
+                        
+                        sub_df = sub_df.sort_values(by=weight_c, ascending=False).drop_duplicates(subset=[name_c], keep='first').head(10)
                         
                         if not sub_df.empty:
                             top10_sum = sub_df[weight_c].sum()
-                            st.caption(f"**Top 10 合計：{top10_sum:.2f}%**")
+                            st.caption(f"**Top 10 權重合計：{top10_sum:.2f}%**")
                             disp_df = sub_df[[name_c, weight_c]].copy()
                             disp_df.columns = ["成分股", "權重(%)"]
                             disp_df["權重(%)"] = disp_df["權重(%)"].apply(lambda x: f"{x:.2f}%")
@@ -615,7 +675,7 @@ with tab2:
         """)
         
     if 'df_db' in locals() and not df_db.empty: 
-        display_cols = ["顯示名稱", "狀態警示", "收盤價", "52週位置"]
+        display_cols = ["顯示名稱", "策略", "狀態警示", "收盤價", "52週位置"]
         display_cols = [c for c in display_cols if c in df_db.columns]
         st.dataframe(
             df_db[display_cols], 
@@ -624,6 +684,7 @@ with tab2:
             height=350,
             column_config={
                 "顯示名稱": st.column_config.TextColumn("標的"),
+                "策略": st.column_config.TextColumn("策略", width="small"),
                 "狀態警示": st.column_config.TextColumn("🚨 狀態標籤與動作", width="large")
             }
         )
@@ -655,7 +716,7 @@ with tab2:
                 st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 5: 績效與股息追蹤 (🚀 獨立抓取與含息)
+# TAB 5: 績效與股息追蹤 
 # ------------------------------------------
 with tab3:
     st.markdown("所有標的之含息報酬率與財報指標。")
@@ -703,7 +764,7 @@ with tab3:
                 st.info("尚無可顯示的績效資料。")
 
 # ------------------------------------------
-# TAB 6: ETF 持股 (🚀 終極去重邏輯)
+# TAB 6: ETF 持股 
 # ------------------------------------------
 with tab_etf:
     st.markdown("### 🧩 ETF Top 10 成分股")
@@ -740,7 +801,6 @@ with tab_etf:
                     plot_df = df_show.copy()
                     plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                     
-                    # 🚀 終極去重邏輯：先留最新、再轉數字排序，保證不疊加
                     plot_df = plot_df.drop_duplicates(subset=[name_col], keep='last')
                     
                     plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
@@ -768,15 +828,16 @@ with tab_etf:
 # ------------------------------------------
 with tab4:
     st.markdown("### 📖 每日看盤心得")
+    df_journal = load_trading_journal()
     journal_error = False
-    try:
-        df_journal = conn.read(worksheet="Trading_Journal", ttl=0)
-        if df_journal is not None and 'Date' in df_journal.columns and not df_journal.empty:
+    
+    if not df_journal.empty:
+        if 'Date' in df_journal.columns:
             df_journal['Date'] = pd.to_datetime(df_journal['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
             df_journal = df_journal.dropna(subset=['Date'])
             if len(df_journal) < 1: journal_error = True
         else: journal_error = True
-    except Exception: journal_error = True
+    else: journal_error = True
 
     if journal_error:
         st.info("請於試算表確認 `Trading_Journal` 工作表格式是否正確。")
@@ -801,7 +862,9 @@ with tab4:
                         new_row = pd.DataFrame([{'Date': today_str, 'Notes': note_input, 'Last_Updated': now_time}])
                         df_journal = pd.concat([df_journal, new_row], ignore_index=True)
                     try:
+                        df_journal = df_journal.fillna("")
                         conn.update(worksheet="Trading_Journal", data=df_journal)
+                        st.cache_data.clear()
                         st.success("儲存成功！")
                         time.sleep(1)
                         st.rerun()
@@ -820,22 +883,51 @@ with tab4:
 # ------------------------------------------
 with tab5:
     st.markdown("### ✏️ 雲端隨身記帳")
-    st.caption("更改後點擊下方按鈕即可同步至雲端 Sheets。")
+    st.caption("⚠️ 在外部修改後，請先按上方[🔄 刷新]。編輯後請點擊空白處再儲存。")
     
     st.subheader("🇹🇼 台股名單")
-    edited_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="m_tw_editor")
-    if st.button("💾 儲存台股變更"):
-        try:
-            conn.update(worksheet="TW_Portfolio", data=edited_tw)
-            st.success("更新成功！")
-        except Exception as e: st.error(f"錯誤:{e}")
+    if not df_tw.empty:
+        cols_tw = ['Ticker', '名稱', 'Shares', '出借', '類別', '策略']
+        df_tw = df_tw.reindex(columns=[c for c in cols_tw if c in df_tw.columns] + [c for c in df_tw.columns if c not in cols_tw])
+        
+        edited_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="m_tw_editor")
+        if st.button("💾 儲存台股變更"):
+            with st.spinner("正在清洗並寫入..."):
+                try:
+                    clean_tw = edited_tw.copy()
+                    clean_tw['Ticker'] = clean_tw['Ticker'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+                    clean_tw['Ticker'] = clean_tw['Ticker'].apply(lambda x: x.zfill(4) if x.isdigit() and len(x) < 4 else x)
+                    clean_tw = clean_tw[~clean_tw['Ticker'].str.lower().isin(['nan', 'none', 'null', ''])]
+                    clean_tw = clean_tw.fillna("")
+                    
+                    conn.update(worksheet="TW_Portfolio", data=clean_tw)
+                    st.cache_data.clear()
+                    st.success("更新成功！")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e: st.error(f"錯誤:{e}")
+    else: st.info("名單為空。")
             
     st.divider()
     
     st.subheader("🇺🇸 美股名單")
-    edited_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="m_us_editor")
-    if st.button("💾 儲存美股變更"):
-        try:
-            conn.update(worksheet="US_Portfolio", data=edited_us)
-            st.success("更新成功！")
-        except Exception as e: st.error(f"錯誤:{e}")
+    if not df_us.empty:
+        cols_us = ['Ticker', '名稱', 'Shares', '複委託', '類別', '策略']
+        df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in cols_us])
+        
+        edited_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="m_us_editor")
+        if st.button("💾 儲存美股變更"):
+            with st.spinner("正在清洗並寫入..."):
+                try:
+                    clean_us = edited_us.copy()
+                    clean_us['Ticker'] = clean_us['Ticker'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+                    clean_us = clean_us[~clean_us['Ticker'].str.lower().isin(['nan', 'none', 'null', ''])]
+                    clean_us = clean_us.fillna("")
+                    
+                    conn.update(worksheet="US_Portfolio", data=clean_us)
+                    st.cache_data.clear()
+                    st.success("更新成功！")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e: st.error(f"錯誤:{e}")
+    else: st.info("名單為空。")
