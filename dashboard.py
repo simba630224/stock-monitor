@@ -46,8 +46,8 @@ def format_display_name(name_raw, sym_raw):
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
-TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
+# 🛑 終極防呆：請將您的 Technical_DB 試算表網址貼在引號內！
+TECHNICAL_DB_URL = "" 
 
 def load_and_standardize_portfolio(worksheet_name, default_category):
     try:
@@ -66,6 +66,7 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
             elif cl in ['shares', '股數', '持有股數', '庫存', '數量']: col_map[c] = 'Shares'
             elif cl in ['出借', '借券', '複委託']: col_map[c] = '出借' if default_category == '台股' else '複委託'
             elif cl in ['類別', 'category', '分類', '市場']: col_map[c] = '類別'
+            elif cl in ['策略', '短線', '交易屬性']: col_map[c] = '策略' # 🚀 新增策略欄位讀取
             
         df = df.rename(columns=col_map)
         
@@ -80,23 +81,27 @@ def load_and_standardize_portfolio(worksheet_name, default_category):
             
         if '名稱' not in df.columns: df['名稱'] = ''
         if 'Shares' not in df.columns: df['Shares'] = 0.0
+        if '策略' not in df.columns: df['策略'] = ''
         
         if default_category == '台股' and '出借' not in df.columns: df['出借'] = 0.0
         elif default_category == '美股' and '複委託' not in df.columns: df['複委託'] = 0.0
         
         if '類別' not in df.columns: df['類別'] = default_category
         
+        # 確保順序美觀
+        ordered_cols = ['Ticker', '名稱', 'Shares', '出借' if default_category=='台股' else '複委託', '類別', '策略']
+        df = df.reindex(columns=[c for c in ordered_cols if c in df.columns] + [c for c in df.columns if c not in ordered_cols])
         return df
     except Exception:
         return pd.DataFrame()
 
 df_tw = load_and_standardize_portfolio("TW_Portfolio", "台股")
 PORTFOLIO_TW = df_tw.to_dict('records') if not df_tw.empty else []
-if df_tw.empty: df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別"])
+if df_tw.empty: df_tw = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別", "策略"])
 
 df_us = load_and_standardize_portfolio("US_Portfolio", "美股")
 PORTFOLIO_US = df_us.to_dict('records') if not df_us.empty else []
-if df_us.empty: df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別"])
+if df_us.empty: df_us = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別", "策略"])
 
 @st.cache_data(ttl=60)
 def load_technical_db():
@@ -462,7 +467,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 直讀 Technical_DB)
+# TAB 2: 技術分析掃描 (🚀 直讀 Technical_DB，雙區塊顯示)
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -472,6 +477,7 @@ with tab2:
         st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 44 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
+            # 🚀 終極防呆機制：確保欄位實體存在才進行轉型，絕對避免 AttributeError
             for col in ['bull_score', 'bear_score']:
                 if col not in df_db.columns: df_db[col] = 0
                 df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
@@ -479,23 +485,21 @@ with tab2:
             if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
             df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
             
-            for col in ['action', 'tags', '_name', '_sym', '標的']:
+            # 字串欄位處理防呆 (清洗 nan)
+            for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
 
+            # 新增格式化顯示名稱欄位
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
 
+            # 建立選項，排除空值 (只認有效的 sym 才能畫圖)
             target_options = {}
             for _, row in df_db.iterrows():
                 sym = str(row.get('_sym', '')).strip()
                 disp_name = row.get('顯示名稱', '')
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
-
-            bullish_strong = df_db[df_db['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bullish_daily = df_db[df_db['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_strong = df_db[df_db['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_daily = df_db[df_db['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
 
             def format_db_items(sub_df):
                 if sub_df.empty: return "無"
@@ -511,10 +515,38 @@ with tab2:
                     res.append(f"• **{name_disp} ({pe_str})** `[{tags_str}]`")
                 return "\n".join(res)
 
-            st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 10)")
+            # 🚀 區分「短線進出」與「一般波段」
+            is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
+            df_short = df_db[is_short_term]
+            df_normal = df_db[~is_short_term]
+
+            st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") # 🚀 依要求移除「盤後」二字
             st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
-            
+
+            # ⚡ 第一區塊：短線進出專區
+            st.markdown("#### ⚡ 短線進出專區 (依據 20日/50日 創高破底與動能)")
+            if not df_short.empty:
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    bullish_short = df_short[df_short['bull_score'] >= df_short['bear_score']].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True])
+                    st.success(f"**🚀 短線偏多 / 創高動能**\n\n{format_db_items(bullish_short)}")
+                with col_s2:
+                    bearish_short = df_short[df_short['bull_score'] < df_short['bear_score']].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True])
+                    st.error(f"**🩸 短線偏空 / 破底風險**\n\n{format_db_items(bearish_short)}")
+            else:
+                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』，系統將自動在此區進行 20日/50日 創高破低監控。")
+
+            st.divider()
+
+            # 📈 第二區塊：一般波段與長期投資
+            st.markdown("#### 📈 波段與長期投資 (Top 10)")
             col_sum1, col_sum2 = st.columns(2)
+            
+            bullish_strong = df_normal[df_normal['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bullish_daily = df_normal[df_normal['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bearish_strong = df_normal[df_normal['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bearish_daily = df_normal[df_normal['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+
             with col_sum1:
                 st.success(f"**☀️ 多方強勢區**\n\n"
                            f"🔥 **[🚀 強勢買進] Top 10**：\n{format_db_items(bullish_strong)}\n\n"
@@ -530,12 +562,14 @@ with tab2:
                 st.markdown("""
                 #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
                 * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
-                * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
+                * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者，如日線金叉或分數雖高但欠缺週低檔金叉)。
                 * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
-                * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者)。
+                * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者，如日線死叉或分數雖高但欠缺週高檔死叉)。
+                * **[⚔️ 多空交戰]**：同時觸發多空條件，依分數較高者顯示偏強或偏弱。
+                * **[➖ 趨勢延續]**：無明顯多空觸發訊號。
                 """)
 
-            display_cols = ["市場", "顯示名稱", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
+            display_cols = ["市場", "顯示名稱", "策略", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
             display_cols = [c for c in display_cols if c in df_db.columns]
             
             if not df_db.empty and display_cols:
@@ -545,6 +579,7 @@ with tab2:
                     column_config={
                         "市場": st.column_config.TextColumn("市場", width="small"),
                         "顯示名稱": st.column_config.TextColumn("名稱 (代號)", width="medium"),
+                        "策略": st.column_config.TextColumn("策略屬性", width="small"),
                         "狀態警示": st.column_config.TextColumn("🚨 狀態標籤與動作", width="large"),
                         "均線位階": st.column_config.TextColumn("均線位階", width="medium"),
                         "52週位置": st.column_config.TextColumn("52週位置", width="small"),
@@ -603,12 +638,13 @@ with tab2:
                     st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 3: 標的比較 (🚀 解除依賴)
+# TAB 3: 標的比較 (🚀 解除依賴，防死鎖)
 # ------------------------------------------
 with tab_comp:
     st.subheader("🆚 多檔標的走勢比較")
     st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
     
+    # 從持股清單抓取選項
     comp_options = {}
     for item in PORTFOLIO_TW:
         sym_raw = str(item.get('Ticker', '')).strip()
@@ -641,6 +677,7 @@ with tab_comp:
                 for tgt in comp_targets:
                     sym = comp_options[tgt]
                     try:
+                        # 🚀 yfinance 預設 auto_adjust=True，計算結果為含息報酬
                         hist = yf.Ticker(sym).history(period=yf_period, auto_adjust=True)
                         if not hist.empty and 'Close' in hist.columns:
                             s = hist['Close'].dropna()
@@ -655,6 +692,7 @@ with tab_comp:
                 if comp_pct_dict:
                     df_comp_pct = pd.DataFrame(comp_pct_dict).ffill().bfill()
                     if not df_comp_pct.empty:
+                        # 🚀 嚴格標示為「含息報酬率」
                         fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計含息報酬率 (%)', 'variable': '標的', 'index': '日期'})
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig_comp, use_container_width=True)
@@ -685,17 +723,18 @@ with tab_comp:
                         sym = comp_options[tgt]
                         clean_code = sym.split('.')[0]
                         
+                        # 精準比對
                         db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.replace(r'\.TW.*', '', regex=True)
                         sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                         
                         if not sub_df.empty:
                             sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
-                            # 🚀 終極去重：先刪除舊的重複成分股 (保留最新的一筆)，再排序取前10
-                            sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last')
-                            
                             sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                             sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
-                            sub_df = sub_df.dropna(subset=[weight_c]).sort_values(by=weight_c, ascending=False).head(10)
+                            sub_df = sub_df.dropna(subset=[weight_c])
+                            
+                            # 🚀 終極去重邏輯：先留最新一筆、再排序，保證總和正確不疊加！
+                            sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last').sort_values(by=weight_c, ascending=False).head(10)
                             
                             if not sub_df.empty:
                                 top10_sum = sub_df[weight_c].sum()
@@ -711,7 +750,7 @@ with tab_comp:
     else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 
 # ------------------------------------------
-# TAB 4: 績效與觀察總覽 (🚀 獨立抓取與含息)
+# TAB 4: 績效與觀察總覽
 # ------------------------------------------
 with tab3:
     st.markdown("一覽所有持股與觀察清單的**短中長線含息報酬率**、**基本面財報指標**與**真實配息紀錄**。")
@@ -737,6 +776,7 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
+            # 🚀 確實將「近半年含息報酬」加入顯示清單
             display_cols = ["顯示名稱", "收盤價", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "近一年配息明細", "ROE"]
             display_cols = [c for c in display_cols if c in df_perf.columns]
             
@@ -761,7 +801,7 @@ with tab3:
                 st.info("尚無可顯示的績效資料。")
 
 # ------------------------------------------
-# TAB 5: ETF 持股 (🚀 終極去重邏輯)
+# TAB 5: ETF 持股
 # ------------------------------------------
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
@@ -806,7 +846,7 @@ with tab_etf:
                         plot_df = df_show.copy()
                         plot_df[name_col] = plot_df[name_col].astype(str).str.strip()
                         
-                        # 🚀 終極去重邏輯：先刪除舊的重複成分股 (保留最新的一筆)，再排序取前10，絕對不重複！
+                        # 🚀 終極去重邏輯：先留最新一筆、再排序取前10，絕對不重複！
                         plot_df = plot_df.drop_duplicates(subset=[name_col], keep='last')
                         
                         plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
@@ -889,6 +929,10 @@ with st.sidebar:
     
     st.subheader("🇹🇼 台股清單")
     if not df_tw.empty:
+        # 🚀 確保側邊欄表格有「策略」欄位
+        cols_tw = ['Ticker', '名稱', 'Shares', '出借', '類別', '策略']
+        df_tw = df_tw.reindex(columns=[c for c in cols_tw if c in df_tw.columns] + [c for c in df_tw.columns if c not in cols_tw])
+        
         edited_df_tw = st.data_editor(df_tw, num_rows="dynamic", use_container_width=True, key="tw_editor")
         if st.button("💾 儲存台股變更"):
             with st.spinner("正在寫入台股資料..."):
@@ -902,6 +946,10 @@ with st.sidebar:
 
     st.subheader("🇺🇸 美股清單")
     if not df_us.empty:
+        # 🚀 確保側邊欄表格有「策略」欄位
+        cols_us = ['Ticker', '名稱', 'Shares', '複委託', '類別', '策略']
+        df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in cols_us])
+        
         edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
         if st.button("💾 儲存美股變更"):
             with st.spinner("正在寫入美股資料..."):
