@@ -24,21 +24,20 @@ GCP_CREDENTIALS = os.getenv('GCP_CREDENTIALS')
 TECHNICAL_DB_URL = os.getenv('TECHNICAL_DB_URL')
 
 DEFAULT_TW = [
-    {'symbol': '2330.TW', 'name': '台積電'},
-    {'symbol': '0050.TW', 'name': '元大台灣50'},
-    {'symbol': '00878.TW', 'name': '國泰永續高股息'}
+    {'symbol': '2330.TW', 'name': '台積電', 'strategy': ''},
+    {'symbol': '0050.TW', 'name': '元大台灣50', 'strategy': ''}
 ]
 
 DEFAULT_US = [
-    {'symbol': 'AAPL', 'name': 'Apple'},
-    {'symbol': 'QQQ', 'name': 'Invesco QQQ'}
+    {'symbol': 'AAPL', 'name': 'Apple', 'strategy': ''},
+    {'symbol': 'QQQ', 'name': 'Invesco QQQ', 'strategy': ''}
 ]
 
 # ==========================================
 # 2. 輔助函式與資料讀寫
 # ==========================================
 def get_sheet_data(url, default_data, default_market):
-    if not url: return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market} for d in default_data]
+    if not url: return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market, 'strategy': d.get('strategy','')} for d in default_data]
     try:
         df = pd.read_csv(url)
         df.columns = [str(c).strip() for c in df.columns]
@@ -49,8 +48,11 @@ def get_sheet_data(url, default_data, default_market):
             cl = c.lower()
             if cl in ['ticker', 'symbol', '代號', '股票代號', '標的代號']: col_map[c] = 'symbol'
             elif cl in ['name', '名稱', '標的名稱', '股票名稱']: col_map[c] = 'name'
+            elif cl in ['策略', '短線', '屬性', '交易屬性']: col_map[c] = 'strategy'
             
         df = df.rename(columns=col_map)
+        if 'strategy' not in df.columns: df['strategy'] = ''
+        
         if 'symbol' in df.columns:
             df = df.dropna(subset=['symbol'])
             df = df[df['symbol'].astype(str).str.strip() != '']
@@ -61,12 +63,13 @@ def get_sheet_data(url, default_data, default_market):
                 records.append({
                     'symbol': str(row['symbol']).strip(),
                     'name': str(row['name']).strip(),
-                    'market': default_market
+                    'market': default_market,
+                    'strategy': str(row.get('strategy', '')).strip()
                 })
             return records
     except Exception as e:
         print(f"❌ 讀取清單失敗 {url}: {e}")
-    return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market} for d in default_data]
+    return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market, 'strategy': d.get('strategy','')} for d in default_data]
 
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
@@ -93,7 +96,7 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
     return status
 
 # ==========================================
-# 3. 核心技術分析引擎 (與 DashBoard 嚴格對齊)
+# 3. 核心技術分析引擎
 # ==========================================
 def get_fundamental_info(sym):
     try:
@@ -145,7 +148,7 @@ def get_stock_data(sym):
         except: time.sleep(1)
     return None
 
-def process_technical_analysis(sym, name, market):
+def process_technical_analysis(sym, name, market, strategy):
     try:
         df = get_stock_data(sym)
         if df is None or df.empty or len(df) < 2: return None
@@ -252,6 +255,28 @@ def process_technical_analysis(sym, name, market):
         tags = []
         bull_score = 0
         bear_score = 0
+
+        # 🚀 20日 / 50日 創高破低監控邏輯
+        if 'High' in df.columns and 'Low' in df.columns:
+            if len(df) >= 20:
+                h_20 = df['High'].tail(20).max()
+                l_20 = df['Low'].tail(20).min()
+                if df['High'].iloc[-1] == h_20:
+                    tags.append("🔥創20日高")
+                    bull_score += 1
+                elif df['Low'].iloc[-1] == l_20:
+                    tags.append("🩸破20日低")
+                    bear_score += 1
+                    
+            if len(df) >= 50:
+                h_50 = df['High'].tail(50).max()
+                l_50 = df['Low'].tail(50).min()
+                if df['High'].iloc[-1] == h_50:
+                    tags.append("🚀創50日高")
+                    bull_score += 2
+                elif df['Low'].iloc[-1] == l_50:
+                    tags.append("☠️破50日低")
+                    bear_score += 2
 
         has_w_macd_low_gold = w_macd_gold and (macd_w < 0)
         has_w_kd_low_gold = w_kd_gold and (k_w < 30)
@@ -366,7 +391,7 @@ def process_technical_analysis(sym, name, market):
             "週MACD": f"DIF:{macd_w:.2f}",
             "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
             "tags": tags, "bull_score": bull_score, "bear_score": bear_score, "action": action,
-            "_raw_pe": pe_val, "_sym": sym, "_name": name
+            "_raw_pe": pe_val, "_sym": sym, "_name": name, "策略": strategy  # 🚀 記錄策略屬性
         }
     except Exception as e:
         print(f"處理 {sym} 發生錯誤: {e}")
@@ -394,16 +419,13 @@ def update_technical_db(ta_results):
             
         df = pd.DataFrame(ta_results)
         
-        # 將陣列轉換為字串，避免寫入 Google Sheet 失敗
         if 'tags' in df.columns:
             df['tags'] = df['tags'].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
             
-        # 安全清洗：強制將所有浮點空值 (NaN) 轉為空字串，防止 JSON 解析報錯
         clean_df = df.fillna("").astype(str)
         data_to_write = [clean_df.columns.values.tolist()] + clean_df.values.tolist()
         
         worksheet.clear()
-        # 雙重相容寫入機制：先嘗試新版語法，若報錯則回退舊版語法
         try:
             worksheet.update(values=data_to_write, range_name="A1")
         except TypeError:
@@ -436,7 +458,6 @@ def format_items(items):
     res_str = ""
     for x in items:
         tags_str = ", ".join(x['tags'])
-        # 防禦 Telegram HTML 崩潰：移除股票名稱可能帶有的特殊符號
         safe_name = str(x['_name']).replace('<', '').replace('>', '').replace('&', 'and')
         res_str += f"• <b>{safe_name}</b> (PE:{x['P/E']})\n   └ <code>[{tags_str}]</code>\n"
     return res_str
@@ -449,26 +470,22 @@ def main():
     
     all_results = []
     
-    # 掃描台股
     for item in portfolio_tw:
         sym = get_yf_ticker_tw(item['symbol'])
-        res = process_technical_analysis(sym, item['name'], item['market'])
+        res = process_technical_analysis(sym, item['name'], item['market'], item['strategy'])
         if res:
             all_results.append(res)
             time.sleep(0.5)
 
-    # 掃描美股
     for item in portfolio_us:
         sym = item['symbol']
-        res = process_technical_analysis(sym, item['name'], item['market'])
+        res = process_technical_analysis(sym, item['name'], item['market'], item['strategy'])
         if res:
             all_results.append(res)
             time.sleep(0.5)
 
-    # 寫入資料庫
     update_technical_db(all_results)
 
-    # 發送 Telegram 通知
     for market in ['台股', '美股']:
         market_results = [x for x in all_results if x['市場'] == market]
         if not market_results: continue
@@ -480,7 +497,7 @@ def main():
         
         if not any([sb, shb, fs, wr]): continue
         
-        msg = f"📁 <b>【{market}】盤後技術判定</b>\n\n"
+        msg = f"📁 <b>【{market}】技術判定</b>\n\n"
         if sb: msg += f"🔥 <b>[🚀 強勢買進] Top 10</b>\n{format_items(sb)}\n\n"
         if shb: msg += f"📈 <b>[📈 短多轉折] Top 10</b>\n{format_items(shb)}\n\n"
         if fs: msg += f"🛑 <b>[🛑 強制賣出] Top 10</b>\n{format_items(fs)}\n\n"
