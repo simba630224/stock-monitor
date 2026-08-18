@@ -42,12 +42,16 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與安全快取模組
+# 1. 資料庫連線與安全快取模組 (已為您自動帶入網址)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
+# 🛑 您的 Technical_DB 試算表網址 (已帶入)
 TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
+
+# 🛑 您的 每日快報 試算表網址 (已自動轉換為 CSV 讀取格式)
+DAILY_REPORT_URL = "https://docs.google.com/spreadsheets/d/1StOQTEpoTNSLU140CnOeUO94m0dZ5imX4oH0wlqAQZw/export?format=csv&gid=1670790073"
+
 
 def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
@@ -154,6 +158,19 @@ def load_trading_journal():
     try:
         return conn.read(worksheet="Trading_Journal", ttl=600)
     except: return pd.DataFrame()
+
+# 🚀 嚴格防呆版的每日快報讀取
+@st.cache_data(ttl=900)
+def load_daily_report():
+    try:
+        df = pd.read_csv(DAILY_REPORT_URL)
+        df.columns = [str(c).strip() for c in df.columns] # 移除欄位隱形空白
+        df = df.dropna(how='all')
+        df = df.fillna("")
+        df = df.replace(['nan', 'NaN', 'None', '<NA>'], '')
+        return df
+    except Exception as e:
+        return pd.DataFrame()
 
 # ==========================================
 # 2. 輕量即時行情與線圖抓取
@@ -335,7 +352,11 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-tab1, tab2, tab_comp, tab3, tab_etf, tab4 = st.tabs(["💰 投資組合總覽", "📈 技術分析掃描", "🆚 標的比較", "🏆 績效與觀察總覽", "🧩 ETF持股", "📖 每日看盤心得"])
+# 🚀 加入「📰 每日快報」分頁
+tab1, tab2, tab_comp, tab3, tab_etf, tab_report, tab4 = st.tabs([
+    "💰 投資組合總覽", "📈 技術分析掃描", "🆚 標的比較", 
+    "🏆 績效與觀察總覽", "🧩 ETF持股", "📰 每日快報", "📖 每日看盤心得"
+])
 
 # ------------------------------------------
 # TAB 1: 投資組合總覽
@@ -506,14 +527,14 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 加上前端即時對映，0 秒同步「短線」)
+# TAB 2: 技術分析掃描 
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
         df_db = load_technical_db()
         
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 47 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 46 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
             for col in ['bull_score', 'bear_score']:
@@ -527,7 +548,7 @@ with tab2:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
 
-            # 🚀 關鍵零時差對映：拿最新 PORTFOLIO_TW/US 裡的策略，覆蓋 df_db 裡的舊策略
+            # 前端即時策略同步
             strategy_map = {}
             for item in PORTFOLIO_TW:
                 t = str(item.get('Ticker', '')).strip().upper()
@@ -548,7 +569,6 @@ with tab2:
                 return str(row.get('策略', '')).strip()
 
             df_db['策略'] = df_db.apply(resolve_strategy, axis=1)
-
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
 
             target_options = {}
@@ -579,7 +599,6 @@ with tab2:
             st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") 
             st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
 
-            # ⚡ 第一區塊：短線進出專區
             st.markdown("#### ⚡ 短線進出專區 (依據 20日/50日 創高破底與動能)")
             if not df_short.empty:
                 col_s1, col_s2 = st.columns(2)
@@ -594,7 +613,6 @@ with tab2:
 
             st.divider()
 
-            # 📈 第二區塊：一般波段與長期投資
             st.markdown("#### 📈 波段與長期投資 (Top 10)")
             col_sum1, col_sum2 = st.columns(2)
             
@@ -918,7 +936,68 @@ with tab_etf:
                         st.warning(f"圖表繪製發生錯誤：{ex}")
 
 # ------------------------------------------
-# TAB 6: 每日看盤心得
+# 🚀 新增 TAB: 每日快報
+# ------------------------------------------
+with tab_report:
+    st.subheader("📰 每日 Top 10 台美股投資快報")
+    st.caption("資料來源：自動化監測與公開資訊彙整")
+    
+    with st.spinner("載入快報資料中..."):
+        df_report = load_daily_report()
+        
+        if not df_report.empty:
+            # 確保必要欄位存在，避免 DataFrame 渲染死機
+            required_cols = ['執行日期', '市場', '排名', '代號', '公司', '收盤價', '日變動%', '技術訊號', '公開研究／新聞', '來源連結', '50字摘要']
+            for c in required_cols:
+                if c not in df_report.columns:
+                    df_report[c] = ""
+
+            # 建立篩選器 (過濾掉空值)
+            valid_dates = [d for d in df_report['執行日期'].unique() if str(d).strip() != '']
+            dates = sorted(valid_dates, reverse=True)
+            markets = [m for m in df_report['市場'].unique() if str(m).strip() != '']
+            
+            if dates:
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    sel_date = st.selectbox("選擇日期", options=dates)
+                with col_f2:
+                    sel_market = st.selectbox("選擇市場", options=["全部"] + markets)
+                    
+                # 執行篩選
+                filtered_df = df_report[df_report['執行日期'] == sel_date]
+                if sel_market != "全部":
+                    filtered_df = filtered_df[filtered_df['市場'] == sel_market]
+                
+                # 整理顯示順序與欄位
+                disp_df = filtered_df[['市場', '排名', '代號', '公司', '收盤價', '日變動%', '技術訊號', '公開研究／新聞', '50字摘要', '來源連結']].copy()
+                
+                # 🚀 終極防禦：強制數值轉型，避免字串混入 NumberColumn 導致當機
+                disp_df['收盤價'] = pd.to_numeric(disp_df['收盤價'], errors='coerce')
+                disp_df['日變動%'] = pd.to_numeric(disp_df['日變動%'], errors='coerce')
+                disp_df['排名'] = pd.to_numeric(disp_df['排名'], errors='coerce')
+                
+                st.dataframe(
+                    disp_df,
+                    use_container_width=True,
+                    column_config={
+                        "來源連結": st.column_config.LinkColumn("新聞連結", display_text="🔗 點擊閱讀"),
+                        "日變動%": st.column_config.NumberColumn("日變動(%)", format="%+.2f"),
+                        "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                        "排名": st.column_config.NumberColumn("排名", format="%d"),
+                        "50字摘要": st.column_config.TextColumn("新聞摘要", width="large"),
+                        "公開研究／新聞": st.column_config.TextColumn("標題/出處", width="medium"),
+                    },
+                    hide_index=True,
+                    height=600
+                )
+            else:
+                st.info("目前快報資料庫中無日期紀錄。")
+        else:
+            st.warning("無法載入每日快報資料，請確認網址正確或共用權限已設為「知道連結的任何人皆可檢視」。")
+
+# ------------------------------------------
+# TAB 7: 每日看盤心得
 # ------------------------------------------
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
@@ -973,9 +1052,9 @@ with tab4:
                     st.write(row['Notes'])
 
 # ------------------------------------------
-# 側邊欄：持股管理 (🚀 結合 Enter 防呆 + 清洗保護)
+# 側邊欄：持股管理
 # ------------------------------------------
-st.sidebar.warning("⚠️ 若在 Google Sheets 外部修改，請先按上方 **[🔄 強制刷新報價]**。")
+st.sidebar.warning("⚠️ 若您剛在 Google Sheets 外部修改過資料，請先點擊上方 **[🔄 強制刷新報價]**。")
 st.sidebar.info("💡 **編輯提示**：修改完畢後，請先按一下【Enter】鍵或點擊表格空白處，再點擊儲存按鈕！")
 
 with st.sidebar:
@@ -997,7 +1076,7 @@ with st.sidebar:
                     clean_tw = clean_tw.fillna("") 
                     
                     conn.update(worksheet="TW_Portfolio", data=clean_tw)
-                    st.cache_data.clear() # 清除快取以加載最新資料
+                    st.cache_data.clear()
                     st.success("✅ 台股更新成功！")
                     time.sleep(1)
                     st.rerun()
@@ -1021,7 +1100,7 @@ with st.sidebar:
                     clean_us = clean_us.fillna("")
                     
                     conn.update(worksheet="US_Portfolio", data=clean_us)
-                    st.cache_data.clear() # 清除快取以加載最新資料
+                    st.cache_data.clear()
                     st.success("✅ 美股更新成功！")
                     time.sleep(1)
                     st.rerun()
