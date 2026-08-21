@@ -42,15 +42,18 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與安全快取模組 (已為您自動帶入網址)
+# 1. 資料庫連線與安全快取模組
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 🛑 您的 Technical_DB 試算表網址 (已帶入)
+# 🛑 Technical_DB 網址
 TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
 
-# 🛑 您的 每日快報 試算表網址 (已自動轉換為 CSV 讀取格式)
+# 🛑 每日快報 資料庫網址
 DAILY_REPORT_URL = "https://docs.google.com/spreadsheets/d/1StOQTEpoTNSLU140CnOeUO94m0dZ5imX4oH0wlqAQZw/export?format=csv&gid=1670790073"
+
+# 🛑 ETF 持股 資料庫網址
+ETF_DB_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/edit"
 
 
 def fetch_and_clean_portfolio(worksheet_name, default_category):
@@ -159,17 +162,47 @@ def load_trading_journal():
         return conn.read(worksheet="Trading_Journal", ttl=600)
     except: return pd.DataFrame()
 
-# 🚀 嚴格防呆版的每日快報讀取
 @st.cache_data(ttl=900)
 def load_daily_report():
     try:
-        df = pd.read_csv(DAILY_REPORT_URL)
-        df.columns = [str(c).strip() for c in df.columns] # 移除欄位隱形空白
-        df = df.dropna(how='all')
-        df = df.fillna("")
+        now = datetime.now()
+        ws_current = f"Daily Report {now.strftime('%Y-%m')}"
+        ws_prev = f"Daily Report {(now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y-%m')}"
+        
+        df_list = []
+        for ws in [ws_current, ws_prev]:
+            try:
+                temp_df = conn.read(spreadsheet=DAILY_REPORT_URL, worksheet=ws, ttl=900)
+                if temp_df is not None and not temp_df.empty:
+                    df_list.append(temp_df)
+            except: pass
+                
+        if not df_list: return pd.DataFrame()
+            
+        df = pd.concat(df_list, ignore_index=True)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(how='all').fillna("")
         df = df.replace(['nan', 'NaN', 'None', '<NA>'], '')
         return df
     except Exception as e:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def load_etf_holdings():
+    try:
+        now = datetime.now()
+        ws_current = now.strftime('%Y-%m')
+        ws_prev = (now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y-%m')
+        
+        for ws in [ws_current, ws_prev]:
+            try:
+                df = conn.read(spreadsheet=ETF_DB_URL, worksheet=ws, ttl=3600)
+                if df is not None and not df.empty:
+                    df.columns = [str(c).strip() for c in df.columns]
+                    return df.dropna(how='all')
+            except: pass
+        return pd.DataFrame()
+    except Exception:
         return pd.DataFrame()
 
 # ==========================================
@@ -352,7 +385,6 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 🚀 加入「📰 每日快報」分頁
 tab1, tab2, tab_comp, tab3, tab_etf, tab_report, tab4 = st.tabs([
     "💰 投資組合總覽", "📈 技術分析掃描", "🆚 標的比較", 
     "🏆 績效與觀察總覽", "🧩 ETF持股", "📰 每日快報", "📖 每日看盤心得"
@@ -527,16 +559,17 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 
+# TAB 2: 技術分析掃描 (🚀 嚴格多空門檻重構版)
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
         df_db = load_technical_db()
         
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 46 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 47 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
+            # 安全轉型與防呆
             for col in ['bull_score', 'bear_score']:
                 if col not in df_db.columns: df_db[col] = 0
                 df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
@@ -548,14 +581,23 @@ with tab2:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
 
-            # 前端即時策略同步
+            # 取得 52 週位階數值以供長線築底判定
+            def get_52w_pos(x):
+                try:
+                    return float(str(x).replace('%', '').strip())
+                except:
+                    return 50.0
+            if '52週位置' in df_db.columns:
+                df_db['pos_52w_val'] = df_db['52週位置'].apply(get_52w_pos)
+            else:
+                df_db['pos_52w_val'] = 50.0
+
+            # 前端即時策略同步 (讓側邊欄剛改好的策略秒速生效)
             strategy_map = {}
             for item in PORTFOLIO_TW:
                 t = str(item.get('Ticker', '')).strip().upper()
                 s = str(item.get('策略', '')).strip()
-                if t:
-                    strategy_map[t] = s
-                    strategy_map[get_yf_ticker_tw(t)] = s
+                if t: strategy_map[t] = s; strategy_map[get_yf_ticker_tw(t)] = s
             for item in PORTFOLIO_US:
                 t = str(item.get('Ticker', '')).strip().upper()
                 s = str(item.get('策略', '')).strip()
@@ -578,69 +620,102 @@ with tab2:
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
 
-            def format_db_items(sub_df):
-                if sub_df.empty: return "無"
+            # 🚀 格式化輸出函式 (加入多空分數直觀顯示)
+            def format_strict_items(sub_df):
+                if sub_df.empty: return "> 👻 目前無符合嚴格條件標的，皆已過濾隱藏。"
                 res = []
                 for _, r in sub_df.iterrows():
                     pe_val = r.get('_raw_pe')
                     try:
-                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
+                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "PE:無"
                     except:
-                        pe_str = "無PE"
+                        pe_str = "PE:無"
+                    
+                    bull_s = int(r.get('bull_score', 0))
+                    bear_s = int(r.get('bear_score', 0))
                     tags_str = r.get('tags', '')
                     name_disp = r.get('顯示名稱', '未知')
-                    res.append(f"• **{name_disp} ({pe_str})** `[{tags_str}]`")
+                    
+                    res.append(f"• **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str}) `[{tags_str}]`")
                 return "\n".join(res)
 
+            # 🧮 準備分類條件
+            df_db['tags_str'] = df_db['tags'].astype(str)
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
-            df_short = df_db[is_short_term]
-            df_normal = df_db[~is_short_term]
+            df_short = df_db[is_short_term].copy()
+            df_normal = df_db[~is_short_term].copy()
 
-            st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") 
-            st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
+            # ----------------------------------------------------
+            # ⚡ 短線進出專區分類邏輯
+            # ----------------------------------------------------
+            short_bull_cond = df_short['tags_str'].str.contains('創20日收盤高|創50日收盤高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
+            short_bear_cond = df_short['tags_str'].str.contains('破20日收盤低|破50日收盤低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
+            short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
 
-            st.markdown("#### ⚡ 短線進出專區 (依據 20日/50日 創高破底與動能)")
-            if not df_short.empty:
-                col_s1, col_s2 = st.columns(2)
-                with col_s1:
-                    bullish_short = df_short[df_short['bull_score'] >= df_short['bear_score']].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True])
-                    st.success(f"**🚀 短線偏多 / 創高動能**\n\n{format_db_items(bullish_short)}")
-                with col_s2:
-                    bearish_short = df_short[df_short['bull_score'] < df_short['bear_score']].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True])
-                    st.error(f"**🩸 短線偏空 / 破底風險**\n\n{format_db_items(bearish_short)}")
-            else:
-                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』，系統將自動在此區進行 20日/50日 創高破低監控。")
+            df_short_bull = df_short[short_bull_cond].copy()
+            df_short_bear = df_short[short_bear_cond].copy()
+            df_short_cons = df_short[short_cons_cond].copy()
 
-            st.divider()
-
-            st.markdown("#### 📈 波段與長期投資 (Top 10)")
-            col_sum1, col_sum2 = st.columns(2)
+            df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
+            df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
             
-            bullish_strong = df_normal[df_normal['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bullish_daily = df_normal[df_normal['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_strong = df_normal[df_normal['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_daily = df_normal[df_normal['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
 
-            with col_sum1:
-                st.success(f"**☀️ 多方強勢區**\n\n"
-                           f"🔥 **[🚀 強勢買進] Top 10**：\n{format_db_items(bullish_strong)}\n\n"
-                           f"📈 **[📈 短多轉折] Top 10**：\n{format_db_items(bullish_daily)}")
-            with col_sum2:
-                st.error(f"**⛈️ 空方風險區**\n\n"
-                         f"🛑 **[🛑 強制賣出] Top 10**：\n{format_db_items(bearish_strong)}\n\n"
-                         f"⚠️ **[⚠️ 弱勢減碼] Top 10**：\n{format_db_items(bearish_daily)}")
+            # ----------------------------------------------------
+            # 📈 波段與長期投資分類邏輯
+            # ----------------------------------------------------
+            long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
+            long_bear_cond = df_normal['tags_str'].str.contains('破52週收盤低', regex=True) | ((df_normal['bear_score'] >= 3) & df_normal['tags_str'].str.contains('週KD高檔死叉|週MACD零上死叉', regex=True)) | ((df_normal['bear_score'] >= 3) & (df_normal['bull_score'] == 0))
+            long_base_cond = (~long_bull_cond) & (~long_bear_cond) & (~df_normal['tags_str'].str.contains('創52週|破52週', regex=True)) & (df_normal['pos_52w_val'] <= 30) & (abs(df_normal['bull_score'] - df_normal['bear_score']) <= 1)
+
+            df_long_bull = df_normal[long_bull_cond].copy()
+            df_long_bear = df_normal[long_bear_cond].copy()
+            df_long_base = df_normal[long_base_cond].copy()
+
+            df_long_bull['sort_score'] = df_long_bull['bull_score'] - df_long_bull['bear_score']
+            df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bear['bull_score']
+            
+            df_long_bull = df_long_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_long_bear = df_long_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_long_base = df_long_base.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+
+
+            # ==================================
+            # 渲染區塊
+            # ==================================
+            st.markdown("### 📊 技術亮點與警示摘要") 
+            st.caption("嚴格門檻篩選機制：未達絕對特徵之標的將自動過濾隱藏，降低雜訊干擾。排序依據為多空淨得分。")
+
+            # ⚡ 短線進出專區
+            st.markdown("#### ⚡ 短線進出專區 (嚴格過濾版)")
+            if not df_short.empty:
+                st.success(f"**[🚀 偏多 / 創高動能]**\n\n{format_strict_items(df_short_bull)}")
+                st.error(f"**[🩸 偏空 / 破底風險]**\n\n{format_strict_items(df_short_bear)}")
+                st.info(f"**[⚖️ 盤整 / 壓縮區]**\n\n{format_strict_items(df_short_cons)}")
+            else:
+                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』以啟用此區。")
 
             st.divider()
+
+            # 📈 波段與長期投資
+            st.markdown("#### 📈 波段與長期投資 (嚴格篩選 Top 10)")
+            st.success(f"**[🚀 長多波段 / 攻擊轉折]**\n\n{format_strict_items(df_long_bull)}")
+            st.error(f"**[🛑 波段轉弱 / 長期風險]**\n\n{format_strict_items(df_long_bear)}")
+            st.info(f"**[⚖️ 長線築底 / 壓縮沉澱]**\n\n{format_strict_items(df_long_base)}")
+
+            st.divider()
+            
+            # 原有的完整清單表格
             st.markdown("### 📋 完整技術分析清單")
             with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
                 st.markdown("""
-                #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
+                #### 綜合動作評級 (供參考)
                 * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
-                * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者，如日線金叉或分數雖高但欠缺週低檔金叉)。
+                * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
                 * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
-                * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者，如日線死叉或分數雖高但欠缺週高檔死叉)。
-                * **[⚔️ 多空交戰]**：同時觸發多空條件，依分數較高者顯示偏強或偏弱。
-                * **[➖ 趨勢延續]**：無明顯多空觸發訊號。
+                * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者)。
                 """)
 
             display_cols = ["市場", "顯示名稱", "策略", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
@@ -773,14 +848,8 @@ with tab_comp:
             st.divider()
             st.markdown("### 🧩 比較標的之 Top 10 核心持股")
             
-            csv_url_comp = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                resp = requests.get(csv_url_comp, headers=headers, timeout=10)
-                resp.raise_for_status()
-                df_etf_comp_db = pd.read_csv(io.StringIO(resp.text)).dropna(how='all')
-            except Exception:
-                df_etf_comp_db = pd.DataFrame()
+            with st.spinner("讀取 ETF 資料庫中..."):
+                df_etf_comp_db = load_etf_holdings()
 
             if not df_etf_comp_db.empty and len(df_etf_comp_db.columns) >= 3:
                 etf_c = df_etf_comp_db.columns[0]
@@ -875,22 +944,11 @@ with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
     st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
     
-    csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(csv_url, headers=headers, timeout=15)
-        response.raise_for_status() 
-        df_etf_db = pd.read_csv(io.StringIO(response.text)).dropna(how='all')
-        read_success = True
-    except Exception as e:
-        df_etf_db = pd.DataFrame()
-        read_success = False
-        err_msg = str(e)
+    with st.spinner("載入 ETF 資料庫中..."):
+        df_etf_db = load_etf_holdings()
 
-    if not read_success:
-        st.error(f"❌ **無法讀取外部 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
-    elif df_etf_db is None or df_etf_db.empty:
-        st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。")
+    if df_etf_db.empty:
+        st.warning("⚠️ 成功連線，但系統讀取到的資料是空的，或是無法讀取。")
     else:
         etf_col = df_etf_db.columns[0]
         name_col = df_etf_db.columns[1]
@@ -936,7 +994,7 @@ with tab_etf:
                         st.warning(f"圖表繪製發生錯誤：{ex}")
 
 # ------------------------------------------
-# 🚀 新增 TAB: 每日快報
+# TAB 6: 每日快報
 # ------------------------------------------
 with tab_report:
     st.subheader("📰 每日 Top 10 台美股投資快報")
@@ -946,13 +1004,11 @@ with tab_report:
         df_report = load_daily_report()
         
         if not df_report.empty:
-            # 確保必要欄位存在，避免 DataFrame 渲染死機
             required_cols = ['執行日期', '市場', '排名', '代號', '公司', '收盤價', '日變動%', '技術訊號', '公開研究／新聞', '來源連結', '50字摘要']
             for c in required_cols:
                 if c not in df_report.columns:
                     df_report[c] = ""
 
-            # 建立篩選器 (過濾掉空值)
             valid_dates = [d for d in df_report['執行日期'].unique() if str(d).strip() != '']
             dates = sorted(valid_dates, reverse=True)
             markets = [m for m in df_report['市場'].unique() if str(m).strip() != '']
@@ -964,18 +1020,17 @@ with tab_report:
                 with col_f2:
                     sel_market = st.selectbox("選擇市場", options=["全部"] + markets)
                     
-                # 執行篩選
                 filtered_df = df_report[df_report['執行日期'] == sel_date]
                 if sel_market != "全部":
                     filtered_df = filtered_df[filtered_df['市場'] == sel_market]
                 
-                # 整理顯示順序與欄位
                 disp_df = filtered_df[['市場', '排名', '代號', '公司', '收盤價', '日變動%', '技術訊號', '公開研究／新聞', '50字摘要', '來源連結']].copy()
                 
-                # 🚀 終極防禦：強制數值轉型，避免字串混入 NumberColumn 導致當機
                 disp_df['收盤價'] = pd.to_numeric(disp_df['收盤價'], errors='coerce')
                 disp_df['日變動%'] = pd.to_numeric(disp_df['日變動%'], errors='coerce')
                 disp_df['排名'] = pd.to_numeric(disp_df['排名'], errors='coerce')
+                
+                disp_df['來源連結'] = disp_df['來源連結'].apply(lambda x: x if str(x).startswith('http') else None)
                 
                 st.dataframe(
                     disp_df,
