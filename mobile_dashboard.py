@@ -42,12 +42,15 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與安全快取模組 (🚀 解決打字清空與覆蓋問題)
+# 1. 資料庫連線與安全快取模組 (🚀 網址已全數自動帶入)
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
+# 🛑 Technical_DB 網址
 TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit?gid=0#gid=0" 
+
+# 🛑 ETF 持股 資料庫網址
+ETF_DB_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/edit"
 
 def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
@@ -76,7 +79,6 @@ def fetch_and_clean_portfolio(worksheet_name, default_category):
         if 'Ticker' in df.columns:
             df['Ticker'] = df['Ticker'].astype(str).str.strip()
             df['Ticker'] = df['Ticker'].str.replace(r'\.0$', '', regex=True)
-            # 自動補零防禦 (例如輸入 50 自動變成 0050)
             if default_category == '台股':
                 df['Ticker'] = df['Ticker'].apply(lambda x: x.zfill(4) if x.isdigit() and len(x) < 4 else x)
             df = df[~df['Ticker'].str.lower().isin(['nan', 'none', 'null', '<na>', ''])]
@@ -106,20 +108,19 @@ def fetch_and_clean_portfolio(worksheet_name, default_category):
     except Exception:
         return pd.DataFrame()
 
-@st.cache_data(ttl=600)
-def get_tw_portfolio():
-    df = fetch_and_clean_portfolio("TW_Portfolio", "台股")
-    if df.empty: df = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別", "策略"])
-    return df
+# Session State 綁定，保證編輯不斷線
+if "tw_portfolio" not in st.session_state:
+    st.session_state.tw_portfolio = fetch_and_clean_portfolio("TW_Portfolio", "台股")
+    if st.session_state.tw_portfolio.empty:
+        st.session_state.tw_portfolio = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "出借", "類別", "策略"])
 
-@st.cache_data(ttl=600)
-def get_us_portfolio():
-    df = fetch_and_clean_portfolio("US_Portfolio", "美股")
-    if df.empty: df = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別", "策略"])
-    return df
+if "us_portfolio" not in st.session_state:
+    st.session_state.us_portfolio = fetch_and_clean_portfolio("US_Portfolio", "美股")
+    if st.session_state.us_portfolio.empty:
+        st.session_state.us_portfolio = pd.DataFrame(columns=["Ticker", "名稱", "Shares", "複委託", "類別", "策略"])
 
-df_tw = get_tw_portfolio()
-df_us = get_us_portfolio()
+df_tw = st.session_state.tw_portfolio
+df_us = st.session_state.us_portfolio
 
 PORTFOLIO_TW = df_tw.to_dict('records') if not df_tw.empty else []
 PORTFOLIO_US = df_us.to_dict('records') if not df_us.empty else []
@@ -155,6 +156,25 @@ def load_trading_journal():
     try:
         return conn.read(worksheet="Trading_Journal", ttl=600)
     except: return pd.DataFrame()
+
+# 🚀 跨月防禦：動態讀取 ETF 持股庫
+@st.cache_data(ttl=3600)
+def load_etf_holdings():
+    try:
+        now = datetime.now()
+        ws_current = now.strftime('%Y-%m')
+        ws_prev = (now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y-%m')
+        
+        for ws in [ws_current, ws_prev]:
+            try:
+                df = conn.read(spreadsheet=ETF_DB_URL, worksheet=ws, ttl=3600)
+                if df is not None and not df.empty:
+                    df.columns = [str(c).strip() for c in df.columns]
+                    return df.dropna(how='all')
+            except: pass
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 # ==========================================
 # 2. 輕量即時行情與線圖抓取
@@ -332,6 +352,8 @@ col_l, col_r = st.columns([1, 2])
 with col_l:
     if st.button("🔄 刷新"):
         st.cache_data.clear()
+        if "tw_portfolio" in st.session_state: del st.session_state["tw_portfolio"]
+        if "us_portfolio" in st.session_state: del st.session_state["us_portfolio"]
         st.rerun()
 with col_r:
     st.caption(f"更新:{datetime.now().strftime('%H:%M')}")
@@ -429,7 +451,6 @@ with tab1:
                             try:
                                 df_history = df_history.fillna("")
                                 conn.update(worksheet="Value_History", data=df_history)
-                                st.cache_data.clear()
                             except: pass
                     else:
                         new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
@@ -437,7 +458,6 @@ with tab1:
                         try:
                             df_history = df_history.fillna("")
                             conn.update(worksheet="Value_History", data=df_history)
-                            st.cache_data.clear()
                         except: pass
                     df_history_to_display = df_history
                 else: history_error = True
@@ -486,13 +506,13 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB HL: 技術亮點摘要 
+# TAB HL: 技術亮點摘要 (🚀 嚴格多空門檻重構版)
 # ------------------------------------------
 with tab_hl:
     df_db = load_technical_db()
     
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 第 46 行已填入 `TECHNICAL_DB_URL`\n2. GitHub Actions 已寫入資料")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB`。")
     else:
         try:
             for col in ['bull_score', 'bear_score']:
@@ -505,62 +525,115 @@ with tab_hl:
             for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
+                
+            def get_52w_pos(x):
+                try: return float(str(x).replace('%', '').strip())
+                except: return 50.0
+            if '52週位置' in df_db.columns:
+                df_db['pos_52w_val'] = df_db['52週位置'].apply(get_52w_pos)
+            else: df_db['pos_52w_val'] = 50.0
 
+            # 手機版前端即時策略同步
+            strategy_map = {}
+            for item in PORTFOLIO_TW:
+                t = str(item.get('Ticker', '')).strip().upper()
+                s = str(item.get('策略', '')).strip()
+                if t: strategy_map[t] = s; strategy_map[get_yf_ticker_tw(t)] = s
+            for item in PORTFOLIO_US:
+                t = str(item.get('Ticker', '')).strip().upper()
+                s = str(item.get('策略', '')).strip()
+                if t: strategy_map[t] = s
+
+            def resolve_strategy(row):
+                sym = str(row.get('_sym', '')).strip().upper()
+                clean_sym = sym.split('.')[0]
+                if sym in strategy_map and strategy_map[sym]: return strategy_map[sym]
+                if clean_sym in strategy_map and strategy_map[clean_sym]: return strategy_map[clean_sym]
+                return str(row.get('策略', '')).strip()
+
+            df_db['策略'] = df_db.apply(resolve_strategy, axis=1)
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
 
             target_options = {}
             for _, row in df_db.iterrows():
                 sym = str(row.get('_sym', '')).strip()
                 disp_name = row.get('顯示名稱', '')
-                if sym and sym.lower() not in ['nan', 'none', '']:
-                    target_options[disp_name] = sym
+                if sym and sym.lower() not in ['nan', 'none', '']: target_options[disp_name] = sym
 
-            def format_mobile_items(sub_df):
-                if sub_df.empty: return "> 目前無符合條件標的"
+            # 🚀 格式化輸出函式 (手機排版)
+            def format_strict_mobile_items(sub_df):
+                if sub_df.empty: return "> 👻 目前無符合嚴格條件標的，皆已過濾隱藏。"
                 res = ""
                 for _, r in sub_df.iterrows():
-                    pe_val = r['_raw_pe']
-                    try:
-                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
-                    except:
-                        pe_str = "無PE"
-                    tags_str = r['tags']
-                    name_disp = r['顯示名稱']
-                    res += f"- **{name_disp}** ({pe_str})\n  - `[{tags_str}]`\n"
+                    pe_val = r.get('_raw_pe')
+                    try: pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "PE:無"
+                    except: pe_str = "PE:無"
+                    
+                    bull_s = int(r.get('bull_score', 0))
+                    bear_s = int(r.get('bear_score', 0))
+                    tags_str = r.get('tags', '')
+                    name_disp = r.get('顯示名稱', '未知')
+                    
+                    res += f"- **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str})\n  - `[{tags_str}]`\n"
                 return res
 
+            df_db['tags_str'] = df_db['tags'].astype(str)
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
-            df_short = df_db[is_short_term]
-            df_normal = df_db[~is_short_term]
+            df_short = df_db[is_short_term].copy()
+            df_normal = df_db[~is_short_term].copy()
 
-            st.markdown("### 📊 技術亮點與警示摘要")
+            # ⚡ 短線區邏輯
+            short_bull_cond = df_short['tags_str'].str.contains('創20日收盤高|創50日收盤高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
+            short_bear_cond = df_short['tags_str'].str.contains('破20日收盤低|破50日收盤低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
+            short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
+
+            df_short_bull = df_short[short_bull_cond].copy()
+            df_short_bear = df_short[short_bear_cond].copy()
+            df_short_cons = df_short[short_cons_cond].copy()
+
+            df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
+            df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
             
-            # ⚡ 第一區塊：短線專區
-            st.markdown("#### ⚡ 短線進出專區 (創高破底)")
+            df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+
+            # 📈 長線區邏輯
+            long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
+            long_bear_cond = df_normal['tags_str'].str.contains('破52週收盤低', regex=True) | ((df_normal['bear_score'] >= 3) & df_normal['tags_str'].str.contains('週KD高檔死叉|週MACD零上死叉', regex=True)) | ((df_normal['bear_score'] >= 3) & (df_normal['bull_score'] == 0))
+            long_base_cond = (~long_bull_cond) & (~long_bear_cond) & (~df_normal['tags_str'].str.contains('創52週|破52週', regex=True)) & (df_normal['pos_52w_val'] <= 30) & (abs(df_normal['bull_score'] - df_normal['bear_score']) <= 1)
+
+            df_long_bull = df_normal[long_bull_cond].copy()
+            df_long_bear = df_normal[long_bear_cond].copy()
+            df_long_base = df_normal[long_base_cond].copy()
+
+            df_long_bull['sort_score'] = df_long_bull['bull_score'] - df_long_bull['bear_score']
+            df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bear['bull_score']
+            
+            df_long_bull = df_long_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_long_bear = df_long_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            df_long_base = df_long_base.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+
+            # 渲染區塊
+            st.markdown("### 📊 技術摘要")
+            
+            st.markdown("#### ⚡ 短線進出 (嚴格版)")
             if not df_short.empty:
-                bullish_short = df_short[df_short['bull_score'] >= df_short['bear_score']].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True])
-                bearish_short = df_short[df_short['bull_score'] < df_short['bear_score']].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True])
-                
                 with st.container():
-                    st.success(f"**🚀 短線偏多 / 創高動能**\n\n{format_mobile_items(bullish_short)}")
-                    st.error(f"**🩸 短線偏空 / 破底風險**\n\n{format_mobile_items(bearish_short)}")
+                    st.success(f"**🚀 偏多 / 創高動能**\n\n{format_strict_mobile_items(df_short_bull)}")
+                    st.error(f"**🩸 偏空 / 破底風險**\n\n{format_strict_mobile_items(df_short_bear)}")
+                    st.info(f"**⚖️ 盤整 / 壓縮區**\n\n{format_strict_mobile_items(df_short_cons)}")
             else:
-                st.info("尚無短線標的。請於側邊欄「策略」標註『短線』啟用此區。")
+                st.info("尚無短線標的。請於側邊欄「策略」標註『短線』。")
 
             st.divider()
 
-            # 📈 第二區塊：波段與長線
-            st.markdown("#### 📈 波段與長期投資 (Top 10)")
-            bullish_strong = df_normal[df_normal['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bullish_daily = df_normal[df_normal['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_strong = df_normal[df_normal['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_daily = df_normal[df_normal['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
-
+            st.markdown("#### 📈 波段與長期 (Top 10)")
             with st.container():
-                st.success(f"🔥 **[🚀 強勢買進]**\n\n{format_mobile_items(bullish_strong)}")
-                st.info(f"📈 **[📈 短多轉折]**\n\n{format_mobile_items(bullish_daily)}")
-                st.error(f"🛑 **[🛑 強制賣出]**\n\n{format_mobile_items(bearish_strong)}")
-                st.warning(f"⚠️ **[⚠️ 弱勢減碼]**\n\n{format_mobile_items(bearish_daily)}")
+                st.success(f"🔥 **長多波段 / 攻擊轉折**\n\n{format_strict_mobile_items(df_long_bull)}")
+                st.error(f"🛑 **波段轉弱 / 長期風險**\n\n{format_strict_mobile_items(df_long_bear)}")
+                st.info(f"⚖️ **長線築底 / 壓縮沉澱**\n\n{format_strict_mobile_items(df_long_base)}")
+                
         except Exception as e:
             st.error("摘要產生錯誤，請檢查資料庫。")
 
@@ -620,13 +693,8 @@ with tab_comp:
 
             st.divider()
             st.markdown("### 🧩 Top 10 核心持股比對")
-            csv_url_comp = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                resp = requests.get(csv_url_comp, headers=headers, timeout=10)
-                resp.raise_for_status()
-                df_etf_comp_db = pd.read_csv(io.StringIO(resp.text)).dropna(how='all')
-            except Exception: df_etf_comp_db = pd.DataFrame()
+            with st.spinner("讀取 ETF 資料庫中..."):
+                df_etf_comp_db = load_etf_holdings()
 
             if not df_etf_comp_db.empty and len(df_etf_comp_db.columns) >= 3:
                 etf_c = df_etf_comp_db.columns[0]
@@ -647,11 +715,11 @@ with tab_comp:
                         sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
                         sub_df = sub_df.dropna(subset=[weight_c])
                         
-                        sub_df = sub_df.sort_values(by=weight_c, ascending=False).drop_duplicates(subset=[name_c], keep='first').head(10)
+                        sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last').sort_values(by=weight_c, ascending=False).head(10)
                         
                         if not sub_df.empty:
                             top10_sum = sub_df[weight_c].sum()
-                            st.caption(f"**Top 10 權重合計：{top10_sum:.2f}%**")
+                            st.caption(f"**Top 10 合計：{top10_sum:.2f}%**")
                             disp_df = sub_df[[name_c, weight_c]].copy()
                             disp_df.columns = ["成分股", "權重(%)"]
                             disp_df["權重(%)"] = disp_df["權重(%)"].apply(lambda x: f"{x:.2f}%")
@@ -666,7 +734,7 @@ with tab_comp:
 # TAB 4: 技術清單與線圖
 # ------------------------------------------
 with tab2:
-    with st.expander("💡 狀態警示規則說明", expanded=False):
+    with st.expander("💡 狀態警示規則說明 (參考用)", expanded=False):
         st.markdown("""
         * **[🚀 強勢買進]**：多方分數 ≥ 3 且具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
         * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
@@ -769,21 +837,10 @@ with tab3:
 with tab_etf:
     st.markdown("### 🧩 ETF Top 10 成分股")
     
-    csv_url = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(csv_url, headers=headers, timeout=15)
-        response.raise_for_status() 
-        df_etf_db = pd.read_csv(io.StringIO(response.text)).dropna(how='all')
-        read_success = True
-    except Exception as e:
-        df_etf_db = pd.DataFrame()
-        read_success = False
-        err_msg = str(e)
+    with st.spinner("載入 ETF 資料庫中..."):
+        df_etf_db = load_etf_holdings()
 
-    if not read_success:
-        st.error(f"❌ 無法讀取 ETF 試算表！\n錯誤：`{err_msg}`")
-    elif df_etf_db is None or df_etf_db.empty:
+    if df_etf_db.empty:
         st.warning("⚠️ 成功連線，但資料是空的。")
     else:
         etf_col = df_etf_db.columns[0]
