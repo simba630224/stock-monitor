@@ -60,11 +60,20 @@ def get_sheet_data(url, default_data, default_market):
             
             records = []
             for _, row in df.iterrows():
+                # 防呆：清洗 nan 字串
+                sym = str(row['symbol']).strip()
+                name = str(row['name']).strip()
+                strat = str(row.get('strategy', '')).strip()
+                
+                if sym.lower() in ['nan', 'none', 'null', '']: continue
+                if name.lower() in ['nan', 'none', 'null', '']: name = ""
+                if strat.lower() in ['nan', 'none', 'null', '']: strat = ""
+                
                 records.append({
-                    'symbol': str(row['symbol']).strip(),
-                    'name': str(row['name']).strip(),
+                    'symbol': sym,
+                    'name': name,
                     'market': default_market,
-                    'strategy': str(row.get('strategy', '')).strip()
+                    'strategy': strat
                 })
             return records
     except Exception as e:
@@ -96,7 +105,7 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
     return status
 
 # ==========================================
-# 3. 核心技術分析引擎
+# 3. 核心技術分析引擎 (🚀 導入嚴格收盤價判定邏輯)
 # ==========================================
 def get_fundamental_info(sym):
     try:
@@ -256,27 +265,37 @@ def process_technical_analysis(sym, name, market, strategy):
         bull_score = 0
         bear_score = 0
 
-        # 🚀 20日 / 50日 創高破低監控邏輯 (短線進出強訊號)
-        if 'High' in df.columns and 'Low' in df.columns:
+        # 🚀 嚴格版：全面改用「收盤價 (Close)」判斷創高與破底
+        if 'Close' in df.columns:
             if len(df) >= 20:
-                h_20 = df['High'].tail(20).max()
-                l_20 = df['Low'].tail(20).min()
-                if df['High'].iloc[-1] == h_20:
-                    tags.append("🔥創20日高")
+                hc_20 = df['Close'].tail(20).max()
+                lc_20 = df['Close'].tail(20).min()
+                if last_p >= hc_20:
+                    tags.append("🔥創20日收盤高")
                     bull_score += 1
-                elif df['Low'].iloc[-1] == l_20:
-                    tags.append("🩸破20日低")
+                elif last_p <= lc_20:
+                    tags.append("🩸破20日收盤低")
                     bear_score += 1
                     
             if len(df) >= 50:
-                h_50 = df['High'].tail(50).max()
-                l_50 = df['Low'].tail(50).min()
-                if df['High'].iloc[-1] == h_50:
-                    tags.append("🚀創50日高")
+                hc_50 = df['Close'].tail(50).max()
+                lc_50 = df['Close'].tail(50).min()
+                if last_p >= hc_50:
+                    tags.append("🚀創50日收盤高")
                     bull_score += 2
-                elif df['Low'].iloc[-1] == l_50:
-                    tags.append("☠️破50日低")
+                elif last_p <= lc_50:
+                    tags.append("☠️破50日收盤低")
                     bear_score += 2
+                    
+            if len(df) >= 252:
+                hc_252 = df['Close'].tail(252).max()
+                lc_252 = df['Close'].tail(252).min()
+                if last_p >= hc_252:
+                    tags.append("🔥創52週收盤高")
+                    bull_score += 3
+                elif last_p <= lc_252:
+                    tags.append("🩸破52週收盤低")
+                    bear_score += 3
 
         has_w_macd_low_gold = w_macd_gold and (macd_w < 0)
         has_w_kd_low_gold = w_kd_gold and (k_w < 30)
@@ -335,10 +354,12 @@ def process_technical_analysis(sym, name, market, strategy):
             tags.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%"); bear_score += 2
         if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10:
             tags.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%"); bear_score += 1
+            
         if len(df) >= 20 and high_20d > 0 and low_20d > 0:
             amp_20d = (high_20d - low_20d) / low_20d
-            if amp_20d <= 0.07: tags.append(f"💤20日窄幅盤整")
+            if amp_20d <= 0.07: tags.append(f"20日窄幅盤整")
 
+        # 這裡的 action 僅作為總表的快速參考，實際推播將使用嚴格篩選邏輯
         is_strong_buy_eligible = has_w_macd_low_gold or has_w_kd_low_gold
         is_strong_sell_eligible = has_w_macd_high_death or has_w_kd_high_death
 
@@ -436,7 +457,7 @@ def update_technical_db(ta_results):
         print(f"❌ 寫入 Technical_DB 失敗: {e}")
 
 # ==========================================
-# 5. Telegram 訊息發送與主程式
+# 5. Telegram 訊息發送與主程式 (🚀 導入嚴格篩選推播邏輯)
 # ==========================================
 def send_tg_text(text):
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -454,12 +475,10 @@ def send_tg_text(text):
         print(f"❌ TG 請求發生錯誤: {e}")
 
 def format_items(items):
-    if not items: return "<i>> 目前無符合條件標的</i>"
+    if not items: return "<i>> 👻 目前無符合條件標的，皆已隱藏</i>"
     res_str = ""
     for x in items:
         tags_str = ", ".join(x['tags'])
-        
-        # 🚀 嚴格攔截 nan，若名稱為空則顯示 Ticker
         raw_name = str(x.get('_name', '')).strip()
         sym = str(x.get('_sym', '')).strip()
         clean_sym = sym.split('.')[0] 
@@ -470,7 +489,12 @@ def format_items(items):
             display_title = f"{raw_name} ({clean_sym})"
             
         safe_name = display_title.replace('<', '').replace('>', '').replace('&', 'and')
-        res_str += f"• <b>{safe_name}</b> (PE:{x['P/E']})\n   └ <code>[{tags_str}]</code>\n"
+        bull = x.get('bull_score', 0)
+        bear = x.get('bear_score', 0)
+        pe = x.get('P/E', '無')
+        
+        # 🚀 在 TG 訊息中加入多空分數直觀顯示
+        res_str += f"• <b>{safe_name}</b> (多:{bull} 空:{bear} | PE:{pe})\n   └ <code>[{tags_str}]</code>\n"
     return res_str
 
 def main():
@@ -497,44 +521,83 @@ def main():
 
     update_technical_db(all_results)
 
-    # 🚀 Telegram 訊息改版：區分短線進出與一般波段
+    # 🚀 Telegram 嚴格推播分類邏輯
     for market in ['台股', '美股']:
         market_results = [x for x in all_results if x['市場'] == market]
         if not market_results: continue
         
-        # 分流：短線標的 vs 一般標的
-        short_term_results = [x for x in market_results if '短' in str(x.get('策略', ''))]
-        normal_results = [x for x in market_results if '短' not in str(x.get('策略', ''))]
+        short_term_res = [x for x in market_results if '短' in str(x.get('策略', ''))]
+        long_term_res = [x for x in market_results if '短' not in str(x.get('策略', ''))]
         
-        msg = f"📁 <b>【{market}】技術判定</b>\n\n"
+        def has_tag(item, keywords):
+            tags = item.get('tags', [])
+            return any(any(kw in t for kw in keywords) for t in tags)
+            
+        # 1. ⚡ 短線區分類
+        short_bull, short_bear, short_cons = [], [], []
+        for x in short_term_res:
+            bull = x['bull_score']
+            bear = x['bear_score']
+            is_bull = has_tag(x, ['創20日收盤高', '創50日收盤高']) or (bull >= 2 and bear == 0)
+            is_bear = has_tag(x, ['破20日收盤低', '破50日收盤低']) or (bear >= 2 and bull == 0)
+            is_cons = not is_bull and not is_bear and has_tag(x, ['20日窄幅盤整'])
+            
+            x['sort_score'] = bull - bear if is_bull else (bear - bull if is_bear else 0)
+            
+            if is_bull: short_bull.append(x)
+            elif is_bear: short_bear.append(x)
+            elif is_cons: short_cons.append(x)
+
+        # 2. 📈 長線區分類
+        long_bull, long_bear, long_base = [], [], []
+        for x in long_term_res:
+            bull = x['bull_score']
+            bear = x['bear_score']
+            pos_str = str(x.get('52週位置', '50%')).replace('%', '').strip()
+            try: pos = float(pos_str)
+            except: pos = 50.0
+                
+            is_bull = has_tag(x, ['創52週收盤高']) or (bull >= 3 and has_tag(x, ['週KD低檔金叉', '週MACD零下金叉'])) or (bull >= 3 and bear == 0)
+            is_bear = has_tag(x, ['破52週收盤低']) or (bear >= 3 and has_tag(x, ['週KD高檔死叉', '週MACD零上死叉'])) or (bear >= 3 and bull == 0)
+            is_base = not is_bull and not is_bear and not has_tag(x, ['創52週', '破52週']) and pos <= 30.0 and abs(bull - bear) <= 1
+            
+            x['sort_score'] = bull - bear if is_bull else (bear - bull if is_bear else 0)
+            
+            if is_bull: long_bull.append(x)
+            elif is_bear: long_bear.append(x)
+            elif is_base: long_base.append(x)
+            
+        # 3. 排序 (多空淨分優先，PE次之)
+        def sort_func(x):
+            pe = x.get('_raw_pe')
+            return (-x['sort_score'], pe if pe is not None and not pd.isna(pe) else 9999)
+            
+        short_bull.sort(key=sort_func)
+        short_bear.sort(key=sort_func)
+        short_cons.sort(key=lambda x: (x.get('_raw_pe') if x.get('_raw_pe') is not None else 9999))
+        
+        long_bull.sort(key=sort_func)
+        long_bear.sort(key=sort_func)
+        long_base.sort(key=lambda x: (x.get('_raw_pe') if x.get('_raw_pe') is not None else 9999))
+        
+        # 4. 組裝 Telegram 訊息
+        msg = f"📁 <b>【{market}】盤後技術判定</b>\n\n"
         has_content = False
         
-        # ⚡ 1. 短線進出專區 (判斷總分)
-        if short_term_results:
-            bullish_short = sorted([x for x in short_term_results if x['bull_score'] >= x['bear_score']], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))
-            bearish_short = sorted([x for x in short_term_results if x['bull_score'] < x['bear_score']], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))
-            
-            if bullish_short or bearish_short:
-                msg += f"⚡ <b>短線進出專區 (創高破底)</b>\n"
-                if bullish_short: msg += f"🚀 <b>短線偏多 / 創高動能</b>\n{format_items(bullish_short)}\n"
-                if bearish_short: msg += f"🩸 <b>短線偏空 / 破底風險</b>\n{format_items(bearish_short)}\n"
-                msg += "\n"
-                has_content = True
-
-        # 📈 2. 一般波段與長線投資 (依動作標籤)
-        sb = sorted([x for x in normal_results if "[🚀 強勢買進]" in x["action"]], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        shb = sorted([x for x in normal_results if "[📈 短多轉折]" in x["action"]], key=lambda x: (-x['bull_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        fs = sorted([x for x in normal_results if "[🛑 強制賣出]" in x["action"]], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        wr = sorted([x for x in normal_results if "[⚠️ 弱勢減碼]" in x["action"]], key=lambda x: (-x['bear_score'], x['_raw_pe'] if x['_raw_pe'] is not None else 999))[:10]
-        
-        if any([sb, shb, fs, wr]):
-            msg += f"📈 <b>波段與長期投資 (Top 10)</b>\n"
-            if sb: msg += f"🔥 <b>[🚀 強勢買進]</b>\n{format_items(sb)}\n"
-            if shb: msg += f"📈 <b>[📈 短多轉折]</b>\n{format_items(shb)}\n"
-            if fs: msg += f"🛑 <b>[🛑 強制賣出]</b>\n{format_items(fs)}\n"
-            if wr: msg += f"⚠️ <b>[⚠️ 弱勢減碼]</b>\n{format_items(wr)}\n"
+        if short_bull or short_bear or short_cons:
+            msg += f"⚡ <b>短線進出專區 (嚴格篩選版)</b>\n"
+            if short_bull: msg += f"🚀 <b>偏多 / 創高動能</b>\n{format_items(short_bull[:10])}\n"
+            if short_bear: msg += f"🩸 <b>偏空 / 破底風險</b>\n{format_items(short_bear[:10])}\n"
+            if short_cons: msg += f"⚖️ <b>盤整 / 壓縮區</b>\n{format_items(short_cons[:10])}\n"
             has_content = True
-        
+            
+        if long_bull or long_bear or long_base:
+            msg += f"📈 <b>波段與長期投資 (Top 10)</b>\n"
+            if long_bull: msg += f"🔥 <b>長多波段 / 攻擊轉折</b>\n{format_items(long_bull[:10])}\n"
+            if long_bear: msg += f"🛑 <b>波段轉弱 / 長期風險</b>\n{format_items(long_bear[:10])}\n"
+            if long_base: msg += f"⚖️ <b>長線築底 / 壓縮沉澱</b>\n{format_items(long_base[:10])}\n"
+            has_content = True
+            
         if has_content:
             send_tg_text(msg.strip())
             time.sleep(1)
