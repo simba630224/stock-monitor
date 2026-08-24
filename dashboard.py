@@ -191,8 +191,8 @@ def load_daily_report():
 def load_etf_holdings():
     try:
         now = datetime.now()
-        ws_current = now.strftime('%Y-%m')
-        ws_prev = (now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y-%m')
+        ws_current = f"{now.strftime('%Y_%m')}_Top20"
+        ws_prev = f"{(now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y_%m')}_Top20"
         
         for ws in [ws_current, ws_prev]:
             try:
@@ -201,6 +201,14 @@ def load_etf_holdings():
                     df.columns = [str(c).strip() for c in df.columns]
                     return df.dropna(how='all')
             except: pass
+            
+        try:
+            df = conn.read(spreadsheet=ETF_DB_URL, ttl=3600)
+            if df is not None and not df.empty:
+                df.columns = [str(c).strip() for c in df.columns]
+                return df.dropna(how='all')
+        except: pass
+        
         return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
@@ -281,7 +289,7 @@ def get_fundamental_info(sym):
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
     result = {
         "市場": market, "代號": display_ticker, "顯示名稱": display_name, "收盤價": 0.0,
-        "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
+        "近一個月含息報酬": 0.0, "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
         "相對大盤": 0.0, "近一年殖利率": 0.0, "總配息金額": 0.0,
         "近一年配息明細": "無配息紀錄", "ROE": None
     }
@@ -303,6 +311,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                         return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else 0.0
                     return 0.0
 
+                ret_1m = calc_ret(21)
                 ret_1q = calc_ret(63)
                 ret_6m = calc_ret(126)
                 
@@ -332,7 +341,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
                 result.update({
-                    "收盤價": curr_p, "近一季含息報酬": float(ret_1q), "近半年含息報酬": float(ret_6m), 
+                    "收盤價": curr_p, "近一個月含息報酬": float(ret_1m), "近一季含息報酬": float(ret_1q), "近半年含息報酬": float(ret_6m), 
                     "近一年含息報酬": float(ret_1y), "相對大盤": float(rel_val), "近一年殖利率": float(yield_1y), 
                     "總配息金額": float(tot_div), "近一年配息明細": div_history_str, "ROE": roe_val
                 })
@@ -559,17 +568,16 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 嚴格多空門檻重構版)
+# TAB 2: 技術分析掃描 
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
         df_db = load_technical_db()
         
     if df_db.empty:
-        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方第 47 行填入 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
+        st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認：\n1. 您是否已在上方填入正確的 `TECHNICAL_DB_URL`？\n2. 您的 GitHub Actions 是否已經成功執行並寫入資料？")
     else:
         try:
-            # 安全轉型與防呆
             for col in ['bull_score', 'bear_score']:
                 if col not in df_db.columns: df_db[col] = 0
                 df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
@@ -580,24 +588,22 @@ with tab2:
             for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
-
-            # 取得 52 週位階數值以供長線築底判定
+                
             def get_52w_pos(x):
-                try:
-                    return float(str(x).replace('%', '').strip())
-                except:
-                    return 50.0
+                try: return float(str(x).replace('%', '').strip())
+                except: return 50.0
             if '52週位置' in df_db.columns:
                 df_db['pos_52w_val'] = df_db['52週位置'].apply(get_52w_pos)
-            else:
-                df_db['pos_52w_val'] = 50.0
+            else: df_db['pos_52w_val'] = 50.0
 
-            # 前端即時策略同步 (讓側邊欄剛改好的策略秒速生效)
+            # 前端即時策略同步
             strategy_map = {}
             for item in PORTFOLIO_TW:
                 t = str(item.get('Ticker', '')).strip().upper()
                 s = str(item.get('策略', '')).strip()
-                if t: strategy_map[t] = s; strategy_map[get_yf_ticker_tw(t)] = s
+                if t:
+                    strategy_map[t] = s
+                    strategy_map[get_yf_ticker_tw(t)] = s
             for item in PORTFOLIO_US:
                 t = str(item.get('Ticker', '')).strip().upper()
                 s = str(item.get('策略', '')).strip()
@@ -620,7 +626,6 @@ with tab2:
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
 
-            # 🚀 格式化輸出函式 (加入多空分數直觀顯示)
             def format_strict_items(sub_df):
                 if sub_df.empty: return "> 👻 目前無符合嚴格條件標的，皆已過濾隱藏。"
                 res = []
@@ -639,15 +644,12 @@ with tab2:
                     res.append(f"• **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str}) `[{tags_str}]`")
                 return "\n".join(res)
 
-            # 🧮 準備分類條件
             df_db['tags_str'] = df_db['tags'].astype(str)
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
             df_short = df_db[is_short_term].copy()
             df_normal = df_db[~is_short_term].copy()
 
-            # ----------------------------------------------------
-            # ⚡ 短線進出專區分類邏輯
-            # ----------------------------------------------------
+            # 短線區邏輯
             short_bull_cond = df_short['tags_str'].str.contains('創20日收盤高|創50日收盤高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
             short_bear_cond = df_short['tags_str'].str.contains('破20日收盤低|破50日收盤低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
             short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
@@ -663,9 +665,7 @@ with tab2:
             df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
             df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
 
-            # ----------------------------------------------------
-            # 📈 波段與長期投資分類邏輯
-            # ----------------------------------------------------
+            # 長線區邏輯
             long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
             long_bear_cond = df_normal['tags_str'].str.contains('破52週收盤低', regex=True) | ((df_normal['bear_score'] >= 3) & df_normal['tags_str'].str.contains('週KD高檔死叉|週MACD零上死叉', regex=True)) | ((df_normal['bear_score'] >= 3) & (df_normal['bull_score'] == 0))
             long_base_cond = (~long_bull_cond) & (~long_bear_cond) & (~df_normal['tags_str'].str.contains('創52週|破52週', regex=True)) & (df_normal['pos_52w_val'] <= 30) & (abs(df_normal['bull_score'] - df_normal['bear_score']) <= 1)
@@ -675,43 +675,41 @@ with tab2:
             df_long_base = df_normal[long_base_cond].copy()
 
             df_long_bull['sort_score'] = df_long_bull['bull_score'] - df_long_bull['bear_score']
-            df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bear['bull_score']
+            df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bull['bull_score']
             
             df_long_bull = df_long_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
             df_long_bear = df_long_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
             df_long_base = df_long_base.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
 
+            st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") 
+            st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
 
-            # ==================================
-            # 渲染區塊
-            # ==================================
-            st.markdown("### 📊 技術亮點與警示摘要") 
-            st.caption("嚴格門檻篩選機制：未達絕對特徵之標的將自動過濾隱藏，降低雜訊干擾。排序依據為多空淨得分。")
-
-            # ⚡ 短線進出專區
-            st.markdown("#### ⚡ 短線進出專區 (嚴格過濾版)")
+            st.markdown("#### ⚡ 短線進出專區 (依據 20日/50日 創高破底與動能)")
             if not df_short.empty:
-                st.success(f"**[🚀 偏多 / 創高動能]**\n\n{format_strict_items(df_short_bull)}")
-                st.error(f"**[🩸 偏空 / 破底風險]**\n\n{format_strict_items(df_short_bear)}")
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    st.success(f"**[🚀 偏多 / 創高動能]**\n\n{format_strict_items(df_short_bull)}")
+                with col_s2:
+                    st.error(f"**[🩸 偏空 / 破底風險]**\n\n{format_strict_items(df_short_bear)}")
                 st.info(f"**[⚖️ 盤整 / 壓縮區]**\n\n{format_strict_items(df_short_cons)}")
             else:
-                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』以啟用此區。")
+                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』，系統將自動在此區進行 20日/50日 創高破低監控。")
 
             st.divider()
 
-            # 📈 波段與長期投資
-            st.markdown("#### 📈 波段與長期投資 (嚴格篩選 Top 10)")
-            st.success(f"**[🚀 長多波段 / 攻擊轉折]**\n\n{format_strict_items(df_long_bull)}")
-            st.error(f"**[🛑 波段轉弱 / 長期風險]**\n\n{format_strict_items(df_long_bear)}")
+            st.markdown("#### 📈 波段與長期投資 (Top 10)")
+            col_sum1, col_sum2 = st.columns(2)
+            with col_sum1:
+                st.success(f"**[🚀 長多波段 / 攻擊轉折]**\n\n{format_strict_items(df_long_bull)}")
+            with col_sum2:
+                st.error(f"**[🛑 波段轉弱 / 長期風險]**\n\n{format_strict_items(df_long_bear)}")
             st.info(f"**[⚖️ 長線築底 / 壓縮沉澱]**\n\n{format_strict_items(df_long_base)}")
 
             st.divider()
-            
-            # 原有的完整清單表格
             st.markdown("### 📋 完整技術分析清單")
             with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
                 st.markdown("""
-                #### 綜合動作評級 (供參考)
+                #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
                 * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
                 * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
                 * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
@@ -914,7 +912,7 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            display_cols = ["顯示名稱", "收盤價", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "近一年配息明細", "ROE"]
+            display_cols = ["顯示名稱", "收盤價", "近一個月含息報酬", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "近一年配息明細", "ROE"]
             display_cols = [c for c in display_cols if c in df_perf.columns]
             
             if not df_perf.empty:
@@ -924,6 +922,7 @@ with tab3:
                     column_config={
                         "顯示名稱": st.column_config.TextColumn("標的"),
                         "收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
+                        "近一個月含息報酬": st.column_config.NumberColumn("近一個月含息報酬(%)", format="%+.1f"),
                         "近一季含息報酬": st.column_config.NumberColumn("近一季含息報酬(%)", format="%+.1f"),
                         "近半年含息報酬": st.column_config.NumberColumn("近半年含息報酬(%)", format="%+.1f"),
                         "近一年含息報酬": st.column_config.NumberColumn("近一年含息報酬(%)", format="%+.1f"),
@@ -1143,7 +1142,7 @@ with st.sidebar:
     st.subheader("🇺🇸 美股清單")
     if not df_us.empty:
         cols_us = ['Ticker', '名稱', 'Shares', '複委託', '類別', '策略']
-        df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in cols_us])
+        df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in df_us.columns])
         
         edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
         if st.button("💾 儲存美股變更"):
