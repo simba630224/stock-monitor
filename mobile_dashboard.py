@@ -157,14 +157,16 @@ def load_trading_journal():
         return conn.read(worksheet="Trading_Journal", ttl=600)
     except: return pd.DataFrame()
 
-# 🚀 跨月防禦：動態讀取 ETF 持股庫
+# 🚀 跨月防禦：動態讀取 ETF 持股庫 (抓取最新有資料的月份)
 @st.cache_data(ttl=3600)
 def load_etf_holdings():
     try:
         now = datetime.now()
-        ws_current = now.strftime('%Y-%m')
-        ws_prev = (now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y-%m')
+        # 組合精確的格式，例如：2026_08_Top20
+        ws_current = f"{now.strftime('%Y_%m')}_Top20"
+        ws_prev = f"{(now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y_%m')}_Top20"
         
+        # 1. 先嘗試找本月與上個月的正確名稱
         for ws in [ws_current, ws_prev]:
             try:
                 df = conn.read(spreadsheet=ETF_DB_URL, worksheet=ws, ttl=3600)
@@ -172,6 +174,15 @@ def load_etf_holdings():
                     df.columns = [str(c).strip() for c in df.columns]
                     return df.dropna(how='all')
             except: pass
+            
+        # 2. 終極防呆：如果名字真的不符合，直接去抓這份試算表的「第一個分頁」
+        try:
+            df = conn.read(spreadsheet=ETF_DB_URL, ttl=3600)
+            if df is not None and not df.empty:
+                df.columns = [str(c).strip() for c in df.columns]
+                return df.dropna(how='all')
+        except: pass
+        
         return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
@@ -248,11 +259,12 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
+# 🚀 加入「近一個月含息報酬率」
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
     result = {
         "市場": market, "代號": display_ticker, "顯示名稱": display_name, "收盤價": 0.0,
-        "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
+        "近一個月含息報酬": 0.0, "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
         "相對大盤": 0.0, "近一年殖利率": 0.0, "總配息金額": 0.0,
         "近一年配息明細": "無配息紀錄", "ROE": None
     }
@@ -274,6 +286,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                         return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else 0.0
                     return 0.0
 
+                ret_1m = calc_ret(21)
                 ret_1q = calc_ret(63)
                 ret_6m = calc_ret(126) 
                 
@@ -303,7 +316,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
 
                 result.update({
-                    "收盤價": curr_p, "近一季含息報酬": float(ret_1q), "近半年含息報酬": float(ret_6m), 
+                    "收盤價": curr_p, "近一個月含息報酬": float(ret_1m), "近一季含息報酬": float(ret_1q), "近半年含息報酬": float(ret_6m), 
                     "近一年含息報酬": float(ret_1y), "相對大盤": float(rel_val), "近一年殖利率": float(yield_1y), 
                     "總配息金額": float(tot_div), "近一年配息明細": div_history_str, "ROE": roe_val
                 })
@@ -719,7 +732,7 @@ with tab_comp:
                         
                         if not sub_df.empty:
                             top10_sum = sub_df[weight_c].sum()
-                            st.caption(f"**Top 10 合計：{top10_sum:.2f}%**")
+                            st.caption(f"**Top 10 權重合計：{top10_sum:.2f}%**")
                             disp_df = sub_df[[name_c, weight_c]].copy()
                             disp_df.columns = ["成分股", "權重(%)"]
                             disp_df["權重(%)"] = disp_df["權重(%)"].apply(lambda x: f"{x:.2f}%")
@@ -784,7 +797,7 @@ with tab2:
                 st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 5: 績效與股息追蹤 
+# TAB 5: 績效與股息追蹤 (🚀 包含近一個月報酬)
 # ------------------------------------------
 with tab3:
     st.markdown("所有標的之含息報酬率與財報指標。")
@@ -808,7 +821,7 @@ with tab3:
                 
         if perf_results:
             df_perf = pd.DataFrame(perf_results)
-            display_cols = ["顯示名稱", "收盤價", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "ROE"]
+            display_cols = ["顯示名稱", "收盤價", "近一個月含息報酬", "近一季含息報酬", "近半年含息報酬", "近一年含息報酬", "相對大盤", "近一年殖利率", "總配息金額", "ROE"]
             display_cols = [c for c in display_cols if c in df_perf.columns]
             
             if not df_perf.empty:
@@ -818,9 +831,10 @@ with tab3:
                     column_config={
                         "顯示名稱": st.column_config.TextColumn("標的"),
                         "收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
-                        "近一季含息報酬": st.column_config.NumberColumn("季含息(%)", format="%+.1f"),
-                        "近半年含息報酬": st.column_config.NumberColumn("半年含息(%)", format="%+.1f"),
-                        "近一年含息報酬": st.column_config.NumberColumn("年含息(%)", format="%+.1f"),
+                        "近一個月含息報酬": st.column_config.NumberColumn("近一月含息(%)", format="%+.1f"),
+                        "近一季含息報酬": st.column_config.NumberColumn("近一季含息(%)", format="%+.1f"),
+                        "近半年含息報酬": st.column_config.NumberColumn("近半年含息(%)", format="%+.1f"),
+                        "近一年含息報酬": st.column_config.NumberColumn("近一年含息(%)", format="%+.1f"),
                         "相對大盤": st.column_config.NumberColumn("對大盤(%)", format="%+.1f"),
                         "近一年殖利率": st.column_config.NumberColumn("殖利率(%)", format="%.1f"),
                         "總配息金額": st.column_config.NumberColumn("年配息", format="%.2f"),
@@ -841,7 +855,7 @@ with tab_etf:
         df_etf_db = load_etf_holdings()
 
     if df_etf_db.empty:
-        st.warning("⚠️ 成功連線，但資料是空的。")
+        st.warning("⚠️ 成功連線，但資料是空的，或是無法讀取。")
     else:
         etf_col = df_etf_db.columns[0]
         name_col = df_etf_db.columns[1]
