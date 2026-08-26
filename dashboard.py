@@ -568,7 +568,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 
+# TAB 2: 技術分析掃描 (🚀 嚴格多空門檻重構版)
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -649,7 +649,7 @@ with tab2:
             df_short = df_db[is_short_term].copy()
             df_normal = df_db[~is_short_term].copy()
 
-            # 短線區邏輯
+            # ⚡ 短線區邏輯
             short_bull_cond = df_short['tags_str'].str.contains('創20日收盤高|創50日收盤高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
             short_bear_cond = df_short['tags_str'].str.contains('破20日收盤低|破50日收盤低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
             short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
@@ -661,11 +661,12 @@ with tab2:
             df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
             df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
             
-            df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+            # 🚀 修正對齊 Telegram (按市場分開計算 Top 10)
+            df_short_bull = df_short_bull.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_short_bear = df_short_bear.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_short_cons = df_short_cons.sort_values(by=['市場', '_raw_pe'], ascending=[False, True]).groupby('市場').head(10)
 
-            # 長線區邏輯
+            # 📈 長線區邏輯
             long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
             long_bear_cond = df_normal['tags_str'].str.contains('破52週收盤低', regex=True) | ((df_normal['bear_score'] >= 3) & df_normal['tags_str'].str.contains('週KD高檔死叉|週MACD零上死叉', regex=True)) | ((df_normal['bear_score'] >= 3) & (df_normal['bull_score'] == 0))
             long_base_cond = (~long_bull_cond) & (~long_bear_cond) & (~df_normal['tags_str'].str.contains('創52週|破52週', regex=True)) & (df_normal['pos_52w_val'] <= 30) & (abs(df_normal['bull_score'] - df_normal['bear_score']) <= 1)
@@ -675,11 +676,13 @@ with tab2:
             df_long_base = df_normal[long_base_cond].copy()
 
             df_long_bull['sort_score'] = df_long_bull['bull_score'] - df_long_bull['bear_score']
-            df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bull['bull_score']
+            # 🚀 修正了原本這行的 Typo (誤植為 df_long_bull['bull_score'])
+            df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bear['bull_score'] 
             
-            df_long_bull = df_long_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_long_bear = df_long_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_long_base = df_long_base.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+            # 🚀 修正對齊 Telegram (按市場分開計算 Top 10)
+            df_long_bull = df_long_bull.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_long_bear = df_long_bear.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_long_base = df_long_base.sort_values(by=['市場', '_raw_pe'], ascending=[False, True]).groupby('市場').head(10)
 
             st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") 
             st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
@@ -1142,7 +1145,7 @@ with st.sidebar:
     st.subheader("🇺🇸 美股清單")
     if not df_us.empty:
         cols_us = ['Ticker', '名稱', 'Shares', '複委託', '類別', '策略']
-        df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in df_us.columns])
+        df_us = df_us.reindex(columns=[c for c in cols_us if c in df_us.columns] + [c for c in df_us.columns if c not in cols_us])
         
         edited_df_us = st.data_editor(df_us, num_rows="dynamic", use_container_width=True, key="us_editor")
         if st.button("💾 儲存美股變更"):
