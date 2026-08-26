@@ -42,7 +42,7 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
-# 1. 資料庫連線與安全快取模組 (🚀 網址已全數自動帶入)
+# 1. 資料庫連線與安全快取模組
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -162,11 +162,9 @@ def load_trading_journal():
 def load_etf_holdings():
     try:
         now = datetime.now()
-        # 組合精確的格式，例如：2026_08_Top20
         ws_current = f"{now.strftime('%Y_%m')}_Top20"
         ws_prev = f"{(now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y_%m')}_Top20"
         
-        # 1. 先嘗試找本月與上個月的正確名稱
         for ws in [ws_current, ws_prev]:
             try:
                 df = conn.read(spreadsheet=ETF_DB_URL, worksheet=ws, ttl=3600)
@@ -175,7 +173,6 @@ def load_etf_holdings():
                     return df.dropna(how='all')
             except: pass
             
-        # 2. 終極防呆：如果名字真的不符合，直接去抓這份試算表的「第一個分頁」
         try:
             df = conn.read(spreadsheet=ETF_DB_URL, ttl=3600)
             if df is not None and not df.empty:
@@ -259,7 +256,7 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
-# 🚀 加入「近一個月含息報酬率」
+# 🚀 包含近一個月報酬
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
     result = {
@@ -519,7 +516,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB HL: 技術亮點摘要 (🚀 嚴格多空門檻重構版)
+# TAB HL: 技術亮點摘要 (🚀 嚴格多空門檻重構版 + 對齊後端群組)
 # ------------------------------------------
 with tab_hl:
     df_db = load_technical_db()
@@ -607,9 +604,10 @@ with tab_hl:
             df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
             df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
             
-            df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+            # 🚀 修正對齊 Telegram (按市場分開計算 Top 10)
+            df_short_bull = df_short_bull.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_short_bear = df_short_bear.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_short_cons = df_short_cons.sort_values(by=['市場', '_raw_pe'], ascending=[False, True]).groupby('市場').head(10)
 
             # 📈 長線區邏輯
             long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
@@ -621,11 +619,13 @@ with tab_hl:
             df_long_base = df_normal[long_base_cond].copy()
 
             df_long_bull['sort_score'] = df_long_bull['bull_score'] - df_long_bull['bear_score']
+            # 🚀 修正了上一版的 Typo
             df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bear['bull_score']
             
-            df_long_bull = df_long_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_long_bear = df_long_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_long_base = df_long_base.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+            # 🚀 修正對齊 Telegram (按市場分開計算 Top 10)
+            df_long_bull = df_long_bull.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_long_bear = df_long_bear.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
+            df_long_base = df_long_base.sort_values(by=['市場', '_raw_pe'], ascending=[False, True]).groupby('市場').head(10)
 
             # 渲染區塊
             st.markdown("### 📊 技術摘要")
@@ -732,7 +732,7 @@ with tab_comp:
                         
                         if not sub_df.empty:
                             top10_sum = sub_df[weight_c].sum()
-                            st.caption(f"**Top 10 權重合計：{top10_sum:.2f}%**")
+                            st.caption(f"**Top 10 合計：{top10_sum:.2f}%**")
                             disp_df = sub_df[[name_c, weight_c]].copy()
                             disp_df.columns = ["成分股", "權重(%)"]
                             disp_df["權重(%)"] = disp_df["權重(%)"].apply(lambda x: f"{x:.2f}%")
@@ -797,7 +797,7 @@ with tab2:
                 st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 5: 績效與股息追蹤 (🚀 包含近一個月報酬)
+# TAB 5: 績效與股息追蹤 
 # ------------------------------------------
 with tab3:
     st.markdown("所有標的之含息報酬率與財報指標。")
