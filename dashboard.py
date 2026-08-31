@@ -313,7 +313,7 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
 
                 ret_1m = calc_ret(21)
                 ret_1q = calc_ret(63)
-                ret_6m = calc_ret(126)
+                ret_6m = calc_ret(126) 
                 
                 if len(valid_hist) > 252:
                     ret_1y = ((curr_p - float(valid_hist.iloc[-252])) / float(valid_hist.iloc[-252])) * 100
@@ -568,7 +568,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 嚴格多空門檻重構版)
+# TAB 2: 技術分析掃描 (🚀 UI 完全對齊 Telegram 版)
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -585,7 +585,7 @@ with tab2:
             if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
             df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
             
-            for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
+            for col in ['action', 'tags', '_name', '_sym', '標的', '策略', '市場']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
                 
@@ -631,88 +631,101 @@ with tab2:
                 res = []
                 for _, r in sub_df.iterrows():
                     pe_val = r.get('_raw_pe')
-                    try:
-                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "PE:無"
-                    except:
-                        pe_str = "PE:無"
+                    try: pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "PE:無"
+                    except: pe_str = "PE:無"
                     
                     bull_s = int(r.get('bull_score', 0))
                     bear_s = int(r.get('bear_score', 0))
                     tags_str = r.get('tags', '')
                     name_disp = r.get('顯示名稱', '未知')
                     
-                    res.append(f"• **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str}) `[{tags_str}]`")
-                return "\n".join(res)
+                    # 🚀 與 Telegram 1:1 對齊排版
+                    res.append(f"• **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str})\n  └ `[{tags_str}]`")
+                return "\n\n".join(res)
 
             df_db['tags_str'] = df_db['tags'].astype(str)
-            is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
-            df_short = df_db[is_short_term].copy()
-            df_normal = df_db[~is_short_term].copy()
-
-            # ⚡ 短線區邏輯
-            short_bull_cond = df_short['tags_str'].str.contains('創20日收盤高|創50日收盤高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
-            short_bear_cond = df_short['tags_str'].str.contains('破20日收盤低|破50日收盤低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
-            short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
-
-            df_short_bull = df_short[short_bull_cond].copy()
-            df_short_bear = df_short[short_bear_cond].copy()
-            df_short_cons = df_short[short_cons_cond].copy()
-
-            df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
-            df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
-            
-            # 🚀 修正對齊 Telegram (按市場分開計算 Top 10)
-            df_short_bull = df_short_bull.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
-            df_short_bear = df_short_bear.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
-            df_short_cons = df_short_cons.sort_values(by=['市場', '_raw_pe'], ascending=[False, True]).groupby('市場').head(10)
-
-            # 📈 長線區邏輯
-            long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
-            long_bear_cond = df_normal['tags_str'].str.contains('破52週收盤低', regex=True) | ((df_normal['bear_score'] >= 3) & df_normal['tags_str'].str.contains('週KD高檔死叉|週MACD零上死叉', regex=True)) | ((df_normal['bear_score'] >= 3) & (df_normal['bull_score'] == 0))
-            long_base_cond = (~long_bull_cond) & (~long_bear_cond) & (~df_normal['tags_str'].str.contains('創52週|破52週', regex=True)) & (df_normal['pos_52w_val'] <= 30) & (abs(df_normal['bull_score'] - df_normal['bear_score']) <= 1)
-
-            df_long_bull = df_normal[long_bull_cond].copy()
-            df_long_bear = df_normal[long_bear_cond].copy()
-            df_long_base = df_normal[long_base_cond].copy()
-
-            df_long_bull['sort_score'] = df_long_bull['bull_score'] - df_long_bull['bear_score']
-            # 🚀 修正了原本這行的 Typo (誤植為 df_long_bull['bull_score'])
-            df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bear['bull_score'] 
-            
-            # 🚀 修正對齊 Telegram (按市場分開計算 Top 10)
-            df_long_bull = df_long_bull.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
-            df_long_bear = df_long_bear.sort_values(by=['市場', 'sort_score', '_raw_pe'], ascending=[False, False, True]).groupby('市場').head(10)
-            df_long_base = df_long_base.sort_values(by=['市場', '_raw_pe'], ascending=[False, True]).groupby('市場').head(10)
 
             st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") 
-            st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
+            st.caption("嚴格門檻篩選機制：未達絕對特徵之標的將自動過濾隱藏，降低雜訊干擾。排序依據為多空淨得分。")
 
-            st.markdown("#### ⚡ 短線進出專區 (依據 20日/50日 創高破底與動能)")
-            if not df_short.empty:
-                col_s1, col_s2 = st.columns(2)
-                with col_s1:
-                    st.success(f"**[🚀 偏多 / 創高動能]**\n\n{format_strict_items(df_short_bull)}")
-                with col_s2:
-                    st.error(f"**[🩸 偏空 / 破底風險]**\n\n{format_strict_items(df_short_bear)}")
-                st.info(f"**[⚖️ 盤整 / 壓縮區]**\n\n{format_strict_items(df_short_cons)}")
-            else:
-                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』，系統將自動在此區進行 20日/50日 創高破低監控。")
+            # 🚀 建立「台股」與「美股」獨立的子分頁，保證與 Telegram 分開取 Top 10 一模一樣
+            m_tabs = st.tabs(["🇹🇼 台股", "🇺🇸 美股"])
+            
+            for idx, mkt in enumerate(['台股', '美股']):
+                with m_tabs[idx]:
+                    df_m = df_db[df_db['市場'] == mkt].copy()
+                    
+                    is_short_term = df_m['策略'].str.contains('短', case=False, na=False)
+                    df_short = df_m[is_short_term].copy()
+                    df_normal = df_m[~is_short_term].copy()
 
-            st.divider()
+                    # ----------------------------------------------------
+                    # ⚡ 短線區邏輯
+                    # ----------------------------------------------------
+                    short_bull_cond = df_short['tags_str'].str.contains('創20日收盤高|創50日收盤高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
+                    short_bear_cond = df_short['tags_str'].str.contains('破20日收盤低|破50日收盤低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
+                    short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
 
-            st.markdown("#### 📈 波段與長期投資 (Top 10)")
-            col_sum1, col_sum2 = st.columns(2)
-            with col_sum1:
-                st.success(f"**[🚀 長多波段 / 攻擊轉折]**\n\n{format_strict_items(df_long_bull)}")
-            with col_sum2:
-                st.error(f"**[🛑 波段轉弱 / 長期風險]**\n\n{format_strict_items(df_long_bear)}")
-            st.info(f"**[⚖️ 長線築底 / 壓縮沉澱]**\n\n{format_strict_items(df_long_base)}")
+                    df_short_bull = df_short[short_bull_cond].copy()
+                    df_short_bear = df_short[short_bear_cond].copy()
+                    df_short_cons = df_short[short_cons_cond].copy()
+
+                    df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
+                    df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
+                    
+                    # 取各市場專屬的 Top 10
+                    df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+                    df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+                    df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+
+                    # ----------------------------------------------------
+                    # 📈 長線區邏輯
+                    # ----------------------------------------------------
+                    long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
+                    long_bear_cond = df_normal['tags_str'].str.contains('破52週收盤低', regex=True) | ((df_normal['bear_score'] >= 3) & df_normal['tags_str'].str.contains('週KD高檔死叉|週MACD零上死叉', regex=True)) | ((df_normal['bear_score'] >= 3) & (df_normal['bull_score'] == 0))
+                    long_base_cond = (~long_bull_cond) & (~long_bear_cond) & (~df_normal['tags_str'].str.contains('創52週|破52週', regex=True)) & (df_normal['pos_52w_val'] <= 30) & (abs(df_normal['bull_score'] - df_normal['bear_score']) <= 1)
+
+                    df_long_bull = df_normal[long_bull_cond].copy()
+                    df_long_bear = df_normal[long_bear_cond].copy()
+                    df_long_base = df_normal[long_base_cond].copy()
+
+                    df_long_bull['sort_score'] = df_long_bull['bull_score'] - df_long_bull['bear_score']
+                    df_long_bear['sort_score'] = df_long_bear['bear_score'] - df_long_bear['bull_score'] 
+                    
+                    # 取各市場專屬的 Top 10
+                    df_long_bull = df_long_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+                    df_long_bear = df_long_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+                    df_long_base = df_long_base.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+
+                    # ----------------------------------------------------
+                    # 視覺渲染
+                    # ----------------------------------------------------
+                    st.markdown(f"#### ⚡ 短線進出專區 ({mkt})")
+                    if not df_short.empty:
+                        col_s1, col_s2 = st.columns(2)
+                        with col_s1:
+                            st.success(f"**[🚀 偏多 / 創高動能]**\n\n{format_strict_items(df_short_bull)}")
+                        with col_s2:
+                            st.error(f"**[🩸 偏空 / 破底風險]**\n\n{format_strict_items(df_short_bear)}")
+                        st.info(f"**[⚖️ 盤整 / 壓縮區]**\n\n{format_strict_items(df_short_cons)}")
+                    else:
+                        st.info(f"💡 尚無 {mkt} 短線標的。請於側邊欄「策略」欄位填寫『短線』。")
+
+                    st.divider()
+
+                    st.markdown(f"#### 📈 波段與長期投資 ({mkt} Top 10)")
+                    col_sum1, col_sum2 = st.columns(2)
+                    with col_sum1:
+                        st.success(f"**[🚀 長多波段 / 攻擊轉折]**\n\n{format_strict_items(df_long_bull)}")
+                    with col_sum2:
+                        st.error(f"**[🛑 波段轉弱 / 長期風險]**\n\n{format_strict_items(df_long_bear)}")
+                    st.info(f"**[⚖️ 長線築底 / 壓縮沉澱]**\n\n{format_strict_items(df_long_base)}")
 
             st.divider()
             st.markdown("### 📋 完整技術分析清單")
             with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
                 st.markdown("""
-                #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
+                #### 一、 綜合動作評級 (供參考)
                 * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
                 * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
                 * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
@@ -925,13 +938,13 @@ with tab3:
                     column_config={
                         "顯示名稱": st.column_config.TextColumn("標的"),
                         "收盤價": st.column_config.NumberColumn("收盤", format="%.2f"),
-                        "近一個月含息報酬": st.column_config.NumberColumn("近一個月含息報酬(%)", format="%+.1f"),
-                        "近一季含息報酬": st.column_config.NumberColumn("近一季含息報酬(%)", format="%+.1f"),
-                        "近半年含息報酬": st.column_config.NumberColumn("近半年含息報酬(%)", format="%+.1f"),
-                        "近一年含息報酬": st.column_config.NumberColumn("近一年含息報酬(%)", format="%+.1f"),
-                        "相對大盤": st.column_config.NumberColumn("對大盤(1年)(%)", format="%+.1f"),
+                        "近一個月含息報酬": st.column_config.NumberColumn("近一月含息(%)", format="%+.1f"),
+                        "近一季含息報酬": st.column_config.NumberColumn("近一季含息(%)", format="%+.1f"),
+                        "近半年含息報酬": st.column_config.NumberColumn("近半年含息(%)", format="%+.1f"),
+                        "近一年含息報酬": st.column_config.NumberColumn("近一年含息(%)", format="%+.1f"),
+                        "相對大盤": st.column_config.NumberColumn("對大盤(%)", format="%+.1f"),
                         "近一年殖利率": st.column_config.NumberColumn("殖利率(%)", format="%.1f"),
-                        "總配息金額": st.column_config.NumberColumn("近一年總配息", format="%.2f"),
+                        "總配息金額": st.column_config.NumberColumn("年配息", format="%.2f"),
                         "ROE": st.column_config.NumberColumn("ROE(%)", format="%.1f")
                     },
                     hide_index=True, height=600
