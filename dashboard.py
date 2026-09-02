@@ -50,7 +50,7 @@ def check_password():
         return True
 
     # 取得設定的密碼 (優先讀取 Secrets，若無則使用預設值)
-    correct_password = st.secrets.get("APP_PASSWORD", "admin888")
+    correct_password = st.secrets.get("APP_PASSWORD", "19770614")
 
     st.markdown("### 🔒 個人投資儀表板 (受保護存取)")
     pwd_input = st.text_input("請輸入存取密碼：", type="password")
