@@ -42,6 +42,33 @@ def format_display_name(name_raw, sym_raw):
     return "未知標的"
 
 # ==========================================
+# 🔒 權限驗證閘門 (只有通過驗證才能載入後續資料)
+# ==========================================
+def check_password():
+    """驗證成功回傳 True，否則顯示輸入框並終止後續程式執行"""
+    if st.session_state.get("authenticated", False):
+        return True
+
+    # 取得設定的密碼 (優先讀取 Secrets，若無則使用預設值)
+    correct_password = st.secrets.get("APP_PASSWORD", "admin888")
+
+    st.markdown("### 🔒 個人投資儀表板 (受保護存取)")
+    pwd_input = st.text_input("請輸入存取密碼：", type="password")
+
+    if st.button("🔑 登入"):
+        if pwd_input == correct_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("❌ 密碼錯誤，請重新輸入！")
+
+    return False
+
+# 若未通過驗證，立即中斷執行，防止未授權讀取
+if not check_password():
+    st.stop()
+
+# ==========================================
 # 1. 資料庫連線與安全快取模組
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
