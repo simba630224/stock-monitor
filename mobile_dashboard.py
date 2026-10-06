@@ -26,7 +26,7 @@ def check_password():
         return True
 
     # 取得設定的密碼 (優先讀取 Secrets，若無則使用預設值 admin888)
-    correct_password = st.secrets.get("APP_PASSWORD", "19770614")
+    correct_password = st.secrets.get("APP_PASSWORD", "admin888")
 
     st.markdown("### 🔒 個人投資儀表板 (受保護存取)")
     pwd_input = st.text_input("請輸入存取密碼：", type="password")
@@ -74,7 +74,7 @@ def format_display_name(name_raw, sym_raw):
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
-TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit" 
+TECHNICAL_DB_URL = "" 
 
 def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
@@ -541,7 +541,7 @@ with tab_hl:
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
 
-               def format_mobile_items(sub_df):
+            def format_mobile_items(sub_df):
                 if sub_df.empty: return "> 目前無符合條件標的"
                 res = ""
                 for _, r in sub_df.iterrows():
@@ -551,13 +551,11 @@ with tab_hl:
                     except:
                         pe_str = "無PE"
                         
-                    # 抓取多空分數
                     bull_s = int(r.get('bull_score', 0))
                     bear_s = int(r.get('bear_score', 0))
                     tags_str = r.get('tags', '')
                     name_disp = r.get('顯示名稱', '未知')
                     
-                    # 補回 (多:X 空:Y) 格式
                     res += f"- **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str})\n  - `[{tags_str}]`\n"
                 return res
 
