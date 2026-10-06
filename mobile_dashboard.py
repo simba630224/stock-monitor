@@ -541,18 +541,24 @@ with tab_hl:
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
 
-            def format_mobile_items(sub_df):
+               def format_mobile_items(sub_df):
                 if sub_df.empty: return "> 目前無符合條件標的"
                 res = ""
                 for _, r in sub_df.iterrows():
-                    pe_val = r['_raw_pe']
+                    pe_val = r.get('_raw_pe')
                     try:
                         pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
                     except:
                         pe_str = "無PE"
-                    tags_str = r['tags']
-                    name_disp = r['顯示名稱']
-                    res += f"- **{name_disp}** ({pe_str})\n  - `[{tags_str}]`\n"
+                        
+                    # 抓取多空分數
+                    bull_s = int(r.get('bull_score', 0))
+                    bear_s = int(r.get('bear_score', 0))
+                    tags_str = r.get('tags', '')
+                    name_disp = r.get('顯示名稱', '未知')
+                    
+                    # 補回 (多:X 空:Y) 格式
+                    res += f"- **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str})\n  - `[{tags_str}]`\n"
                 return res
 
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
