@@ -506,11 +506,19 @@ with tab2:
                 res = []
                 for _, r in sub_df.iterrows():
                     pe_val = r.get('_raw_pe')
-                    pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
+                    try:
+                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
+                    except:
+                        pe_str = "無PE"
+                        
+                    # 抓取多空分數
+                    bull_s = int(r.get('bull_score', 0))
+                    bear_s = int(r.get('bear_score', 0))
                     tags_str = r.get('tags', '')
                     name_disp = r.get('顯示名稱', '未知')
-                    # 同步保留分數顯示
-                    res.append(f"• **{name_disp} ({pe_str})** `[{tags_str}]`")
+                    
+                    # 補回 (多:X 空:Y) 格式
+                    res.append(f"• **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str}) `[{tags_str}]`")
                 return "\n".join(res)
 
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
