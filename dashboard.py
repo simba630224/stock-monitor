@@ -55,7 +55,6 @@ DAILY_REPORT_URL = "https://docs.google.com/spreadsheets/d/1StOQTEpoTNSLU140CnOe
 # 🛑 ETF 持股 資料庫網址
 ETF_DB_URL = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/edit"
 
-
 def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
         df = conn.read(worksheet=worksheet_name, ttl=0)
@@ -620,12 +619,18 @@ with tab2:
             def resolve_strategy(row):
                 sym = str(row.get('_sym', '')).strip().upper()
                 clean_sym = sym.split('.')[0]
-                if sym in strategy_map and strategy_map[sym]: return strategy_map[sym]
-                if clean_sym in strategy_map and strategy_map[clean_sym]: return strategy_map[clean_sym]
+                if sym in strategy_map and strategy_map[sym] and strategy_map[sym].lower() != 'nan': return strategy_map[sym]
+                if clean_sym in strategy_map and strategy_map[clean_sym] and strategy_map[clean_sym].lower() != 'nan': return strategy_map[clean_sym]
                 return str(row.get('策略', '')).strip()
 
             df_db['策略'] = df_db.apply(resolve_strategy, axis=1)
+            # 🚀 嚴格正規表達式清洗，杜絕一切 nan 變形
+            df_db['策略'] = df_db['策略'].replace(r'^(?i)(nan|none|null|<na>)$', '', regex=True)
+            
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
+
+            # 🚀 新增獨立的多空分數欄位
+            df_db['多空分數'] = df_db.apply(lambda r: f"多: {int(float(r.get('bull_score', 0)))} | 空: {int(float(r.get('bear_score', 0)))}", axis=1)
 
             target_options = {}
             for _, row in df_db.iterrows():
@@ -724,7 +729,8 @@ with tab2:
                 * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者)。
                 """)
 
-            display_cols = ["市場", "顯示名稱", "策略", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
+            # 🚀 確保多空分數在顯示清單內
+            display_cols = ["市場", "顯示名稱", "策略", "多空分數", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
             display_cols = [c for c in display_cols if c in df_db.columns]
             
             if not df_db.empty and display_cols:
@@ -735,6 +741,7 @@ with tab2:
                         "市場": st.column_config.TextColumn("市場", width="small"),
                         "顯示名稱": st.column_config.TextColumn("名稱 (代號)", width="medium"),
                         "策略": st.column_config.TextColumn("策略屬性", width="small"),
+                        "多空分數": st.column_config.TextColumn("多空分數", width="small"),
                         "狀態警示": st.column_config.TextColumn("🚨 狀態標籤與動作", width="large"),
                         "均線位階": st.column_config.TextColumn("均線位階", width="medium"),
                         "52週位置": st.column_config.TextColumn("52週位置", width="small"),
