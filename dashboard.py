@@ -570,10 +570,10 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 (🚀 絕對防禦直讀版)
+# TAB 2: 技術分析掃描 
 # ------------------------------------------
 with tab2:
-    target_options = {}  # 🚀 安全變數範圍：定義在 try 區塊外，保證下方選單一定有東西抓
+    target_options = {} 
     with st.spinner("載入技術分析資料庫中..."):
         df_db = load_technical_db()
         
@@ -592,7 +592,6 @@ with tab2:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
 
-            # 🚀 策略清洗防禦：捨棄正則表達式，改用絕對安全的 Lambda 進行空值清除
             strategy_map = {}
             for item in PORTFOLIO_TW:
                 t = str(item.get('Ticker', '')).strip().upper()
@@ -613,55 +612,96 @@ with tab2:
                 return str(row.get('策略', '')).strip()
 
             df_db['策略'] = df_db.apply(resolve_strategy, axis=1)
-            # 絕對安全的字串清洗，消滅所有 nan 與空值
+            # 🚀 絕對防呆的 nan 清洗法
             df_db['策略'] = df_db['策略'].apply(lambda x: '' if str(x).strip().lower() in ['nan', 'none', 'null', '<na>', ''] else str(x).strip())
             
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
             
-            # 🚀 保證帶入獨立多空分數欄位
+            # 🚀 補回多空分數獨立欄位
             df_db['多空分數'] = df_db.apply(lambda r: f"多: {int(float(r.get('bull_score', 0)))} | 空: {int(float(r.get('bear_score', 0)))}", axis=1)
 
-            # 更新選單內容
             for _, row in df_db.iterrows():
                 sym = str(row.get('_sym', '')).strip()
                 disp_name = row.get('顯示名稱', '')
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
 
-            # 分級 Top 10 清單
-            bullish_strong = df_db[df_db['action'].str.contains(r'[🚀 強勢買進]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bullish_daily = df_db[df_db['action'].str.contains(r'[📈 短多轉折]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_strong = df_db[df_db['action'].str.contains(r'[🛑 強制賣出]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
-            bearish_daily = df_db[df_db['action'].str.contains(r'[⚠️ 弱勢減碼]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+            # 🚀 短線與長線波段的分流邏輯
+            df_db['tags_str'] = df_db['tags'].astype(str)
+            is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
+            df_short = df_db[is_short_term].copy()
+            df_normal = df_db[~is_short_term].copy()
 
-            def format_db_items(sub_df):
-                if sub_df.empty: return "無"
+            # ⚡ 短線區邏輯：創 20/50日新高破低 與 動能分數
+            short_bull_cond = df_short['tags_str'].str.contains('創20日高|創50日高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
+            short_bear_cond = df_short['tags_str'].str.contains('破20日低|破50日低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
+            short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
+
+            df_short_bull = df_short[short_bull_cond].copy()
+            df_short_bear = df_short[short_bear_cond].copy()
+            df_short_cons = df_short[short_cons_cond].copy()
+
+            if not df_short_bull.empty:
+                df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
+                df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            if not df_short_bear.empty:
+                df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
+                df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+            if not df_short_cons.empty:
+                df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+
+            # 📈 長線區邏輯：波段操作訊號
+            bullish_strong = df_normal[df_normal['action'].str.contains(r'\[🚀 強勢買進\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bullish_daily = df_normal[df_normal['action'].str.contains(r'\[📈 短多轉折\]', regex=True, na=False)].sort_values(by=['bull_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bearish_strong = df_normal[df_normal['action'].str.contains(r'\[🛑 強制賣出\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+            bearish_daily = df_normal[df_normal['action'].str.contains(r'\[⚠️ 弱勢減碼\]', regex=True, na=False)].sort_values(by=['bear_score', '_raw_pe'], ascending=[False, True]).head(10)
+
+            def format_strict_items(sub_df):
+                if sub_df.empty: return "> 👻 目前無符合嚴格條件標的，皆已過濾隱藏。"
                 res = []
                 for _, r in sub_df.iterrows():
                     pe_val = r.get('_raw_pe')
                     try:
-                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
+                        pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "PE:無"
                     except:
-                        pe_str = "無PE"
-                    tags_str = r.get('tags', '')
-                    name_disp = r.get('顯示名稱', '未知')
+                        pe_str = "PE:無"
+                    
                     bull_s = int(r.get('bull_score', 0))
                     bear_s = int(r.get('bear_score', 0))
+                    tags_str = r.get('tags', '')
+                    name_disp = r.get('顯示名稱', '未知')
+                    
                     res.append(f"• **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str}) `[{tags_str}]`")
                 return "\n".join(res)
 
-            st.markdown("### 📊 盤後技術亮點與警示摘要 (Top 10)")
-            st.caption("篩選邏輯：由後端 `main.py` 每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
+            st.markdown("### 📊 技術亮點與警示摘要 (Top 10)")
+            st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
             
+            # ⚡ 顯示短線專區
+            st.markdown("#### ⚡ 短線進出專區 (依據 20日/50日 創高破底與動能)")
+            if not df_short.empty:
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    st.success(f"**[🚀 偏多 / 創高動能]**\n\n{format_strict_items(df_short_bull)}")
+                with col_s2:
+                    st.error(f"**[🩸 偏空 / 破底風險]**\n\n{format_strict_items(df_short_bear)}")
+                st.info(f"**[⚖️ 盤整 / 壓縮區]**\n\n{format_strict_items(df_short_cons)}")
+            else:
+                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』，系統將自動在此區進行 20日/50日 創高破低監控。")
+
+            st.divider()
+
+            # 📈 顯示長線波段區
+            st.markdown("#### 📈 波段與長期投資 (Top 10)")
             col_sum1, col_sum2 = st.columns(2)
             with col_sum1:
                 st.success(f"**☀️ 多方強勢區**\n\n"
-                           f"🔥 **[🚀 強勢買進] Top 10**：\n{format_db_items(bullish_strong)}\n\n"
-                           f"📈 **[📈 短多轉折] Top 10**：\n{format_db_items(bullish_daily)}")
+                           f"🔥 **[🚀 強勢買進] Top 10**：\n{format_strict_items(bullish_strong)}\n\n"
+                           f"📈 **[📈 短多轉折] Top 10**：\n{format_strict_items(bullish_daily)}")
             with col_sum2:
                 st.error(f"**⛈️ 空方風險區**\n\n"
-                         f"🛑 **[🛑 強制賣出] Top 10**：\n{format_db_items(bearish_strong)}\n\n"
-                         f"⚠️ **[⚠️ 弱勢減碼] Top 10**：\n{format_db_items(bearish_daily)}")
+                         f"🛑 **[🛑 強制賣出] Top 10**：\n{format_strict_items(bearish_strong)}\n\n"
+                         f"⚠️ **[⚠️ 弱勢減碼] Top 10**：\n{format_strict_items(bearish_daily)}")
 
             st.divider()
             st.markdown("### 📋 完整技術分析清單")
@@ -676,6 +716,7 @@ with tab2:
                 * **[➖ 趨勢延續]**：無明顯多空觸發訊號。
                 """)
 
+            # 🚀 確保多空分數在顯示清單內
             display_cols = ["市場", "顯示名稱", "策略", "多空分數", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
             display_cols = [c for c in display_cols if c in df_db.columns]
             
@@ -700,7 +741,6 @@ with tab2:
         except Exception as e:
             st.error(f"渲染資料表時發生未預期錯誤，請確保資料庫格式正確：\n{e}")
 
-    # 🚀 安全取用 target_options，避免 NameError 崩潰鎖死
     st.divider()
     st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
     
