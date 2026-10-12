@@ -60,7 +60,6 @@ def get_sheet_data(url, default_data, default_market):
             
             records = []
             for _, row in df.iterrows():
-                # 防呆：清洗 nan 字串
                 sym = str(row['symbol']).strip()
                 name = str(row['name']).strip()
                 strat = str(row.get('strategy', '')).strip()
@@ -105,7 +104,7 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
     return status
 
 # ==========================================
-# 3. 核心技術分析引擎 (🚀 導入嚴格收盤價判定邏輯)
+# 3. 核心技術分析引擎 (🚀 導入全新轉折計分演算法)
 # ==========================================
 def get_fundamental_info(sym):
     try:
@@ -129,6 +128,7 @@ def get_stock_data(sym):
                 df = df[available_cols].astype(float).dropna(subset=['Close'])
                 if 'Close' not in df.columns: continue
                 
+                df['MA5'] = df['Close'].rolling(5, min_periods=1).mean()
                 df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
                 df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
                 if is_tw:
@@ -153,6 +153,7 @@ def get_stock_data(sym):
                 df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
                 df['MACD'] = df['EMA12'] - df['EMA26']
                 df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+                df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
                 return df
         except: time.sleep(1)
     return None
@@ -163,7 +164,7 @@ def process_technical_analysis(sym, name, market, strategy):
         if df is None or df.empty or len(df) < 2: return None
             
         has_enough_weekly = False
-        k_w, d_w, macd_w, macds_w = 50.0, 50.0, 0.0, 0.0
+        k_w, d_w, macd_w, macds_w, macd_hist_w = 50.0, 50.0, 0.0, 0.0, 0.0
         
         try:
             agg_dict = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
@@ -186,182 +187,208 @@ def process_technical_analysis(sym, name, market, strategy):
                 df_w['EMA26'] = df_w['Close'].ewm(span=26, adjust=False).mean()
                 df_w['MACD'] = df_w['EMA12'] - df_w['EMA26']
                 df_w['MACD_Signal'] = df_w['MACD'].ewm(span=9, adjust=False).mean()
+                df_w['MACD_Hist'] = df_w['MACD'] - df_w['MACD_Signal']
                 
                 k_w = float(df_w['K_w'].iloc[-1]) if pd.notna(df_w['K_w'].iloc[-1]) else 50.0
                 d_w = float(df_w['D_w'].iloc[-1]) if pd.notna(df_w['D_w'].iloc[-1]) else 50.0
                 macd_w = float(df_w['MACD'].iloc[-1]) if pd.notna(df_w['MACD'].iloc[-1]) else 0.0
                 macds_w = float(df_w['MACD_Signal'].iloc[-1]) if pd.notna(df_w['MACD_Signal'].iloc[-1]) else 0.0
+                macd_hist_w = float(df_w['MACD_Hist'].iloc[-1]) if pd.notna(df_w['MACD_Hist'].iloc[-1]) else 0.0
         except: pass
         
         last_p = float(df['Close'].iloc[-1])
         prev_p = float(df['Close'].iloc[-2]) if len(df) > 1 else last_p
         
+        ma5 = float(df['MA5'].iloc[-1]) if pd.notna(df['MA5'].iloc[-1]) else 0.0
         ma10 = float(df['MA10'].iloc[-1]) if pd.notna(df['MA10'].iloc[-1]) else 0.0
         ma20 = float(df['MA20'].iloc[-1]) if pd.notna(df['MA20'].iloc[-1]) else 0.0
         ma_season = float(df['季線'].iloc[-1]) if pd.notna(df['季線'].iloc[-1]) else 0.0
         ma_half = float(df['半年線'].iloc[-1]) if pd.notna(df['半年線'].iloc[-1]) else 0.0
         ma_year = float(df['年線'].iloc[-1]) if pd.notna(df['年線'].iloc[-1]) else 0.0
         
+        prev_ma5 = float(df['MA5'].iloc[-2]) if len(df) > 1 and pd.notna(df['MA5'].iloc[-2]) else 0.0
+        prev_ma10 = float(df['MA10'].iloc[-2]) if len(df) > 1 and pd.notna(df['MA10'].iloc[-2]) else 0.0
         prev_ma20 = float(df['MA20'].iloc[-2]) if len(df) > 1 and pd.notna(df['MA20'].iloc[-2]) else 0.0
         prev_ma_season = float(df['季線'].iloc[-2]) if len(df) > 1 and pd.notna(df['季線'].iloc[-2]) else 0.0
 
         ma_status_str = analyze_ma_relation(last_p, ma20, ma_season, ma_half, ma_year)
-        is_break_ma = (last_p < ma20 and prev_p >= prev_ma20) or (last_p < ma_season and prev_p >= prev_ma_season)
-
+        
+        # 趨勢判定
+        ma20_up = ma20 > prev_ma20
+        ma60_up = ma_season > prev_ma_season
         ma20_up_5d, ma_s_up_5d = False, False
-        ma20_dn_5d, ma_s_dn_5d = False, False
-        above_ma20_5d, below_ma20_5d = False, False
-        above_mas_5d, below_mas_5d = False, False
-
         if len(df) >= 6:
             if pd.notna(df['MA20'].iloc[-6]):
                 ma20_up_5d = all(df['MA20'].iloc[i] > df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
-                ma20_dn_5d = all(df['MA20'].iloc[i] < df['MA20'].iloc[i-1] for i in range(-1, -6, -1))
-                above_ma20_5d = all(df['Close'].iloc[i] > df['MA20'].iloc[i] for i in range(-5, 0))
-                below_ma20_5d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-5, 0))
             if pd.notna(df['季線'].iloc[-6]):
                 ma_s_up_5d = all(df['季線'].iloc[i] > df['季線'].iloc[i-1] for i in range(-1, -6, -1))
-                ma_s_dn_5d = all(df['季線'].iloc[i] < df['季線'].iloc[i-1] for i in range(-1, -6, -1))
-                above_mas_5d = all(df['Close'].iloc[i] > df['季線'].iloc[i] for i in range(-5, 0))
-                below_mas_5d = all(df['Close'].iloc[i] < df['季線'].iloc[i] for i in range(-5, 0))
 
-        ret_5d = 0.0
-        has_ret_5d = False
-        if len(df) >= 6 and pd.notna(df['Close'].iloc[-6]) and df['Close'].iloc[-6] > 0:
-            ret_5d = ((last_p - df['Close'].iloc[-6]) / df['Close'].iloc[-6]) * 100
-            has_ret_5d = True
-
+        # 52週位置
         high_52w = df['High'].tail(252).max() if 'High' in df.columns else 0.0
         low_52w = df['Low'].tail(252).min() if 'Low' in df.columns else 0.0
         pos_52w = ((last_p - low_52w) / (high_52w - low_52w + 1e-9) * 100) if (high_52w - low_52w) > 0 else 50.0
 
-        high_20d = df['High'].tail(20).max() if 'High' in df.columns else 0.0
-        low_20d = df['Low'].tail(20).min() if 'Low' in df.columns else 0.0
-        
+        # 指標宣告
         k_d = float(df['K_d'].iloc[-1]) if 'K_d' in df.columns and pd.notna(df['K_d'].iloc[-1]) else 50.0
         d_d = float(df['D_d'].iloc[-1]) if 'D_d' in df.columns and pd.notna(df['D_d'].iloc[-1]) else 50.0
-        
         macd_d = float(df['MACD'].iloc[-1]) if pd.notna(df['MACD'].iloc[-1]) else 0.0
         macds_d = float(df['MACD_Signal'].iloc[-1]) if pd.notna(df['MACD_Signal'].iloc[-1]) else 0.0
+        macd_hist_d = float(df['MACD_Hist'].iloc[-1]) if pd.notna(df['MACD_Hist'].iloc[-1]) else 0.0
 
         w_macd_gold, w_kd_gold = False, False
         d_macd_gold, d_kd_gold = False, False
         w_macd_death, w_kd_death = False, False
         d_macd_death, d_kd_death = False, False
+        
+        w_osc_turn_red, d_osc_turn_red = False, False
 
         if has_enough_weekly and len(df_w) > 1:
             w_macd_gold = macd_w > macds_w and float(df_w['MACD'].iloc[-2]) <= float(df_w['MACD_Signal'].iloc[-2])
             w_kd_gold = k_w > d_w and float(df_w['K_w'].iloc[-2]) <= float(df_w['D_w'].iloc[-2])
             w_macd_death = macd_w < macds_w and float(df_w['MACD'].iloc[-2]) >= float(df_w['MACD_Signal'].iloc[-2])
             w_kd_death = k_w < d_w and float(df_w['K_w'].iloc[-2]) >= float(df_w['D_w'].iloc[-2])
+            w_osc_turn_red = macd_hist_w > 0 and float(df_w['MACD_Hist'].iloc[-2]) <= 0
 
         if len(df) > 1:
             d_macd_gold = macd_d > macds_d and float(df['MACD'].iloc[-2]) <= float(df['MACD_Signal'].iloc[-2])
             d_kd_gold = k_d > d_d and float(df['K_d'].iloc[-2]) <= float(df['D_d'].iloc[-2])
             d_macd_death = macd_d < macds_d and float(df['MACD'].iloc[-2]) >= float(df['MACD_Signal'].iloc[-2])
             d_kd_death = k_d < d_d and float(df['K_d'].iloc[-2]) >= float(df['D_d'].iloc[-2])
+            d_osc_turn_red = macd_hist_d > 0 and float(df['MACD_Hist'].iloc[-2]) <= 0
 
         tags = []
         bull_score = 0
         bear_score = 0
-
-        # 🚀 嚴格版：全面改用「收盤價 (Close)」判斷創高與破底
-        if 'Close' in df.columns:
-            if len(df) >= 20:
-                hc_20 = df['Close'].tail(20).max()
-                lc_20 = df['Close'].tail(20).min()
-                if last_p >= hc_20:
-                    tags.append("🔥創20日收盤高")
-                    bull_score += 1
-                elif last_p <= lc_20:
-                    tags.append("🩸破20日收盤低")
-                    bear_score += 1
-                    
-            if len(df) >= 50:
-                hc_50 = df['Close'].tail(50).max()
-                lc_50 = df['Close'].tail(50).min()
-                if last_p >= hc_50:
-                    tags.append("🚀創50日收盤高")
-                    bull_score += 2
-                elif last_p <= lc_50:
-                    tags.append("☠️破50日收盤低")
-                    bear_score += 2
-                    
-            if len(df) >= 252:
-                hc_252 = df['Close'].tail(252).max()
-                lc_252 = df['Close'].tail(252).min()
-                if last_p >= hc_252:
-                    tags.append("🔥創52週收盤高")
-                    bull_score += 3
-                elif last_p <= lc_252:
-                    tags.append("🩸破52週收盤低")
-                    bear_score += 3
-
-        has_w_macd_low_gold = w_macd_gold and (macd_w < 0)
-        has_w_kd_low_gold = w_kd_gold and (k_w < 30)
-        has_w_macd_high_death = w_macd_death and (macd_w > 0)
-        has_w_kd_high_death = w_kd_death and (k_w > 70)
-
-        if w_macd_gold:
-            tags.append("週MACD零下金叉" if has_w_macd_low_gold else "週MACD一般金叉")
-            bull_score += 4
-        if w_kd_gold:
-            tags.append("週KD低檔金叉" if has_w_kd_low_gold else "週KD一般金叉")
-            bull_score += 3
+        
+        # 🚀 【多方加分模組】
+        # 1. 指標提早抓轉折
+        if d_osc_turn_red:
+            tags.append("日OSC翻紅")
+            bull_score += 1
+            
+        if d_kd_gold:
+            if k_d < 30:
+                tags.append("日KD低檔金叉")
+                bull_score += 2  # 低檔轉強重賞
+            else:
+                tags.append("日KD一般金叉")
+                bull_score += 1
+                
         if d_macd_gold:
             tags.append("日MACD零下金叉" if macd_d < 0 else "日MACD一般金叉")
             bull_score += 2
-        if d_kd_gold:
-            tags.append("日KD低檔金叉" if k_d < 30 else "日KD一般金叉")
+            
+        if w_kd_gold:
+            tags.append("週KD低檔金叉" if k_w < 30 else "週KD一般金叉")
+            bull_score += 3
+            
+        if w_macd_gold:
+            tags.append("週MACD零下金叉" if macd_w < 0 else "週MACD一般金叉")
+            bull_score += 4
+
+        # 2. 三線多頭與短線攻擊
+        if ma5 > ma10 and ma10 > ma20 and ma20 > 0:
+            tags.append("三線多頭排列")
+            bull_score += 2
+            
+        if ma5 > ma10 and prev_ma5 <= prev_ma10:
+            tags.append("短線均線金叉")
             bull_score += 1
             
+        if last_p > ma20 and prev_p <= prev_ma20:
+            tags.append("剛站上月線")
+            bull_score += 2  # 起漲關鍵
+            
+        # 3. 回後買上漲
+        if last_p > ma5 and prev_p <= prev_ma5 and ma20_up and k_d < 50:
+            tags.append("回後重新站上MA5")
+            bull_score += 2
+            
+        # 4. 長線趨勢保護
         if ma20_up_5d and ma_s_up_5d: tags.append("月季線雙上彎≥5日"); bull_score += 2
         elif ma20_up_5d: tags.append("月線上彎≥5日"); bull_score += 1
-        elif ma_s_up_5d: tags.append("季線上彎≥5日"); bull_score += 1
-        
-        if above_ma20_5d and above_mas_5d: tags.append("站上月季線≥5日"); bull_score += 2
-        elif above_ma20_5d: tags.append("站上月線≥5日"); bull_score += 1
-        elif above_mas_5d: tags.append("站上季線≥5日"); bull_score += 1
-        
-        if has_ret_5d and ret_5d >= 5.0: tags.append(f"近5日上漲{ret_5d:.1f}%"); bull_score += 1
 
-        if w_macd_death:
-            tags.append("週MACD零上死叉" if has_w_macd_high_death else "週MACD一般死叉")
-            bear_score += 4
-        if w_kd_death:
-            tags.append("週KD高檔死叉" if has_w_kd_high_death else "週KD一般死叉")
-            bear_score += 3
-        if d_macd_death:
-            tags.append("日MACD零上死叉" if macd_d > 0 else "日MACD一般死叉")
+        # 5. 創高 (輔助確認)
+        if 'Close' in df.columns:
+            if len(df) >= 20:
+                hc_20 = df['Close'].tail(20).max()
+                if last_p >= hc_20: tags.append("🔥創20日收高")
+            if len(df) >= 50:
+                hc_50 = df['Close'].tail(50).max()
+                if last_p >= hc_50: tags.append("🚀創50日收高")
+            if len(df) >= 252:
+                hc_252 = df['Close'].tail(252).max()
+                if last_p >= hc_252: tags.append("🔥創52週收高")
+
+        # 🚀 【空方加分模組】
+        # 1. 破底 (輔助確認)
+        if 'Close' in df.columns:
+            if len(df) >= 20:
+                lc_20 = df['Close'].tail(20).max()
+                if last_p <= lc_20: tags.append("🩸破20日收低")
+            if len(df) >= 50:
+                lc_50 = df['Close'].tail(50).max()
+                if last_p <= lc_50: tags.append("☠️破50日收低")
+            if len(df) >= 252:
+                lc_252 = df['Close'].tail(252).min()
+                if last_p <= lc_252: tags.append("🩸破52週收低")
+
+        # 2. 短線停利極度敏感
+        if k_d > 70 and last_p < ma5 and prev_p >= prev_ma5:
+            tags.append("高檔跌破MA5")
             bear_score += 2
+
+        # 3. 高檔鈍化保護傘 (濾除多頭假死叉)
+        is_protected_by_ma = (last_p > ma10 and last_p > ma20)
+        
         if d_kd_death:
-            tags.append("日KD高檔死叉" if k_d > 70 else "日KD一般死叉")
-            bear_score += 1
+            if is_protected_by_ma:
+                tags.append("日KD死叉(均線保護)")
+                bear_score += 0  # 鈍化不扣分
+            else:
+                tags.append("日KD高檔死叉" if k_d > 70 else "日KD一般死叉")
+                bear_score += 1
+                
+        if d_macd_death:
+            if is_protected_by_ma:
+                tags.append("日MACD死叉(均線保護)")
+                bear_score += 0
+            else:
+                tags.append("日MACD零上死叉" if macd_d > 0 else "日MACD一般死叉")
+                bear_score += 2
+                
+        if w_kd_death:
+            tags.append("週KD高檔死叉" if k_w > 70 else "週KD一般死叉")
+            bear_score += 3
             
-        if is_break_ma: tags.append("跌破短中線"); bear_score += 1
-        
-        if ma20_dn_5d and ma_s_dn_5d: tags.append("月季線雙下彎≥5日"); bear_score += 2
-        elif ma20_dn_5d: tags.append("月線下彎≥5日"); bear_score += 1
-        elif ma_s_dn_5d: tags.append("季線下彎≥5日"); bear_score += 1
-        
-        if below_ma20_5d and below_mas_5d: tags.append("跌破月季線≥5日"); bear_score += 2
-        elif below_ma20_5d: tags.append("跌破月線≥5日"); bear_score += 1
-        elif below_mas_5d: tags.append("跌破季線≥5日"); bear_score += 1
-        
-        if has_ret_5d and ret_5d <= -5.0: tags.append(f"近5日下跌{abs(ret_5d):.1f}%"); bear_score += 1
+        if w_macd_death:
+            tags.append("週MACD零上死叉" if macd_w > 0 else "週MACD一般死叉")
+            bear_score += 4
 
-        if high_52w > 0 and (high_52w - last_p) / high_52w >= 0.15:
-            tags.append(f"近高點回落{((high_52w - last_p) / high_52w)*100:.1f}%"); bear_score += 2
-        if high_20d > 0 and (high_20d - last_p) / high_20d >= 0.10:
-            tags.append(f"20日回落{((high_20d - last_p) / high_20d)*100:.1f}%"); bear_score += 1
-            
-        if len(df) >= 20 and high_20d > 0 and low_20d > 0:
-            amp_20d = (high_20d - low_20d) / low_20d
-            if amp_20d <= 0.07: tags.append(f"20日窄幅盤整")
+        # 4. 季線/月線趨勢保護 (防假跌破)
+        if last_p < ma20 and prev_p >= prev_ma20 and df['High'].iloc[-1] < ma20:
+            # 確認真跌破 (最高價摸不到月線)
+            if ma60_up:
+                tags.append("跌破月線(季線護體)")
+                bear_score += 1
+            else:
+                tags.append("實體跌破月線")
+                bear_score += 3
+        
+        below_ma20_3d = False
+        if len(df) >= 3 and pd.notna(df['MA20'].iloc[-3]):
+            below_ma20_3d = all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in range(-3, 0))
+            if below_ma20_3d:
+                tags.append("連3日破月線")
+                bear_score += 3
 
-        # 這裡的 action 僅作為總表的快速參考，實際推播將使用嚴格篩選邏輯
-        is_strong_buy_eligible = has_w_macd_low_gold or has_w_kd_low_gold
-        is_strong_sell_eligible = has_w_macd_high_death or has_w_kd_high_death
+        if ma5 < ma10 and ma10 < ma20 and ma20 > 0:
+            tags.append("三線空頭排列")
+            bear_score += 3
+
+        # 動作標籤判定
+        is_strong_buy_eligible = (w_macd_gold and macd_w < 0) or (w_kd_gold and k_w < 30) or (bull_score >= 3 and bear_score == 0)
+        is_strong_sell_eligible = (w_macd_death and macd_w > 0) or (w_kd_death and k_w > 70) or (bear_score >= 3 and bull_score == 0)
 
         if bull_score > bear_score:
             if bull_score >= 3 and is_strong_buy_eligible:
@@ -374,16 +401,11 @@ def process_technical_analysis(sym, name, market, strategy):
             else:
                 action = "[⚠️ 弱勢減碼]"
         else:
-            if bull_score == 0 and bear_score == 0: 
-                action = "[➖ 趨勢延續]"
-            elif bull_score >= 3 and is_strong_buy_eligible: 
-                action = "[⚔️ 多空交戰(偏強)]"
-            elif bear_score >= 3 and is_strong_sell_eligible:
-                action = "[⚔️ 多空交戰(偏弱)]"
-            elif bull_score > 0:
-                action = "[⚔️ 多空交戰(震盪)]"
-            else:
-                action = "[⚔️ 多空交戰]"
+            if bull_score == 0 and bear_score == 0: action = "[➖ 趨勢延續]"
+            elif bull_score >= 3 and is_strong_buy_eligible: action = "[⚔️ 多空交戰(偏強)]"
+            elif bear_score >= 3 and is_strong_sell_eligible: action = "[⚔️ 多空交戰(偏弱)]"
+            elif bull_score > 0: action = "[⚔️ 多空交戰(震盪)]"
+            else: action = "[⚔️ 多空交戰]"
 
         alert_str = f"{action} " + ", ".join(tags) if tags else action
 
@@ -457,7 +479,7 @@ def update_technical_db(ta_results):
         print(f"❌ 寫入 Technical_DB 失敗: {e}")
 
 # ==========================================
-# 5. Telegram 訊息發送與主程式 (🚀 導入嚴格篩選推播邏輯)
+# 5. Telegram 訊息發送與主程式
 # ==========================================
 def send_tg_text(text):
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -493,8 +515,9 @@ def format_items(items):
         bear = x.get('bear_score', 0)
         pe = x.get('P/E', '無')
         
-        # 🚀 在 TG 訊息中加入多空分數直觀顯示
-        res_str += f"• <b>{safe_name}</b> (多:{bull} 空:{bear} | PE:{pe})\n   └ <code>[{tags_str}]</code>\n"
+        res_str += f"• <b>{safe_name}</b> (多:{bull} 空:{bear} | PE:{pe})
+   └ <code>[{tags_str}]</code>
+"
     return res_str
 
 def main():
@@ -521,7 +544,6 @@ def main():
 
     update_technical_db(all_results)
 
-    # 🚀 Telegram 嚴格推播分類邏輯
     for market in ['台股', '美股']:
         market_results = [x for x in all_results if x['市場'] == market]
         if not market_results: continue
@@ -533,13 +555,13 @@ def main():
             tags = item.get('tags', [])
             return any(any(kw in t for kw in keywords) for t in tags)
             
-        # 1. ⚡ 短線區分類
+        # 短線區分類
         short_bull, short_bear, short_cons = [], [], []
         for x in short_term_res:
             bull = x['bull_score']
             bear = x['bear_score']
-            is_bull = has_tag(x, ['創20日收盤高', '創50日收盤高']) or (bull >= 2 and bear == 0)
-            is_bear = has_tag(x, ['破20日收盤低', '破50日收盤低']) or (bear >= 2 and bull == 0)
+            is_bull = has_tag(x, ['創20日收高', '創50日收高', '剛站上月線', '短線均線金叉', '回後重新站上MA5']) or (bull >= 2 and bear == 0)
+            is_bear = has_tag(x, ['破20日收低', '破50日收低', '高檔跌破MA5', '實體跌破月線']) or (bear >= 2 and bull == 0)
             is_cons = not is_bull and not is_bear and has_tag(x, ['20日窄幅盤整'])
             
             x['sort_score'] = bull - bear if is_bull else (bear - bull if is_bear else 0)
@@ -548,7 +570,7 @@ def main():
             elif is_bear: short_bear.append(x)
             elif is_cons: short_cons.append(x)
 
-        # 2. 📈 長線區分類
+        # 長線區分類
         long_bull, long_bear, long_base = [], [], []
         for x in long_term_res:
             bull = x['bull_score']
@@ -557,9 +579,9 @@ def main():
             try: pos = float(pos_str)
             except: pos = 50.0
                 
-            is_bull = has_tag(x, ['創52週收盤高']) or (bull >= 3 and has_tag(x, ['週KD低檔金叉', '週MACD零下金叉'])) or (bull >= 3 and bear == 0)
-            is_bear = has_tag(x, ['破52週收盤低']) or (bear >= 3 and has_tag(x, ['週KD高檔死叉', '週MACD零上死叉'])) or (bear >= 3 and bull == 0)
-            is_base = not is_bull and not is_bear and not has_tag(x, ['創52週', '破52週']) and pos <= 30.0 and abs(bull - bear) <= 1
+            is_bull = has_tag(x, ['創52週收高']) or (bull >= 3 and has_tag(x, ['週KD低檔金叉', '週MACD零下金叉'])) or (bull >= 3 and bear == 0)
+            is_bear = has_tag(x, ['破52週收低', '連3日破月線', '三線空頭排列']) or (bear >= 3 and has_tag(x, ['週KD高檔死叉', '週MACD零上死叉'])) or (bear >= 3 and bull == 0)
+            is_base = not is_bull and not is_bear and not has_tag(x, ['創52週收高', '破52週收低']) and pos <= 30.0 and abs(bull - bear) <= 1
             
             x['sort_score'] = bull - bear if is_bull else (bear - bull if is_bear else 0)
             
@@ -567,7 +589,6 @@ def main():
             elif is_bear: long_bear.append(x)
             elif is_base: long_base.append(x)
             
-        # 3. 排序 (多空淨分優先，PE次之)
         def sort_func(x):
             pe = x.get('_raw_pe')
             return (-x['sort_score'], pe if pe is not None and not pd.isna(pe) else 9999)
@@ -580,22 +601,37 @@ def main():
         long_bear.sort(key=sort_func)
         long_base.sort(key=lambda x: (x.get('_raw_pe') if x.get('_raw_pe') is not None else 9999))
         
-        # 4. 組裝 Telegram 訊息
-        msg = f"📁 <b>【{market}】盤後技術判定</b>\n\n"
+        msg = f"📁 <b>【{market}】盤後技術判定</b>
+
+"
         has_content = False
         
         if short_bull or short_bear or short_cons:
-            msg += f"⚡ <b>短線進出專區 (嚴格篩選版)</b>\n"
-            if short_bull: msg += f"🚀 <b>偏多 / 創高動能</b>\n{format_items(short_bull[:10])}\n"
-            if short_bear: msg += f"🩸 <b>偏空 / 破底風險</b>\n{format_items(short_bear[:10])}\n"
-            if short_cons: msg += f"⚖️ <b>盤整 / 壓縮區</b>\n{format_items(short_cons[:10])}\n"
+            msg += f"⚡ <b>短線進出專區 (MA5/MA10敏捷版)</b>
+"
+            if short_bull: msg += f"🚀 <b>偏多 / 創高動能</b>
+{format_items(short_bull[:10])}
+"
+            if short_bear: msg += f"🩸 <b>偏空 / 破底風險</b>
+{format_items(short_bear[:10])}
+"
+            if short_cons: msg += f"⚖️ <b>盤整 / 壓縮區</b>
+{format_items(short_cons[:10])}
+"
             has_content = True
             
         if long_bull or long_bear or long_base:
-            msg += f"📈 <b>波段與長期投資 (Top 10)</b>\n"
-            if long_bull: msg += f"🔥 <b>長多波段 / 攻擊轉折</b>\n{format_items(long_bull[:10])}\n"
-            if long_bear: msg += f"🛑 <b>波段轉弱 / 長期風險</b>\n{format_items(long_bear[:10])}\n"
-            if long_base: msg += f"⚖️ <b>長線築底 / 壓縮沉澱</b>\n{format_items(long_base[:10])}\n"
+            msg += f"📈 <b>波段與長期投資 (Top 10)</b>
+"
+            if long_bull: msg += f"🔥 <b>長多波段 / 攻擊轉折</b>
+{format_items(long_bull[:10])}
+"
+            if long_bear: msg += f"🛑 <b>波段轉弱 / 長期風險</b>
+{format_items(long_bear[:10])}
+"
+            if long_base: msg += f"⚖️ <b>長線築底 / 壓縮沉澱</b>
+{format_items(long_base[:10])}
+"
             has_content = True
             
         if has_content:
@@ -606,3 +642,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
