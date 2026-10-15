@@ -36,7 +36,8 @@ DEFAULT_US = [
 
 # --- 2. 資料載入與輔助函式 ---
 def get_sheet_data(url, default_data, default_market):
-    if not url: return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market, 'strategy': d.get('strategy','')} for d in default_data]
+    if not url:
+        return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market, 'strategy': d.get('strategy', '')} for d in default_data]
     try:
         df = pd.read_csv(url)
         df.columns = [str(c).strip() for c in df.columns]
@@ -76,7 +77,7 @@ def get_sheet_data(url, default_data, default_market):
             return records
     except Exception as e:
         print(f"❌ 讀取清單失敗 {url}: {e}")
-    return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market, 'strategy': d.get('strategy','')} for d in default_data]
+    return [{'symbol': d['symbol'], 'name': d['name'], 'market': default_market, 'strategy': d.get('strategy', '')} for d in default_data]
 
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
@@ -278,7 +279,7 @@ def process_technical_analysis(sym, name, market, strategy):
             tags.append("週MACD零下金叉" if macd_w < 0 else "週MACD一般金叉")
             bull_score += 4
 
-        if ma5 > ma10 and ma10 > ma20 and ma20 > 0:
+        if ma20 > 0 and ma5 > ma10 and ma10 > ma20:
             tags.append("三線多頭排列")
             bull_score += 2
             
@@ -294,9 +295,15 @@ def process_technical_analysis(sym, name, market, strategy):
             tags.append("回後重新站上MA5")
             bull_score += 2
             
-        if ma20_up_5d and ma_s_up_5d: tags.append("月季線雙上彎≥5日"); bull_score += 2
-        elif ma20_up_5d: tags.append("月線上彎≥5日"); bull_score += 1
-        elif ma_s_up_5d: tags.append("季線上彎≥5日"); bull_score += 1
+        if ma20_up_5d and ma_s_up_5d:
+            tags.append("月季線雙上彎≥5日")
+            bull_score += 2
+        elif ma20_up_5d:
+            tags.append("月線上彎≥5日")
+            bull_score += 1
+        elif ma_s_up_5d:
+            tags.append("季線上彎≥5日")
+            bull_score += 1
 
         if 'Close' in df.columns:
             if len(df) >= 20:
@@ -366,4 +373,65 @@ def process_technical_analysis(sym, name, market, strategy):
                 tags.append("連3日破月線")
                 bear_score += 3
 
-        if ma5 < ma10 and ma10 < ma20 and ma20 >
+        if ma20 > 0 and ma5 < ma10 and ma10 < ma20:
+            tags.append("三線空頭排列")
+            bear_score += 3
+
+        # 動作標籤判定
+        is_strong_buy_eligible = (w_macd_gold and macd_w < 0) or (w_kd_gold and k_w < 30) or (bull_score >= 3 and bear_score == 0)
+        is_strong_sell_eligible = (w_macd_death and macd_w > 0) or (w_kd_death and k_w > 70) or (bear_score >= 3 and bull_score == 0)
+
+        if bull_score > bear_score:
+            if bull_score >= 3 and is_strong_buy_eligible: action = "[🚀 強勢買進]"
+            else: action = "[📈 短多轉折]"
+        elif bear_score > bull_score:
+            if bear_score >= 3 and is_strong_sell_eligible: action = "[🛑 強制賣出]"
+            else: action = "[⚠️ 弱勢減碼]"
+        else:
+            if bull_score == 0 and bear_score == 0: action = "[➖ 趨勢延續]"
+            elif bull_score >= 3 and is_strong_buy_eligible: action = "[⚔️ 多空交戰(偏強)]"
+            elif bear_score >= 3 and is_strong_sell_eligible: action = "[⚔️ 多空交戰(偏弱)]"
+            elif bull_score > 0: action = "[⚔️ 多空交戰(震盪)]"
+            else: action = "[⚔️ 多空交戰]"
+
+        alert_str = f"{action} " + ", ".join(tags) if tags else action
+
+        f_info = get_fundamental_info(sym)
+        pe_val = f_info.get('trailingPE')
+        try:
+            pe_val = float(pe_val)
+            pe_str = f"{pe_val:.1f}" if pd.notna(pe_val) else "無"
+        except:
+            pe_val = None
+            pe_str = "無"
+            
+        beta_val = f_info.get('beta')
+        try:
+            beta_str = f"{float(beta_val):.2f}" if pd.notna(float(beta_val)) else "無"
+        except:
+            beta_str = "無"
+
+        return {
+            "市場": market, "標的": f"{name} ({sym})", "代號": sym.split('.')[0], 
+            "狀態警示": alert_str, "🚨警示": alert_str, "均線位階": ma_status_str,
+            "52週位置": f"{pos_52w:.1f} %", "Beta": beta_str, 
+            "日KD": f"K:{k_d:.1f}/D:{d_d:.1f}",
+            "週KD": f"K:{k_w:.1f}/D:{d_w:.1f}",
+            "日MACD": f"DIF:{macd_d:.2f}",
+            "週MACD": f"DIF:{macd_w:.2f}",
+            "P/E": pe_str, "收盤價": last_p, "MA20": ma20, "季線": ma_season,
+            "tags": tags, "bull_score": bull_score, "bear_score": bear_score, "action": action,
+            "_raw_pe": pe_val, "_sym": sym, "_name": name, "策略": strategy, "df": df
+        }
+    except Exception as e:
+        print(f"處理 {sym} 發生錯誤: {e}")
+        return None
+
+# --- 4. Google Sheets 資料庫寫入防呆保護 ---
+def update_technical_db(ta_results):
+    if not GCP_CREDENTIALS or not TECHNICAL_DB_URL:
+        print("⚠️ 未設定 GCP_CREDENTIALS 或 TECHNICAL_DB_URL，略過寫入資料庫。")
+        return
+    try:
+        print("開始連線寫入 Technical_DB...")
+        creds_dict = json.loads(GCP_CREDENTIALS)
