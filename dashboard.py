@@ -749,92 +749,19 @@ with tab2:
 # ------------------------------------------
 # TAB 3: 標的比較
 # ------------------------------------------
-with tab_comp:
-    st.subheader("🆚 多檔標的走勢比較")
-    st.caption("選擇 2~4 檔標的，比較其區間累計報酬率走勢。")
-    
-    comp_options = {}
-    for item in PORTFOLIO_TW:
-        sym_raw = str(item.get('Ticker', '')).strip()
-        if sym_raw and sym_raw.lower() not in ['nan', 'none', '']:
-            sym = get_yf_ticker_tw(sym_raw)
-            disp_name = format_display_name(item.get('名稱'), sym_raw)
-            comp_options[disp_name] = sym
-            
-    for item in PORTFOLIO_US:
-        sym_raw = str(item.get('Ticker', '')).strip()
-        if sym_raw and sym_raw.lower() not in ['nan', 'none', '']:
-            disp_name = format_display_name(item.get('名稱'), sym_raw)
-            comp_options[disp_name] = sym_raw
-            
-    if comp_options:
-        all_options_list = list(comp_options.keys())
-        
-        comp_col1, comp_col2 = st.columns([3, 1])
-        with comp_col1:
-            comp_targets = st.multiselect("請選擇比較標的 (最多4檔)：", options=all_options_list, max_selections=4, key="comp_ms")
-        with comp_col2:
-            comp_period = st.radio("比較期間", ["半年", "一年", "三年"], horizontal=True, index=1)
-            
-        if comp_targets:
-            with st.spinner("載入比較數據中..."):
-                period_map = {"半年": "6mo", "一年": "1y", "三年": "3y"}
-                yf_period = period_map[comp_period]
-                
-                comp_pct_dict = {}
-                for tgt in comp_targets:
-                    sym = comp_options[tgt]
-                    try:
-                        hist = yf.Ticker(sym).history(period=yf_period, auto_adjust=True)
-                        if not hist.empty and 'Close' in hist.columns:
-                            s = hist['Close'].dropna()
-                            if len(s) > 0:
-                                s.index = pd.to_datetime(s.index).normalize()
-                                s = s[~s.index.duplicated(keep='last')]
-                                first_p = float(s.iloc[0])
-                                if first_p > 0:
-                                    comp_pct_dict[tgt] = ((s / first_p) - 1) * 100
-                    except: pass
-                
-                if comp_pct_dict:
-                    df_comp_pct = pd.DataFrame(comp_pct_dict).ffill().bfill()
-                    if not df_comp_pct.empty:
-                        fig_comp = px.line(df_comp_pct, x=df_comp_pct.index, y=df_comp_pct.columns, labels={'value': '累計含息報酬率 (%)', 'variable': '標的', 'index': '日期'})
-                        fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-                        st.plotly_chart(fig_comp, use_container_width=True)
-                    else: st.warning("選定期間內無足夠數據可供繪製比較圖。")
-                else: st.warning("無法取得選定標的的歷史走勢資料。")
-
-            st.divider()
-            st.markdown("### 🧩 比較標的之 Top 10 核心持股")
-            
-            csv_url_comp = "https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&gid=892058804"
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                resp = requests.get(csv_url_comp, headers=headers, timeout=10)
-                resp.raise_for_status()
-                df_etf_comp_db = pd.read_csv(io.StringIO(resp.text)).dropna(how='all')
-            except Exception:
-                df_etf_comp_db = pd.DataFrame()
-
-            if not df_etf_comp_db.empty and len(df_etf_comp_db.columns) >= 3:
-                etf_c = df_etf_comp_db.columns[0]
-                name_c = df_etf_comp_db.columns[1]
-                weight_c = df_etf_comp_db.columns[2]
-                
-                cols_comp = st.columns(len(comp_targets))
+cols_comp = st.columns(len(comp_targets))
                 for idx, tgt in enumerate(comp_targets):
                     with cols_comp[idx]:
                         st.markdown(f"#### 📌 {tgt}")
                         sym = comp_options[tgt]
                         clean_code = sym.split('.')[0]
                         
-# 🚀 強化防呆比對：徹底清除資料庫中的 .TW, .TWO 與隱藏空白，再與乾淨代號比對
-db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.upper()
-db_etf_codes = db_etf_codes.str.replace(r'\.TW.*', '', regex=True)
-db_etf_codes = db_etf_codes.str.replace(r'\.TWO.*', '', regex=True)
+                        # 🚀 強化防呆比對：徹底清除資料庫中的 .TW, .TWO 與隱藏空白，再與乾淨代號比對
+                        db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.upper()
+                        db_etf_codes = db_etf_codes.str.replace(r'\.TW.*', '', regex=True)
+                        db_etf_codes = db_etf_codes.str.replace(r'\.TWO.*', '', regex=True)
 
-sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
+                        sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                         
                         if not sub_df.empty:
                             sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
@@ -852,10 +779,10 @@ sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                                 disp_df.columns = ["成分股名稱", "權重 (%)"]
                                 disp_df["權重 (%)"] = disp_df["權重 (%)"].apply(lambda x: f"{x:.2f}%")
                                 st.dataframe(disp_df, hide_index=True, use_container_width=True)
-                            else: st.caption("ℹ️ 暫無有效的權重數值。")
-                        else: st.caption("ℹ️ 個別股票或未收錄成分股資料。")
-            else: st.caption("未連線至 ETF 持股資料庫，無法顯示成分股比對。")
-    else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
+                            else:
+                                st.caption("ℹ️ 暫無有效的權重數值。")
+                        else:
+                            st.caption("ℹ️ 個別股票或未收錄成分股資料。")
 
 # ------------------------------------------
 # TAB 4: 績效與觀察總覽
