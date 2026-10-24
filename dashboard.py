@@ -373,11 +373,16 @@ with tab2:
     
     if df_db.empty:
         st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認 GitHub Actions 的 `main.py` 已成功執行一次。")
-    else:
-        # 安全清洗與轉型
-        df_db['bull_score'] = pd.to_numeric(df_db.get('bull_score', 0), errors='coerce').fillna(0)
-        df_db['bear_score'] = pd.to_numeric(df_db.get('bear_score', 0), errors='coerce').fillna(0)
-        df_db['_raw_pe'] = pd.to_numeric(df_db.get('_raw_pe'), errors='coerce')
+else:
+            # 🚀 嚴格保護防禦：確保欄位存在且為 Pandas Series，絕不引發 AttributeError
+            for col in ['bull_score', 'bear_score']:
+                if col not in df_db.columns:
+                    df_db[col] = 0
+                df_db[col] = pd.to_numeric(df_db[col], errors='coerce').fillna(0)
+            
+            if '_raw_pe' not in df_db.columns:
+                df_db['_raw_pe'] = np.nan
+            df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
         
         target_options = {}
         for _, row in df_db.iterrows():
