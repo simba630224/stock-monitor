@@ -373,7 +373,7 @@ with tab2:
     
     if df_db.empty:
         st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認 GitHub Actions 的 `main.py` 已成功執行一次。")
-else:
+    else:
             # 🚀 嚴格保護防禦：確保欄位存在且為 Pandas Series，絕不引發 AttributeError
             for col in ['bull_score', 'bear_score']:
                 if col not in df_db.columns:
