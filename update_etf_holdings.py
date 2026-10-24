@@ -40,43 +40,40 @@ FEEDER_PROXY_MAP = {
 }
 
 # ==========================================
-# 3. 精準補零與個股判定 (徹底防止 2330 變成 002330)
+# 3. 精準補零與個股判定
 # ==========================================
 def normalize_tw_ticker(ticker):
     """
     精準還原台股代號：
-    - 若為 2~3 位純數字 (如 '50', '56', '878', '919', '923') -> 補 '00' 成為 '0050', '00878', '00919'
-    - 若為 3~4 位數字加英文且屬於 9 開頭 ETF (如 '981A', '988A', '679B') -> 補 '00' 成為 '00981A'
-    - 若為 4 位純數字且 >= 1000 (如 '2330', '2317', '2454') -> 一般個股，絕不補零！
-    - 若為 4 位純數字且 < 1000 (如 '0050' 被截斷或 '0919') -> 補滿開頭 '00'
+    - 若為 2~3 位純數字 -> 補 '00' (如 '50' -> '0050')
+    - 若為 4 位純數字且 >= 1000 -> 視為個股，不補零 (如 '2330' -> '2330')
+    - 若為 4 位純數字且 < 1000 -> 補滿 '00'
+    - 若為 9 開頭的 ETF -> 補 '00' (如 '9816' -> '009816')
     """
     t = str(ticker).strip().upper().replace('.TW', '').replace('.TWO', '')
     if not t:
         return ""
     
-    # 已經是 00 開頭的直接回傳 (如 0050, 00919, 009815, 00981A)
     if t.startswith('00'):
         return t
     
-    # 如果只少一個 0 (如 050, 0919, 0981A)
     if t.startswith('0'):
         return '0' + t
         
-    # 純數字判斷
     if t.isdigit():
         val = int(t)
-        # 台股一般上市櫃個股代號皆 >= 1101 (如 1303, 2330, 2454, 3711)
+        # 一般個股代號通常 >= 1101
         if len(t) == 4 and val >= 1000:
-            return t  # 這是普通個股，原樣回傳！
-        # 代號 < 1000 (例如 50, 56, 6208被吃0不會發生, 878, 919, 923, 929, 935, 9815被吃掉00變9815)
+            # 針對 9 開頭的 ETF 進行特判 (例如 9816)
+            if t.startswith('9'):
+                 return '00' + t
+            return t  
         if val < 1000:
             return '00' + t
-        # 特例：新型 6 碼 ETF 被 Google Sheet 吃掉開頭兩個 0 變成 98XX (如 9812, 9813, 9815, 9816, 9826)
         if len(t) == 4 and t.startswith('98'):
             return '00' + t
         return t
 
-    # 數字+英文字母結尾 (如 981A, 988A, 679B 被吃掉開頭 00)
     if re.match(r'^\d{3,4}[A-Z]$', t):
         return '00' + t
         
@@ -86,7 +83,6 @@ def is_tw_stock_etf(clean_ticker, category_str=""):
     """判斷是否為需要抓成分股的台股『股票型/主動型 ETF』（排除一般個股與債券B）"""
     if '個股' in str(category_str) or '債' in str(category_str):
         return False
-    # 必須是 00 開頭，且不能是 B 結尾的債券 ETF
     if clean_ticker.startswith('00') and not clean_ticker.endswith('B'):
         return True
     return False
@@ -95,11 +91,8 @@ def clean_holding_name(raw_name):
     """最高規格防雜訊黑名單 (清理代號後綴、外幣與產業分類)"""
     name = str(raw_name).strip().replace('\n', '').replace('\r', '')
     
-    # 移除開頭序號 (如 "1.台積電" -> "台積電")
     name = re.sub(r'^[\d\.,、\s]+', '', name)
-    # 移除玩股網常見的尾端股票代號 (如 "台灣積體電路製造 2330" -> "台灣積體電路製造")
     name = re.sub(r'\s+\d{4,6}[A-Z]*$', '', name)
-    # 移除括號與星號
     name = re.sub(r'\(.*?\)', '', name)
     name = re.sub(r'（.*?）', '', name)
     name = re.sub(r'\*+$', '', name)
@@ -108,7 +101,6 @@ def clean_holding_name(raw_name):
     if len(name) < 2: return None
     if re.fullmatch(r'^[0-9,\.\-\+%]+$', name.replace(' ', '')): return None
     
-    # 過濾外幣對、現金與應收帳款
     if re.search(r'[A-Z]{3}/[A-Z]{3}', name): return None
     if any(k in name.upper() for k in ['CASH', 'RECEIVABLE', 'PAYABLE', 'MARGIN', 'FUTURES']): return None
     if any(k in name for k in ['現金', '應收', '應付', '保證金', '期貨', '附買回']): return None
@@ -156,7 +148,6 @@ def parse_generic_html_tables(html_text):
             if len(cols) < 2: continue
             texts = [c.text.strip().replace(' ', '').replace('\n', '') for c in cols]
             
-            # 尋找表頭座標
             if name_idx == -1 or weight_idx == -1:
                 for i, t in enumerate(texts):
                     if any(k in t for k in ['股票名稱', '成分股', '標的名稱', '名稱', '股票', '投資標的']):
@@ -224,12 +215,11 @@ def get_us_etf_holdings(ticker, override_ticker=None):
     
     try:
         etf = yf.Ticker(ticker)
-        # 若非代理模式，先快速檢查是否為個股 (EQUITY)，避免對 META, NVDA, GOOGL 發出無謂查詢與警告
         if not override_ticker:
             try:
                 q_type = etf.fast_info.get('quoteType', '') or etf.info.get('quoteType', '')
                 if str(q_type).upper() == 'EQUITY':
-                    return []  # 確認為一般美股個股，靜默跳過！
+                    return []  
             except Exception:
                 pass
 
@@ -272,7 +262,7 @@ def get_tw_etf_holdings(clean_ticker):
     }
     
     # ----------------------------------------------------
-    # [引擎 1]：玩股網 Wantgoo (官方 PCF 完整持股，支援 00919, 00923, 00935, 00981A 等 Top 20)
+    # [引擎 1]：玩股網 Wantgoo 
     # ----------------------------------------------------
     try:
         url_w = f"https://www.wantgoo.com/stock/etf/{clean_ticker}/constituent"
@@ -288,7 +278,7 @@ def get_tw_etf_holdings(clean_ticker):
         pass
 
     # ----------------------------------------------------
-    # [引擎 2]：MoneyDJ 改良版 (移除過嚴的 '成分股' 字串限制，涵蓋 Basic0007 / 0007B)
+    # [引擎 2]：MoneyDJ 改良版 
     # ----------------------------------------------------
     endpoints = ['Basic0007.xdjhtm', 'Basic0007B.xdjhtm', 'Basic0007A.xdjhtm']
     suffixes = ['.tw', '.TW', '.two', '.TWO']
@@ -309,7 +299,7 @@ def get_tw_etf_holdings(clean_ticker):
                 pass
 
     # ----------------------------------------------------
-    # [引擎 3]：CMoney 與 口袋證券 (針對 00919, 00981A 等提供高穩定度 Top 10 備援)
+    # [引擎 3]：CMoney 與 口袋證券 
     # ----------------------------------------------------
     cmoney_urls = [
         (f"https://www.pocket.tw/etf/tw/{clean_ticker}", "口袋證券"),
@@ -378,7 +368,7 @@ def main():
     visited_tw = set()
     visited_us = set()
 
-    # 1. 處理台股 (自動跳過 2330, 2317 等個股，不重複抓取)
+    # 1. 處理台股 (自動跳過個股)
     for row in tw_records:
         raw_ticker = str(row.get('Ticker', '')).strip().upper()
         if not raw_ticker or raw_ticker in ['NAN', 'NONE']:
@@ -395,7 +385,7 @@ def main():
             if holdings:
                 all_holdings.extend(holdings)
 
-    # 2. 處理美股/英股 (自動跳過 META, NVDA, GOOGL 等個股)
+    # 2. 處理美股/英股
     for row in us_records:
         ticker = str(row.get('Ticker', '')).strip().upper()
         if not ticker or ticker in ['NAN', 'NONE'] or ticker in visited_us:
