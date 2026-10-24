@@ -838,10 +838,16 @@ with tab_comp:
                         
                         if not sub_df.empty:
                             sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
-                            sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
-                            sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
-                            sub_df = sub_df.dropna(subset=[weight_c])
                             
+                            # 🚀 更強力的浮點數轉換：先移除 % 符號，再只保留數字與小數點
+                            sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'%', '', regex=True)
+                            sub_df[weight_c] = sub_df[weight_c].str.replace(r'[^\d.-]', '', regex=True)
+                            
+                            # 嘗試轉換為數字，失敗的變 NaN
+                            sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
+                            
+                            # 濾掉空值，並取最後 10 筆做去重
+                            sub_df = sub_df.dropna(subset=[weight_c])
                             sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last').sort_values(by=weight_c, ascending=False).head(10)
                             
                             if not sub_df.empty:
@@ -856,8 +862,6 @@ with tab_comp:
                                 st.caption("ℹ️ 暫無有效的權重數值。")
                         else:
                             st.caption("ℹ️ 個別股票或未收錄成分股資料。")
-            else: st.caption("未連線至 ETF 持股資料庫，無法顯示成分股比對。")
-    else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 # ------------------------------------------
 # TAB 4: 績效與觀察總覽
 # ------------------------------------------
