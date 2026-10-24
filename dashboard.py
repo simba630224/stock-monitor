@@ -829,8 +829,12 @@ with tab_comp:
                         sym = comp_options[tgt]
                         clean_code = sym.split('.')[0]
                         
-                        db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.replace(r'\.TW.*', '', regex=True)
-                        sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
+# 🚀 強化防呆比對：徹底清除資料庫中的 .TW, .TWO 與隱藏空白，再與乾淨代號比對
+db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.upper()
+db_etf_codes = db_etf_codes.str.replace(r'\.TW.*', '', regex=True)
+db_etf_codes = db_etf_codes.str.replace(r'\.TWO.*', '', regex=True)
+
+sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                         
                         if not sub_df.empty:
                             sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
