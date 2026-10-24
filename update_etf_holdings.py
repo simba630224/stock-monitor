@@ -31,47 +31,42 @@ client = gspread.authorize(creds)
 # 2. 替身備案字典 (Plan B 備援專用)
 # ==========================================
 FEEDER_PROXY_MAP = {
-    '009813': 'XLG',    # 貝萊德 S&P 500 Top 50
-    '009815': 'MAGS',   # 大華美國 MAG7+
-    '00646': 'IVV',     # 元大 S&P 500
-    '00662': 'QQQ',     # 富邦 NASDAQ
-    '00830': 'SOXX',    # 國泰費城半導體
-    '00757': 'FNGS',    # 統一 FANG+
+    '009813': 'XLG',    
+    '009815': 'MAGS',   
+    '00646': 'IVV',     
+    '00662': 'QQQ',     
+    '00830': 'SOXX',    
+    '00757': 'FNGS',    
 }
 
 # ==========================================
 # 3. 精準補零與個股判定
 # ==========================================
 def normalize_tw_ticker(ticker):
-    """
-    精準還原台股代號：
-    - 若為 2~3 位純數字 -> 補 '00' (如 '50' -> '0050')
-    - 若為 4 位純數字且 >= 1000 -> 視為個股，不補零 (如 '2330' -> '2330')
-    - 若為 4 位純數字且 < 1000 -> 補滿 '00'
-    - 若為 9 開頭的 ETF -> 補 '00' (如 '9816' -> '009816')
-    """
+    """精準還原台股代號，修復 9816 被誤判為個股的隱形 Bug"""
     t = str(ticker).strip().upper().replace('.TW', '').replace('.TWO', '')
     if not t:
         return ""
     
     if t.startswith('00'):
         return t
-    
     if t.startswith('0'):
         return '0' + t
         
     if t.isdigit():
         val = int(t)
-        # 一般個股代號通常 >= 1101
+        # 🚀 優先攔截 Google Sheets 截斷的 009xxx 系列 (長度4，9開頭，且排除 99xx 傳產股)
+        if len(t) == 4 and t.startswith('9') and not t.startswith('99'):
+            return '00' + t
+            
+        # 🚀 台股一般個股 (>= 1000)，原樣回傳 (如 2330, 2454)
         if len(t) == 4 and val >= 1000:
-            # 針對 9 開頭的 ETF 進行特判 (例如 9816)
-            if t.startswith('9'):
-                 return '00' + t
             return t  
+            
+        # 🚀 長度小於4或數值小於1000 (如 50, 878, 919)
         if val < 1000:
             return '00' + t
-        if len(t) == 4 and t.startswith('98'):
-            return '00' + t
+            
         return t
 
     if re.match(r'^\d{3,4}[A-Z]$', t):
@@ -80,7 +75,6 @@ def normalize_tw_ticker(ticker):
     return t
 
 def is_tw_stock_etf(clean_ticker, category_str=""):
-    """判斷是否為需要抓成分股的台股『股票型/主動型 ETF』（排除一般個股與債券B）"""
     if '個股' in str(category_str) or '債' in str(category_str):
         return False
     if clean_ticker.startswith('00') and not clean_ticker.endswith('B'):
@@ -88,7 +82,6 @@ def is_tw_stock_etf(clean_ticker, category_str=""):
     return False
 
 def clean_holding_name(raw_name):
-    """最高規格防雜訊黑名單 (清理代號後綴、外幣與產業分類)"""
     name = str(raw_name).strip().replace('\n', '').replace('\r', '')
     
     name = re.sub(r'^[\d\.,、\s]+', '', name)
@@ -135,26 +128,19 @@ def clean_holding_name(raw_name):
 # 4. 四大網頁解析引擎
 # ==========================================
 def parse_generic_html_tables(html_text):
-    """通用工業級 HTML 表格解析器 (適用 MoneyDJ、玩股網、CMoney、口袋證券)"""
     soup = BeautifulSoup(html_text, 'html.parser')
     results = []
-    
     for tbl in soup.find_all('table'):
         name_idx, weight_idx = -1, -1
         rows = tbl.find_all('tr')
-        
         for row in rows:
             cols = row.find_all(['th', 'td'])
             if len(cols) < 2: continue
             texts = [c.text.strip().replace(' ', '').replace('\n', '') for c in cols]
-            
             if name_idx == -1 or weight_idx == -1:
                 for i, t in enumerate(texts):
-                    if any(k in t for k in ['股票名稱', '成分股', '標的名稱', '名稱', '股票', '投資標的']):
-                        if name_idx == -1: name_idx = i
-                    if any(k in t for k in ['權重', '持股比例', '比重', '比例', '佔比']):
-                        if '增減' not in t and '漲跌' not in t:
-                            weight_idx = i
+                    if any(k in t for k in ['股票名稱', '成分股', '標的名稱', '名稱', '股票', '投資標的']): name_idx = i
+                    if any(k in t for k in ['權重', '持股比例', '比重', '比例', '佔比']) and '增減' not in t and '漲跌' not in t: weight_idx = i
             else:
                 if len(cols) > max(name_idx, weight_idx):
                     raw_name = cols[name_idx].text.strip()
@@ -163,18 +149,14 @@ def parse_generic_html_tables(html_text):
                         w_str = cols[weight_idx].text.replace('%', '').replace(',', '').strip()
                         try:
                             w = float(w_str)
-                            if 0 < w <= 100:
-                                results.append({"成分股名稱": name, "權重(%)": w})
+                            if 0 < w <= 100: results.append({"成分股名稱": name, "權重(%)": w})
                         except ValueError: pass
     return results
 
 def parse_yahoo_json(html_text):
-    """攔截 Yahoo 隱藏 JSON"""
     results = []
     match = re.search(r'"holdings":\[(.*?)\](?=,"[a-zA-Z]+":)', html_text)
-    if not match:
-        match = re.search(r'"holdings":\[(.*?)\]', html_text)
-        
+    if not match: match = re.search(r'"holdings":\[(.*?)\]', html_text)
     if match:
         items = re.findall(r'{[^}]+}', match.group(1))
         for item in items:
@@ -185,49 +167,34 @@ def parse_yahoo_json(html_text):
                 if name:
                     try:
                         w = float(r_match.group(1))
-                        if 0 < w <= 100:
-                            results.append({"成分股名稱": name, "權重(%)": w})
+                        if 0 < w <= 100: results.append({"成分股名稱": name, "權重(%)": w})
                     except ValueError: pass
     return results
 
 def process_holdings(ticker, holdings_list):
-    """綁定代號並移除重複項，上限切齊 Top 20"""
     unique_dict = {}
     for h in holdings_list:
         name = h["成分股名稱"]
         if name not in unique_dict or h["權重(%)"] > unique_dict[name]["權重(%)"]:
             unique_dict[name] = h
-            
     res = list(unique_dict.values())
     res = sorted(res, key=lambda x: x['權重(%)'], reverse=True)[:20]
-    
-    return [{
-        "ETF代號": ticker,
-        "成分股名稱": h["成分股名稱"],
-        "權重(%)": h["權重(%)"]
-    } for h in res]
+    return [{"ETF代號": ticker, "成分股名稱": h["成分股名稱"], "權重(%)": h["權重(%)"]} for h in res]
 
 # ==========================================
 # 5. 台美股 ETF 抓取主流程
 # ==========================================
 def get_us_etf_holdings(ticker, override_ticker=None):
     target_output_ticker = override_ticker if override_ticker else ticker
-    
     try:
         etf = yf.Ticker(ticker)
         if not override_ticker:
             try:
                 q_type = etf.fast_info.get('quoteType', '') or etf.info.get('quoteType', '')
-                if str(q_type).upper() == 'EQUITY':
-                    return []  
-            except Exception:
-                pass
-
-        msg = f"🔍 正在抓取海外 ETF: {ticker}"
-        if override_ticker:
-            msg = f"🔄 [特例/備案啟動]: 透過 {ticker} 抓取 {override_ticker} 的底層資料..."
+                if str(q_type).upper() == 'EQUITY': return []  
+            except Exception: pass
+        msg = f"🔍 正在抓取海外 ETF: {ticker}" if not override_ticker else f"🔄 [特例啟動]: 透過 {ticker} 抓取 {override_ticker}..."
         print(msg)
-
         fd = etf.get_funds_data()
         if fd and fd.top_holdings is not None and not fd.top_holdings.empty:
             df = fd.top_holdings.head(20) 
@@ -237,17 +204,13 @@ def get_us_etf_holdings(ticker, override_ticker=None):
                 if pd.notna(w) and w > 0:
                     raw_name = row.get('Name', symbol)
                     name = clean_holding_name(raw_name) if clean_holding_name(raw_name) else symbol
-                    if name:
-                        result.append({"成分股名稱": name, "權重(%)": round(w * 100, 2)})
+                    if name: result.append({"成分股名稱": name, "權重(%)": round(w * 100, 2)})
             if result:
                 res_list = process_holdings(target_output_ticker, result)
                 print(f"✅ [來源: YFinance] 成功抓取 {target_output_ticker}，共 {len(res_list)} 檔")
                 return res_list
-    except Exception:
-        pass
-    
-    if override_ticker:
-        print(f"⚠️ 海外替身 {ticker} 亦無提供成分股明細。")
+    except Exception: pass
+    if override_ticker: print(f"⚠️ 海外替身 {ticker} 亦無提供成分股明細。")
     return []
 
 def get_tw_etf_holdings(clean_ticker):
@@ -256,14 +219,8 @@ def get_tw_etf_holdings(clean_ticker):
         return get_us_etf_holdings('1306.T', override_ticker='009812')
         
     print(f"🔍 正在抓取台股 ETF: {clean_ticker}")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    # ----------------------------------------------------
-    # [引擎 1]：玩股網 Wantgoo 
-    # ----------------------------------------------------
     try:
         url_w = f"https://www.wantgoo.com/stock/etf/{clean_ticker}/constituent"
         res = requests.get(url_w, headers=headers, timeout=12)
@@ -274,12 +231,8 @@ def get_tw_etf_holdings(clean_ticker):
                 print(f"✅ [來源: 玩股網 Wantgoo] 成功抓取 {clean_ticker}，共 {len(final_results)} 檔純淨資料")
                 time.sleep(1)
                 return final_results
-    except Exception:
-        pass
+    except Exception: pass
 
-    # ----------------------------------------------------
-    # [引擎 2]：MoneyDJ 改良版 
-    # ----------------------------------------------------
     endpoints = ['Basic0007.xdjhtm', 'Basic0007B.xdjhtm', 'Basic0007A.xdjhtm']
     suffixes = ['.tw', '.TW', '.two', '.TWO']
     for endpoint in endpoints:
@@ -295,16 +248,9 @@ def get_tw_etf_holdings(clean_ticker):
                         print(f"✅ [來源: MoneyDJ ({endpoint})] 成功抓取 {clean_ticker}，共 {len(final_results)} 檔純淨資料")
                         time.sleep(1)
                         return final_results
-            except Exception:
-                pass
+            except Exception: pass
 
-    # ----------------------------------------------------
-    # [引擎 3]：CMoney 與 口袋證券 
-    # ----------------------------------------------------
-    cmoney_urls = [
-        (f"https://www.pocket.tw/etf/tw/{clean_ticker}", "口袋證券"),
-        (f"https://www.cmoney.tw/etf/tw/{clean_ticker}", "CMoney")
-    ]
+    cmoney_urls = [(f"https://www.pocket.tw/etf/tw/{clean_ticker}", "口袋證券"), (f"https://www.cmoney.tw/etf/tw/{clean_ticker}", "CMoney")]
     for url_c, src_name in cmoney_urls:
         try:
             res = requests.get(url_c, headers=headers, timeout=10)
@@ -316,12 +262,8 @@ def get_tw_etf_holdings(clean_ticker):
                     print(f"✅ [來源: {src_name}] 成功抓取 {clean_ticker}，共 {len(final_results)} 檔純淨資料")
                     time.sleep(1)
                     return final_results
-        except Exception:
-            pass
+        except Exception: pass
 
-    # ----------------------------------------------------
-    # [引擎 4]：Yahoo JSON 攔截
-    # ----------------------------------------------------
     for suffix in ['.TW', '.TWO']:
         try:
             url_y = f"https://tw.stock.yahoo.com/quote/{clean_ticker}{suffix}/holding"
@@ -333,18 +275,13 @@ def get_tw_etf_holdings(clean_ticker):
                     print(f"✅ [來源: Yahoo JSON] 成功抓取 {clean_ticker}，共 {len(final_results)} 檔純淨資料")
                     time.sleep(1)
                     return final_results
-        except Exception:
-            pass
+        except Exception: pass
 
-    # ----------------------------------------------------
-    # [最後備案 Plan B]：海外替身字典
-    # ----------------------------------------------------
     if clean_ticker in FEEDER_PROXY_MAP:
         proxy_ticker = FEEDER_PROXY_MAP[clean_ticker]
         print(f"⚠️ 台灣網站查無 {clean_ticker} 資料，啟動海外替身備案 ({proxy_ticker})...")
         proxy_results = get_us_etf_holdings(proxy_ticker, override_ticker=clean_ticker)
-        if proxy_results:
-            return proxy_results
+        if proxy_results: return proxy_results
 
     print(f"⚠️ {clean_ticker} 查無明細 (可能為純期貨/主動型未揭露或新股空窗期)。")
     time.sleep(1)
@@ -355,49 +292,37 @@ def get_tw_etf_holdings(clean_ticker):
 # ==========================================
 def main():
     print("🚀 開始執行 ETF 持股更新作業 (四大引擎 + 精準過濾個股版)...")
-    
     try:
         portfolio_sheet = client.open_by_url(PORTFOLIO_SHEET_URL)
         tw_records = portfolio_sheet.worksheet("TW_Portfolio").get_all_records()
         us_records = portfolio_sheet.worksheet("US_Portfolio").get_all_records()
     except Exception as e:
-        print(f"❌ 讀取 Portfolio_streamlit 失敗: {e}")
+        print(f"❌ 讀取 Portfolio 失敗: {e}")
         return
 
     all_holdings = []
     visited_tw = set()
     visited_us = set()
 
-    # 1. 處理台股 (自動跳過個股)
     for row in tw_records:
         raw_ticker = str(row.get('Ticker', '')).strip().upper()
-        if not raw_ticker or raw_ticker in ['NAN', 'NONE']:
-            continue
+        if not raw_ticker or raw_ticker in ['NAN', 'NONE']: continue
         category_str = str(row.get('類別', '')).strip()
         clean_ticker = normalize_tw_ticker(raw_ticker)
-        
-        if clean_ticker in visited_tw:
-            continue
-            
+        if clean_ticker in visited_tw: continue
         if is_tw_stock_etf(clean_ticker, category_str):
             visited_tw.add(clean_ticker)
             holdings = get_tw_etf_holdings(clean_ticker)
-            if holdings:
-                all_holdings.extend(holdings)
+            if holdings: all_holdings.extend(holdings)
 
-    # 2. 處理美股/英股
     for row in us_records:
         ticker = str(row.get('Ticker', '')).strip().upper()
-        if not ticker or ticker in ['NAN', 'NONE'] or ticker in visited_us:
-            continue
+        if not ticker or ticker in ['NAN', 'NONE'] or ticker in visited_us: continue
         category_str = str(row.get('類別', '')).strip()
-        if '個股' in category_str:
-            continue
-            
+        if '個股' in category_str: continue
         visited_us.add(ticker)
         holdings = get_us_etf_holdings(ticker)
-        if holdings:
-            all_holdings.extend(holdings)
+        if holdings: all_holdings.extend(holdings)
 
     if not all_holdings:
         print("⚠️ 最終未取得任何 ETF 的持股資料。")
@@ -406,7 +331,6 @@ def main():
     df_holdings = pd.DataFrame(all_holdings)
     cols_order = ['ETF代號', '成分股名稱', '權重(%)']
     df_holdings = df_holdings[cols_order]
-    
     df_holdings.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_holdings = df_holdings.fillna(0)
     
@@ -422,14 +346,10 @@ def main():
         except gspread.exceptions.WorksheetNotFound:
             print(f"✨ 建立新的月份工作表: {sheet_title}")
             ws = db_sheet.add_worksheet(title=sheet_title, rows="2000", cols="10")
-            
         ws.clear()
         data_to_write = [df_holdings.columns.values.tolist()] + df_holdings.values.tolist()
-        try:
-            ws.update(values=data_to_write, range_name="A1")
-        except TypeError:
-            ws.update("A1", data_to_write)
-            
+        try: ws.update(values=data_to_write, range_name="A1")
+        except TypeError: ws.update("A1", data_to_write)
         print(f"✅ 成功將所有 ETF 持股寫入 Google Sheets ({sheet_title})！")
     except Exception as e:
         print(f"❌ 寫入 ETF_Holdings_DB 失敗: {e}")
