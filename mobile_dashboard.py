@@ -26,7 +26,7 @@ def check_password():
         return True
 
     # 取得設定的密碼 (優先讀取 Secrets，若無則使用預設值 admin888)
-    correct_password = st.secrets.get("APP_PASSWORD", "19770614")
+    correct_password = st.secrets.get("APP_PASSWORD", "admin888")
 
     st.markdown("### 🔒 個人投資儀表板 (受保護存取)")
     pwd_input = st.text_input("請輸入存取密碼：", type="password")
@@ -74,7 +74,7 @@ def format_display_name(name_raw, sym_raw):
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # 🛑 請將您的 Technical_DB 試算表網址貼在引號內！
-TECHNICAL_DB_URL = "https://docs.google.com/spreadsheets/d/15F1CRaVUlgQpwbYqFQCwFiyCjmMksEBEd5CnIvF_zFs/edit" 
+TECHNICAL_DB_URL = "" 
 
 def fetch_and_clean_portfolio(worksheet_name, default_category):
     try:
@@ -545,18 +545,14 @@ with tab_hl:
                 if sub_df.empty: return "> 目前無符合條件標的"
                 res = ""
                 for _, r in sub_df.iterrows():
-                    pe_val = r.get('_raw_pe')
+                    pe_val = r['_raw_pe']
                     try:
                         pe_str = f"PE:{float(pe_val):.1f}" if pd.notna(pe_val) else "無PE"
                     except:
                         pe_str = "無PE"
-                        
-                    bull_s = int(r.get('bull_score', 0))
-                    bear_s = int(r.get('bear_score', 0))
-                    tags_str = r.get('tags', '')
-                    name_disp = r.get('顯示名稱', '未知')
-                    
-                    res += f"- **{name_disp}** (多:{bull_s} 空:{bear_s} | {pe_str})\n  - `[{tags_str}]`\n"
+                    tags_str = r['tags']
+                    name_disp = r['顯示名稱']
+                    res += f"- **{name_disp}** ({pe_str})\n  - `[{tags_str}]`\n"
                 return res
 
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
