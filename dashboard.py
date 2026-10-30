@@ -157,22 +157,27 @@ def load_trading_journal():
 @st.cache_data(ttl=900)
 def load_daily_report():
     try:
-        # 🚀 自動抓取當月的工作表名稱 (例如: Daily Report 2026-10)
-        current_month_sheet = datetime.now().strftime("Daily Report %Y-%m")
-        csv_url = f"https://docs.google.com/spreadsheets/d/1StOQTEpoTNSLU140CnOeUO94m0dZ5imX4oH0wlqAQZw/gviz/tq?tqx=out:csv&sheet={current_month_sheet}"
+        now = datetime.now()
+        # 🚀 自動抓取當月與上個月的工作表名稱 (例如: Daily Report 2026-10)
+        ws_current = f"Daily Report {now.strftime('%Y-%m')}"
+        ws_prev = f"Daily Report {(now.replace(day=1) - pd.Timedelta(days=1)).strftime('%Y-%m')}"
         
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(csv_url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        
-        df = pd.read_csv(io.StringIO(resp.text))
+        df_list = []
+        for ws in [ws_current, ws_prev]:
+            try:
+                temp_df = conn.read(spreadsheet=DAILY_REPORT_URL, worksheet=ws, ttl=900)
+                if temp_df is not None and not temp_df.empty:
+                    df_list.append(temp_df)
+            except: pass
+                
+        if not df_list: return pd.DataFrame()
+            
+        df = pd.concat(df_list, ignore_index=True)
         df.columns = [str(c).strip() for c in df.columns]
-        df = df.dropna(how='all')
-        df = df.fillna("")
+        df = df.dropna(how='all').fillna("")
         df = df.replace(['nan', 'NaN', 'None', '<NA>'], '')
         return df
     except Exception as e:
-        print(f"無法載入快報：{e}")
         return pd.DataFrame()
 
 # ==========================================
