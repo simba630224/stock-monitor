@@ -116,7 +116,16 @@ def write_to_sheets(rows: list):
     creds = os.getenv('GCP_CREDENTIALS')
     if not creds: return print("未設定 GCP 憑證")
     try:
-        gc = gspread.authorize(Credentials.from_service_account_info(json.loads(creds), scopes=['https://www.googleapis.com/auth/spreadsheets']))
+        creds_dict = json.loads(creds)
+        # 🕵️ 讓機器人自己報上名來！
+        print(f"🕵️ 正在嘗試寫入的機器人帳號是：{creds_dict.get('client_email')}")
+        
+        # 💡 擴展權限範圍：包含 Drive 權限，避免建立新分頁被擋
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        gc = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
         sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1StOQTEpoTNSLU140CnOeUO94m0dZ5imX4oH0wlqAQZw/edit")
         sheet_name = f"{SHEET_TAB_PREFIX} {datetime.now(tz_tw).strftime('%Y-%m')}"
         
@@ -131,7 +140,3 @@ def write_to_sheets(rows: list):
         else:
             print("⚠️ 警告：沒有產生任何資料列，跳過寫入。")
     except Exception as e: print(f"❌ 寫入 Google Sheets 失敗: {e}")
-
-if __name__ == "__main__":
-    print(f"開始掃描... {datetime.now(tz_tw).strftime('%Y-%m-%d %H:%M:%S')}")
-    write_to_sheets(make_rows("台股", DEFAULT_TW) + make_rows("美股", DEFAULT_US))
