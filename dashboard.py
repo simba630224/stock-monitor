@@ -153,7 +153,8 @@ def load_value_history():
 def load_trading_journal():
     try:
         return conn.read(worksheet="Trading_Journal", ttl=600)
-    except: return pd.DataFrame()
+    except:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=900)
 def load_daily_report():
@@ -170,7 +171,8 @@ def load_daily_report():
                     df_list.append(temp_df)
             except: pass
                 
-        if not df_list: return pd.DataFrame()
+        if not df_list:
+            return pd.DataFrame()
             
         df = pd.concat(df_list, ignore_index=True)
         df.columns = [str(c).strip() for c in df.columns]
