@@ -2,7 +2,7 @@ name: 1. 台北盤前全方位分析 (07:15)
 
 on:
   schedule:
-    - cron: '15 21 * * 0-4' # 台北 07:15，週一至週五
+    - cron: '15 21 * * 0-4' # 台北 05:15，週一至週五
   workflow_dispatch:
 
 jobs:
