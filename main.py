@@ -104,7 +104,7 @@ def analyze_ma_relation(price, ma_s1, ma_s2, ma_l1, ma_l2):
     return status
 
 # ==========================================
-# 3. 核心技術分析引擎 (含短線移動停利防線)
+# 3. 核心技術分析引擎 (完全對齊前端標籤)
 # ==========================================
 def get_fundamental_info(sym):
     try:
@@ -128,7 +128,6 @@ def get_stock_data(sym):
                 df = df[available_cols].astype(float).dropna(subset=['Close'])
                 if 'Close' not in df.columns or len(df) < 2: continue
                 
-                # 計算短中長均線 (新增 MA5 作為短線第一道防線)
                 df['MA5'] = df['Close'].rolling(5, min_periods=1).mean()
                 df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
                 df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
@@ -267,12 +266,12 @@ def process_technical_analysis(sym, name, market, strategy):
             d_kd_death = k_d < d_d and prev_k_d >= prev_d_d
 
         tags = []
-        short_exit_tags = []  # 🚀 專門記錄短線移動停利/轉弱訊號
+        short_exit_tags = [] 
         bull_score = 0
         bear_score = 0
 
         # ==========================================================
-        # 🚀 1. 收盤價創 20日 / 50日 新高與新低判定 (嚴格採用收盤價)
+        # 🚀 1. 收盤價創 20日 / 50日 新高與新低判定 (完全對齊前端)
         # ==========================================================
         is_breakout_high = False
         is_breakdown_low = False
@@ -280,81 +279,84 @@ def process_technical_analysis(sym, name, market, strategy):
             h_50_c = df['Close'].tail(50).max()
             l_50_c = df['Close'].tail(50).min()
             if last_p >= h_50_c:
-                tags.append("🚀創50日收盤高")
+                tags.append("🚀創50日收高")
                 bull_score += 2
                 is_breakout_high = True
             elif last_p <= l_50_c:
-                tags.append("☠️破50日收盤低")
+                tags.append("☠️破50日收低")
                 bear_score += 2
                 is_breakdown_low = True
         if len(df) >= 20:
             if not is_breakout_high and last_p >= high_20d_close:
-                tags.append("🔥創20日收盤高")
+                tags.append("🔥創20日收高")
                 bull_score += 1
                 is_breakout_high = True
             elif not is_breakdown_low and last_p <= low_20d_close:
-                tags.append("🩸破20日收盤低")
+                tags.append("🩸破20日收低")
                 bear_score += 1
                 is_breakdown_low = True
 
         # ==========================================================
-        # 🚀 2. 名師均線戰法 (MA5 / MA10 / MA20 三線多空與短線三道防線)
+        # 🚀 2. 均線戰法 (完全對齊前端)
         # ==========================================================
-        # 三線多頭排列：MA5 > MA10 > MA20 且站上 MA5
         if last_p > ma5 and ma5 > ma10 and ma10 > ma20:
             tags.append("🔥三線多頭排列")
             bull_score += 2
-        elif last_p > ma5 and prev_p <= prev_ma5 and last_p > ma20:
-            tags.append("📈回後站上MA5")
-            bull_score += 1
 
-        # 三線空頭排列：MA5 < MA10 < MA20 且跌破 MA5
         if last_p < ma5 and ma5 < ma10 and ma10 < ma20:
             tags.append("🩸三線空頭排列")
             bear_score += 2
 
-        # 💰【短線移動停利防線】專門解決「獲利回吐、由盈轉虧」
-        # 防線一：跌破 5 日線 (剛跌破，或位於 5 日線下且 5 日線下彎)
+        # 均線黃金交叉與站上判定
+        if last_p > ma20 and prev_p <= prev_ma20:
+            tags.append("剛站上月線")
+            bull_score += 1
+            
+        if ma5 > ma10 and prev_ma5 <= prev_ma10:
+            tags.append("短線均線金叉")
+            bull_score += 1
+            
+        if last_p > ma5 and prev_p <= prev_ma5 and last_p > ma20:
+            tags.append("回後重新站上MA5")
+            bull_score += 1
+
+        # 短線停利與破線判定
         broke_ma5_today = (last_p < ma5 and prev_p >= prev_ma5)
-        below_ma5_falling = (last_p < ma5 and ma5 < prev_ma5)
-        # 防線二：跌破 10 日線 (短線波段生命線失守)
         broke_ma10_today = (last_p < ma10 and prev_p >= prev_ma10)
-        below_ma10 = (last_p < ma10)
-        # 防線三：近 10 日最高收盤價回落 >= 4.5% (吊燈鎖利)
         pullback_10d_pct = ((high_10d_close - last_p) / high_10d_close * 100) if high_10d_close > 0 else 0.0
+
+        if k_d > 70 and last_p < ma5 and prev_p >= prev_ma5:
+            tags.append("高檔跌破MA5")
+            bear_score += 1
 
         if broke_ma10_today:
             tags.append("🛑剛破10日線(短線清倉)")
             short_exit_tags.append("🛑剛破10日線(短線清倉)")
             bear_score += 2
-        elif below_ma10 and last_p >= ma20:
-            tags.append("🛑破10日線(短線出場)")
-            short_exit_tags.append("🛑破10日線(短線出場)")
-            bear_score += 1
         elif broke_ma5_today:
             tags.append("⚠️剛破5日線(短線減碼)")
             short_exit_tags.append("⚠️剛破5日線(短線減碼)")
             bear_score += 1
-        elif below_ma5_falling and last_p >= ma10:
-            tags.append("⚠️破5日線且下彎(短線停利)")
-            short_exit_tags.append("⚠️破5日線且下彎(短線停利)")
 
         if pullback_10d_pct >= 4.5 and last_p >= ma20:
             tags.append(f"💰10日高點回落{pullback_10d_pct:.1f}%(鎖利)")
             short_exit_tags.append(f"💰10日高點回落{pullback_10d_pct:.1f}%(鎖利)")
             bear_score += 1
 
-        # 連 3 日跌破月線 (MA20) 確認波段轉空
         below_ma20_3d = len(df) >= 3 and all(df['Close'].iloc[i] < df['MA20'].iloc[i] for i in [-1, -2, -3])
         if last_p < ma20 and prev_p >= prev_ma20:
-            tags.append("🔴今日跌破月線")
-            bear_score += 1
+            if 'High' in df.columns and df['High'].iloc[-1] < ma20:
+                tags.append("實體跌破月線")
+                bear_score += 2
+            else:
+                tags.append("🔴今日跌破月線")
+                bear_score += 1
         elif below_ma20_3d:
             tags.append("🔴連3日破月線")
             bear_score += 2
 
         # ==========================================================
-        # 🚀 3. KD 與 MACD 指標 (含高檔鈍化保護 & 鈍化結束出場吹哨)
+        # 🚀 3. KD 與 MACD 指標 (完全對齊前端)
         # ==========================================================
         has_w_macd_low_gold = w_macd_gold and (macd_w < 0)
         has_w_kd_low_gold = w_kd_gold and (k_w < 50)
@@ -377,7 +379,6 @@ def process_technical_analysis(sym, name, market, strategy):
             tags.append("日KD低檔金叉")
             bull_score += 1
 
-        # 高檔鈍化判斷：K > 80 視為強勢鈍化不亂賣；但一旦跌破 80 且死叉/破 MA5 立刻吹哨！
         is_kd_passivation = (k_d >= 80 and last_p >= ma5)
         if is_kd_passivation:
             tags.append("🔥日KD高檔鈍化(續抱)")
@@ -442,9 +443,8 @@ def process_technical_analysis(sym, name, market, strategy):
                 is_narrow_20d = True
 
         # ==========================================================
-        # 🚀 5. 綜合動作評級 (區分短線專屬狀態 vs 長線波段狀態)
+        # 🚀 5. 綜合動作評級
         # ==========================================================
-        # 判斷是否觸發「短線移動停利警戒」：長線還沒完全死透(在月線之上或未破底)，但短線已破 MA5/MA10 或高點回落 >= 4.5%
         is_short_profit_take = len(short_exit_tags) > 0 and (last_p >= ma20 or bull_score > 0) and not is_breakdown_low
 
         is_strong_buy_eligible = (has_w_macd_low_gold or has_w_kd_low_gold or is_breakout_high) and (last_p >= ma20)
@@ -511,7 +511,7 @@ def process_technical_analysis(sym, name, market, strategy):
         return None
 
 # ==========================================
-# 4. Google Sheets 資料庫寫入防呆保護
+# 4. Google Sheets 資料庫寫入
 # ==========================================
 def update_technical_db(ta_results):
     if not GCP_CREDENTIALS or not TECHNICAL_DB_URL:
@@ -599,15 +599,14 @@ def main():
 
     update_technical_db(all_results)
 
-    # 1. 短線進出專區推播 (台美股合併呈現，凸顯移動停利警戒)
     short_results = [x for x in all_results if '短' in str(x.get('策略', ''))]
     if short_results:
         s_attack = [x for x in short_results if x['short_profit_take'] == 'N' and (
-            any(k in str(x['tags']) for k in ['創50日收盤高', '創20日收盤高']) or (x['bull_score'] >= 2 and x['bear_score'] == 0)
+            any(k in str(x['tags']) for k in ['創50日收高', '創20日收高']) or (x['bull_score'] >= 2 and x['bear_score'] == 0)
         )]
         s_profit = [x for x in short_results if x['short_profit_take'] == 'Y']
         s_stop = [x for x in short_results if x not in s_profit and (
-            any(k in str(x['tags']) for k in ['破50日收盤低', '破20日收盤低', '連3日破月線', '今日跌破月線']) or (x['bear_score'] >= 2 and x[' bear_score' if ' bear_score' in x else 'bear_score'] > x['bull_score'])
+            any(k in str(x['tags']) for k in ['破50日收低', '破20日收低', '連3日破月線', '實體跌破月線']) or (x['bear_score'] >= 2 and x[' bear_score' if ' bear_score' in x else 'bear_score'] > x['bull_score'])
         )]
         
         if any([s_attack, s_profit, s_stop]):
@@ -621,7 +620,6 @@ def main():
             send_tg_text(msg_short.strip())
             time.sleep(1)
 
-    # 2. 波段與長期投資 Top 10 推播
     normal_results = [x for x in all_results if '短' not in str(x.get('策略', ''))]
     for market in ['台股', '美股']:
         market_results = [x for x in normal_results if x['市場'] == market]
