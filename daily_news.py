@@ -14,6 +14,7 @@ import pandas as pd
 import yfinance as yf
 from google.oauth2.service_account import Credentials
 
+# 🚀 強制鎖定台灣時間，避免 GitHub 伺服器時區錯誤導致崩潰
 tz_tw = timezone(timedelta(hours=8))
 
 SHEET_TAB_PREFIX = "Daily Report"
@@ -58,6 +59,7 @@ def ai_summary(company: str, d: dict, technical: str, news: str) -> str:
         client = OpenAI(api_key=key)
         prompt = (f"以繁體中文寫不超過50個字的中性投資訊報摘要，不得下交易指令，不得提及公司名稱或代號。"
                   f"公司:{company}; 技術訊號:{technical}; RSI:{fmt(d.get('rsi',50),0)}; 公開資訊:{news[:180]}")
+        # 🚀 升級至 OpenAI 新版 API 寫法
         res = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
@@ -69,7 +71,7 @@ def ai_summary(company: str, d: dict, technical: str, news: str) -> str:
         return fallback_summary(company, d, technical, news)
 
 def indicators(symbol: str) -> dict:
-    # 🚀 根據歷史經驗，改用 history() 避免 yf.download 被 Yahoo 阻擋
+    # 🚀 將 download 改為 history，降低被 Yahoo 阻擋機率
     tk = yf.Ticker(symbol)
     df = tk.history(period="6mo")
     if df.empty or len(df) < 50: 
@@ -117,14 +119,11 @@ def write_to_sheets(rows: list):
     if not creds: return print("未設定 GCP 憑證")
     try:
         creds_dict = json.loads(creds)
-        # 🕵️ 讓機器人自己報上名來！
-        print(f"🕵️ 正在嘗試寫入的機器人帳號是：{creds_dict.get('client_email')}")
+        # 🕵️ 清楚印出嘗試登入的機器人帳號，方便核對權限
+        print(f"🕵️ 嘗試登入帳號: {creds_dict.get('client_email')}")
         
-        # 💡 擴展權限範圍：包含 Drive 權限，避免建立新分頁被擋
-        scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
+        # 💡 擴展權限範圍包含 Drive，避免建立新分頁被阻擋
+        scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         gc = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
         sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1StOQTEpoTNSLU140CnOeUO94m0dZ5imX4oH0wlqAQZw/edit")
         sheet_name = f"{SHEET_TAB_PREFIX} {datetime.now(tz_tw).strftime('%Y-%m')}"
@@ -140,3 +139,7 @@ def write_to_sheets(rows: list):
         else:
             print("⚠️ 警告：沒有產生任何資料列，跳過寫入。")
     except Exception as e: print(f"❌ 寫入 Google Sheets 失敗: {e}")
+
+if __name__ == "__main__":
+    print(f"開始掃描... {datetime.now(tz_tw).strftime('%Y-%m-%d %H:%M:%S')}")
+    write_to_sheets(make_rows("台股", DEFAULT_TW) + make_rows("美股", DEFAULT_US))
