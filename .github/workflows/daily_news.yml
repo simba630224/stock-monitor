@@ -1,0 +1,32 @@
+name: 每日新聞快報 (Daily News Report)
+
+on:
+  schedule:
+    # 每天早上 08:00 執行 (台灣時間 = UTC+8，所以 Cron 設為 00:00)
+    - cron: '0 22 * * *'
+  workflow_dispatch: # 允許手動觸發測試
+
+jobs:
+  run-news-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 取得程式碼 (Checkout)
+        uses: actions/checkout@v4
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安裝所需套件
+        run: |
+          pip install --upgrade pip
+          pip install yfinance pandas numpy requests feedparser gspread google-auth openai
+
+      - name: 執行新聞抓取腳本
+        env:
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # 可選：若您有設定特定模型，可加入 OPENAI_MODEL
+        run: python daily_news.py
