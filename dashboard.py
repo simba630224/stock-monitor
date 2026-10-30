@@ -252,6 +252,7 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
+# 🚀 重新加入即時運算模組
 @st.cache_data(ttl=900)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
     result = {
@@ -389,7 +390,7 @@ with tab1:
                 if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
                 ticker = get_yf_ticker_tw(ticker_str)
                 asset_type = str(item.get('類別', '台股')).strip()
-                if not asset_type or asset_type.lower() in ['nan', 'none', '']: asset_type = '台股未分類'
+                if not asset_type or asset_type.lower() == 'nan': asset_type = '台股未分類'
                 
                 price, div_2026, div_1y = get_basic_data(ticker)
                 shares_own = safe_float(item.get('Shares'))
@@ -414,7 +415,7 @@ with tab1:
                 ticker_str = str(item['Ticker']).strip()
                 if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
                 asset_type = str(item.get('類別', '美股')).strip()
-                if not asset_type or asset_type.lower() in ['nan', 'none', '']: asset_type = '美股未分類'
+                if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
                 
                 price, div_2026, div_1y = get_basic_data(ticker_str)
                 shares_own = safe_float(item.get('Shares'))
@@ -553,7 +554,6 @@ with tab2:
         st.warning("⚠️ 尚未讀取到 `Technical_DB` 資料庫。請確認您已在第 44 行正確填寫網址，且後台爬蟲已寫入資料。")
     else:
         try:
-            # 🚀 嚴格保護防禦：確保欄位存在且為 Pandas Series，絕不引發 AttributeError
             for col in ['bull_score', 'bear_score']:
                 if col not in df_db.columns:
                     df_db[col] = 0
@@ -587,12 +587,9 @@ with tab2:
                 return str(row.get('策略', '')).strip()
 
             df_db['策略'] = df_db.apply(resolve_strategy, axis=1)
-            # 🚀 絕對防呆的 nan 清洗法
             df_db['策略'] = df_db['策略'].apply(lambda x: '' if str(x).strip().lower() in ['nan', 'none', 'null', '<na>', ''] else str(x).strip())
             
             df_db['顯示名稱'] = df_db.apply(lambda r: format_display_name(r.get('_name'), r.get('_sym')), axis=1)
-            
-            # 🚀 補回多空分數獨立欄位
             df_db['多空分數'] = df_db.apply(lambda r: f"多: {int(float(r.get('bull_score', 0)))} | 空: {int(float(r.get('bear_score', 0)))}", axis=1)
 
             target_options = {}
@@ -602,13 +599,11 @@ with tab2:
                 if sym and sym.lower() not in ['nan', 'none', '']:
                     target_options[disp_name] = sym
 
-            # 🚀 短線與長線波段的分流邏輯
             df_db['tags_str'] = df_db['tags'].astype(str)
             is_short_term = df_db['策略'].str.contains('短', case=False, na=False)
             df_short = df_db[is_short_term].copy()
             df_normal = df_db[~is_short_term].copy()
 
-            # ⚡ 短線區邏輯 (MA5/MA10)
             short_bull_cond = df_short['tags_str'].str.contains('創20日收高|創50日收高|剛站上月線|短線均線金叉|回後重新站上MA5', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
             short_bear_cond = df_short['tags_str'].str.contains('破20日收低|破50日收低|高檔跌破MA5|實體跌破月線', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
             short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
@@ -626,7 +621,6 @@ with tab2:
             if not df_short_cons.empty:
                 df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
 
-            # 📈 長線區邏輯
             def get_52w_pos(x):
                 try: return float(str(x).replace('%', '').strip())
                 except: return 50.0
@@ -672,7 +666,6 @@ with tab2:
             st.markdown("### 📊 技術亮點與警示摘要 (Top 10)")
             st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
             
-            # ⚡ 顯示短線專區
             st.markdown("#### ⚡ 短線進出專區 (MA5/MA10敏捷版)")
             if not df_short.empty:
                 col_s1, col_s2 = st.columns(2)
@@ -686,7 +679,6 @@ with tab2:
 
             st.divider()
 
-            # 📈 顯示長線波段區
             st.markdown("#### 📈 波段與長期投資 (Top 10)")
             col_sum1, col_sum2 = st.columns(2)
             with col_sum1:
@@ -818,7 +810,7 @@ with tab_comp:
                 for tgt in comp_targets:
                     sym = comp_options[tgt]
                     try:
-                        hist = yf.Ticker(sym).history(period=yf_period)
+                        hist = yf.Ticker(sym).history(period=yf_period, auto_adjust=True)
                         if not hist.empty and 'Close' in hist.columns:
                             s = hist['Close'].dropna()
                             if len(s) > 0:
@@ -836,21 +828,13 @@ with tab_comp:
                         fig_comp.update_layout(hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig_comp, use_container_width=True)
                     else: st.warning("選定期間內無足夠數據可供繪製比較圖。")
-                else: st.warning("無法取得選定標的的歷史走勢資料。")
+                else: st.warning("無法取得選定標的外歷史走勢資料。")
 
             st.divider()
             st.markdown("### 🧩 比較標的之 Top 10 核心持股")
             
-            # 🚀 自動抓取當月的工作表名稱 (例如: 2026_10_Top20)
-            current_month_sheet = datetime.now().strftime("%Y_%m_Top20")
-            csv_url_comp = f"https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&sheet={current_month_sheet}"
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                resp = requests.get(csv_url_comp, headers=headers, timeout=10)
-                resp.raise_for_status()
-                df_etf_comp_db = pd.read_csv(io.StringIO(resp.text)).dropna(how='all')
-            except Exception:
-                df_etf_comp_db = pd.DataFrame()
+            with st.spinner("讀取 ETF 資料庫中..."):
+                df_etf_comp_db = load_etf_holdings()
 
             if not df_etf_comp_db.empty and len(df_etf_comp_db.columns) >= 3:
                 etf_c = df_etf_comp_db.columns[0]
@@ -864,22 +848,15 @@ with tab_comp:
                         sym = comp_options[tgt]
                         clean_code = sym.split('.')[0]
                         
-                        # 🚀 強化防呆比對：徹底清除資料庫中的 .TW, .TWO 與隱藏空白，再與乾淨代號比對
-                        db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.upper()
-                        db_etf_codes = db_etf_codes.str.replace(r'\.TW.*', '', regex=True)
-                        db_etf_codes = db_etf_codes.str.replace(r'\.TWO.*', '', regex=True)
-
+                        db_etf_codes = df_etf_comp_db[etf_c].astype(str).str.strip().str.replace(r'\.TW.*', '', regex=True)
                         sub_df = df_etf_comp_db[db_etf_codes == clean_code].copy()
                         
                         if not sub_df.empty:
                             sub_df[name_c] = sub_df[name_c].astype(str).str.strip()
-                            
-                            # 🚀 更強力的浮點數轉換：先移除 % 符號，再只保留數字與小數點
-                            sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'%', '', regex=True)
-                            sub_df[weight_c] = sub_df[weight_c].str.replace(r'[^\d.-]', '', regex=True)
+                            sub_df[weight_c] = sub_df[weight_c].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                             sub_df[weight_c] = pd.to_numeric(sub_df[weight_c], errors='coerce')
-                            
                             sub_df = sub_df.dropna(subset=[weight_c])
+                            
                             sub_df = sub_df.drop_duplicates(subset=[name_c], keep='last').sort_values(by=weight_c, ascending=False).head(10)
                             
                             if not sub_df.empty:
@@ -896,11 +873,11 @@ with tab_comp:
     else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 
 # ------------------------------------------
-# TAB 4: 績效與觀察總覽
+# 🚀 TAB 4: 績效與觀察總覽 (即時數據引擎)
 # ------------------------------------------
 with tab3:
     st.markdown("一覽所有持股與觀察清單的 **當日漲跌** 、 **短中長線含息報酬率** 與 **財報配息** 。")
-    with st.spinner("正在計算各標的績效與配息資料..."):
+    with st.spinner("正在計算各標的最新即時績效與配息資料..."):
         bench_returns = get_benchmark_returns()
         perf_results = []
         scan_list = []
@@ -917,6 +894,7 @@ with tab3:
                 
         for sym, display_ticker, market, raw_name in scan_list:
             disp_name = format_display_name(raw_name, display_ticker)
+            # 🚀 重新呼叫完整的即時數據引擎
             res = get_perf_div_data(sym, display_ticker, market, bench_returns, disp_name)
             if res: perf_results.append(res)
                 
@@ -954,24 +932,11 @@ with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
     st.caption("自動解析您的 ETF 持股結構，掌握真實資金流向與比重。")
     
-    # 🚀 自動抓取當月的工作表名稱 (例如: 2026_10_Top20)
-    current_month_sheet = datetime.now().strftime("%Y_%m_Top20")
-    csv_url = f"https://docs.google.com/spreadsheets/d/1_crBmjMxgm9qpYeycg_TnLStt3phN6vM4XILmD9x0Yc/gviz/tq?tqx=out:csv&sheet={current_month_sheet}"
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(csv_url, headers=headers, timeout=15)
-        response.raise_for_status() 
-        df_etf_db = pd.read_csv(io.StringIO(response.text)).dropna(how='all')
-        read_success = True
-    except Exception as e:
-        df_etf_db = pd.DataFrame()
-        read_success = False
-        err_msg = str(e)
+    with st.spinner("載入 ETF 資料庫中..."):
+        df_etf_db = load_etf_holdings()
 
-    if not read_success:
-        st.error(f"❌ **無法讀取外部 ETF 試算表！**\n錯誤訊息：`{err_msg}`")
-    elif df_etf_db is None or df_etf_db.empty:
-        st.warning("⚠️ 成功連線，但系統讀取到的資料是空的。")
+    if df_etf_db.empty:
+        st.warning("⚠️ 成功連線，但系統讀取到的資料是空的，或是無法讀取。")
     else:
         etf_col = df_etf_db.columns[0]
         name_col = df_etf_db.columns[1]
@@ -997,11 +962,8 @@ with tab_etf:
                         
                         plot_df = plot_df.drop_duplicates(subset=[name_col], keep='last')
                         
-                        # 🚀 強化數值清理，與 Tab 3 同步防呆
-                        plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'%', '', regex=True)
-                        plot_df[weight_col] = plot_df[weight_col].str.replace(r'[^\d.-]', '', regex=True)
+                        plot_df[weight_col] = plot_df[weight_col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                         plot_df[weight_col] = pd.to_numeric(plot_df[weight_col], errors='coerce')
-                        
                         plot_df = plot_df.dropna(subset=[weight_col]).sort_values(by=weight_col, ascending=False).head(10)
                         
                         if not plot_df.empty:
