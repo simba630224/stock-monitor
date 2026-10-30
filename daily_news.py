@@ -9,11 +9,11 @@ from urllib.parse import quote_plus
 
 import feedparser
 import gspread
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from google.oauth2.service_account import Credentials
 
-# 🚀 強制設定台灣時間，避免 GitHub 伺服器缺少時區套件導致崩潰
 tz_tw = timezone(timedelta(hours=8))
 
 SHEET_TAB_PREFIX = "Daily Report"
@@ -58,7 +58,6 @@ def ai_summary(company: str, d: dict, technical: str, news: str) -> str:
         client = OpenAI(api_key=key)
         prompt = (f"以繁體中文寫不超過50個字的中性投資訊報摘要，不得下交易指令，不得提及公司名稱或代號。"
                   f"公司:{company}; 技術訊號:{technical}; RSI:{fmt(d.get('rsi',50),0)}; 公開資訊:{news[:180]}")
-        # 🚀 修正 OpenAI V1 最新 API 語法
         res = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
@@ -70,9 +69,12 @@ def ai_summary(company: str, d: dict, technical: str, news: str) -> str:
         return fallback_summary(company, d, technical, news)
 
 def indicators(symbol: str) -> dict:
-    df = yf.download(symbol, period="6mo", progress=False)
-    if df.empty or len(df) < 50: raise ValueError("Insufficient data")
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    # 🚀 根據歷史經驗，改用 history() 避免 yf.download 被 Yahoo 阻擋
+    tk = yf.Ticker(symbol)
+    df = tk.history(period="6mo")
+    if df.empty or len(df) < 50: 
+        raise ValueError(f"取得資料不足 (長度: {len(df)})")
+    
     c, h, l = df['Close'].dropna(), df['High'].dropna(), df['Low'].dropna()
     
     last_p = float(c.iloc[-1])
@@ -81,11 +83,15 @@ def indicators(symbol: str) -> dict:
     
     macd = c.ewm(span=12).mean() - c.ewm(span=26).mean()
     delta = c.diff()
-    rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / -delta.where(delta < 0, 0).rolling(14).mean())))
+    
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi = (100 - (100 / (1 + rs))).fillna(50)
     
     return {
         "close": last_p, "change": ((last_p - float(c.iloc[-2])) / float(c.iloc[-2])) * 100 if len(c)>1 else 0,
-        "ma20": ma20, "ma50": ma50, "macd": float(macd.iloc[-1]), "rsi": float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else 50,
+        "ma20": ma20, "ma50": ma50, "macd": float(macd.iloc[-1]), "rsi": float(rsi.iloc[-1]),
         "new_high_50": last_p >= float(c.tail(50).max()), "new_high_20": last_p >= float(c.tail(20).max()) and last_p < float(c.tail(50).max()),
         "new_low_50": last_p <= float(c.tail(50).min()), "new_low_20": last_p <= float(c.tail(20).min()) and last_p > float(c.tail(50).min()),
         "narrow_20d": ((h.tail(20).max() - l.tail(20).min()) / l.tail(20).min()) <= 0.07
@@ -103,7 +109,7 @@ def make_rows(market: str, tickers: str) -> list:
                          fmt(d["ma50"]), fmt(d["macd"]), high_low_status(d), tech, "", news, link, ai_summary(sym, d, tech, news)])
             time.sleep(0.5)
         except Exception as e:
-            print(f"失敗 {sym}: {e}")
+            print(f"❌ 處理 {sym} 失敗: {e}")
     return rows
 
 def write_to_sheets(rows: list):
@@ -122,7 +128,9 @@ def write_to_sheets(rows: list):
         if rows:
             ws.append_rows(rows, value_input_option='USER_ENTERED')
             print(f"✅ 成功寫入 {len(rows)} 筆至 {sheet_name}")
-    except Exception as e: print(f"寫入 Google Sheets 失敗: {e}")
+        else:
+            print("⚠️ 警告：沒有產生任何資料列，跳過寫入。")
+    except Exception as e: print(f"❌ 寫入 Google Sheets 失敗: {e}")
 
 if __name__ == "__main__":
     print(f"開始掃描... {datetime.now(tz_tw).strftime('%Y-%m-%d %H:%M:%S')}")
