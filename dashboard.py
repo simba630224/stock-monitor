@@ -157,13 +157,22 @@ def load_trading_journal():
 @st.cache_data(ttl=900)
 def load_daily_report():
     try:
-        df = pd.read_csv(DAILY_REPORT_URL)
+        # 🚀 自動抓取當月的工作表名稱 (例如: Daily Report 2026-10)
+        current_month_sheet = datetime.now().strftime("Daily Report %Y-%m")
+        csv_url = f"https://docs.google.com/spreadsheets/d/1StOQTEpoTNSLU140CnOeUO94m0dZ5imX4oH0wlqAQZw/gviz/tq?tqx=out:csv&sheet={current_month_sheet}"
+        
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(csv_url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        
+        df = pd.read_csv(io.StringIO(resp.text))
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how='all')
         df = df.fillna("")
         df = df.replace(['nan', 'NaN', 'None', '<NA>'], '')
         return df
     except Exception as e:
+        print(f"無法載入快報：{e}")
         return pd.DataFrame()
 
 # ==========================================
