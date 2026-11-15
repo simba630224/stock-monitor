@@ -371,6 +371,8 @@ def get_single_stock_chart_data(sym):
             df = df[available_cols].astype(float).dropna(subset=['Close'])
             if df.empty or len(df) < 2: return None
             
+            # 🚀 完整計算 MA5, MA10, MA20, 季線
+            df['MA5'] = df['Close'].rolling(5, min_periods=1).mean()
             df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
             df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
             is_tw = sym.endswith('.TW') or sym.endswith('.TWO')
@@ -647,7 +649,6 @@ with tab_div:
         one_yr_ago_dt = now_dt - pd.Timedelta(days=365)
 
         if div_period_mode == "近一年 (滾動 365 天，與總覽同步)":
-            # 🚀 採用與 TAB 1「近一年累計股息」100% 相同的篩選條件，確保總額完全一致！
             df_div_filtered = df_div_all[df_div_all['in_rolling_1y'] == True].copy()
             base_months = pd.date_range(end=now_dt, periods=12, freq='MS').strftime('%Y-%m').tolist()
             data_months = sorted(df_div_filtered['年月'].unique().tolist()) if not df_div_filtered.empty else []
@@ -661,7 +662,6 @@ with tab_div:
             month_axis = [f"2025-{m:02d}" for m in range(1, 13)]
 
         if not df_div_filtered.empty:
-            # 彙整每月、每檔標的之股息
             df_monthly_grouped = df_div_filtered.groupby(
                 ['年月', '標的與股數', '標的', '持股顯示', '市場'], as_index=False
             ).agg({
@@ -669,7 +669,6 @@ with tab_div:
                 '每股配息(原幣)': 'sum'
             })
 
-            # 計算每個月的總金額
             df_month_totals = df_monthly_grouped.groupby('年月', as_index=False)['股息金額(TWD)'].sum()
 
             tot_period_div = df_div_filtered['股息金額(TWD)'].sum()
@@ -685,7 +684,6 @@ with tab_div:
             m_col2.metric("平均每月領息 (TWD)", f"${avg_monthly_div:,.0f}")
             m_col3.metric("最高配息月份", peak_month_str)
 
-            # 繪製全寬度每月股息堆疊長條圖
             fig_m_div = px.bar(
                 df_monthly_grouped,
                 x='年月',
@@ -703,7 +701,6 @@ with tab_div:
                 color_discrete_sequence=px.colors.qualitative.Prism + px.colors.qualitative.Safe + px.colors.qualitative.Vivid
             )
             
-            # 柱頂標註當月總金額
             fig_m_div.add_trace(go.Scatter(
                 x=df_month_totals['年月'],
                 y=df_month_totals['股息金額(TWD)'],
@@ -728,7 +725,6 @@ with tab_div:
 
             st.divider()
 
-            # 矩陣表與逐筆明細表
             tab_m_pivot, tab_m_detail = st.tabs(["📋 各標的 × 月份 股息矩陣總表", "🧾 逐筆除息入帳明細表"])
             with tab_m_pivot:
                 pivot_df = df_div_filtered.pivot_table(
@@ -783,7 +779,7 @@ with tab_div:
         st.info("ℹ️ 目前持股清單中尚無歷史配息資料。")
 
 # ------------------------------------------
-# TAB 3: 技術分析掃描 
+# TAB 3: 技術分析掃描 (🚀 最新版 MA5/MA10 敏感動能與移動停利四大區塊)
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -800,7 +796,7 @@ with tab2:
             if '_raw_pe' not in df_db.columns: df_db['_raw_pe'] = np.nan
             df_db['_raw_pe'] = pd.to_numeric(df_db['_raw_pe'], errors='coerce')
             
-            for col in ['action', 'tags', '_name', '_sym', '標的', '策略']:
+            for col in ['action', 'tags', '_name', '_sym', '標的', '策略', 'short_profit_take']:
                 if col not in df_db.columns: df_db[col] = ""
                 df_db[col] = df_db[col].astype(str).replace(['nan', 'None'], '').fillna("")
                 
@@ -811,6 +807,7 @@ with tab2:
                 df_db['pos_52w_val'] = df_db['52週位置'].apply(get_52w_pos)
             else: df_db['pos_52w_val'] = 50.0
 
+            # 0秒即時映射策略屬性
             strategy_map = {}
             for item in PORTFOLIO_TW:
                 t = str(item.get('Ticker', '')).strip().upper()
@@ -863,21 +860,52 @@ with tab2:
             df_short = df_db[is_short_term].copy()
             df_normal = df_db[~is_short_term].copy()
 
-            short_bull_cond = df_short['tags_str'].str.contains('創20日收盤高|創50日收盤高', regex=True) | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0))
-            short_bear_cond = df_short['tags_str'].str.contains('破20日收盤低|破50日收盤低', regex=True) | ((df_short['bear_score'] >= 2) & (df_short['bull_score'] == 0))
-            short_cons_cond = (~short_bull_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
+            # ==========================================================
+            # ⚡ 短線進出專區：全面採用 MA5 / MA10 敏感判定與移動停利四大區塊
+            # ==========================================================
+            if not df_short.empty:
+                # 判斷是否觸發短線停利/轉弱訊號（支援後端 short_profit_take 旗標與前端 tags 關鍵字雙重識別）
+                profit_take_kw = '破5日線|破MA5|破10日線|破MA10|10日高點回落|高檔回落|高檔鈍化結束|高檔破MA5|高檔破五日線|短線減碼|短線停利|短線出場|鎖利'
+                has_pt_flag = df_short['short_profit_take'].astype(str).str.lower().isin(['true', '1', 'yes'])
+                has_pt_tag = df_short['tags_str'].str.contains(profit_take_kw, regex=True)
+                
+                # 判斷是否已經嚴重破位（跌破月線 MA20 / 三線空頭排列 / 破收盤低點）
+                severe_bear_kw = '三線空頭|連3日破月線|實體跌破月線|跌破月季線|破20日收盤低|破50日收盤低|破20日低|破50日低'
+                is_severe_bear = df_short['tags_str'].str.contains(severe_bear_kw, regex=True)
+                
+                # 判斷是否具備 MA5 / MA10 短線多頭攻擊訊號
+                ma5_bull_kw = '三線多頭|MA5>MA10|短均金叉|五日十日金叉|站回MA5|站上MA5|回後買上漲|剛站上月線|創20日收盤高|創50日收盤高|創20日高|創50日高'
+                has_ma5_bull = df_short['tags_str'].str.contains(ma5_bull_kw, regex=True)
 
-            df_short_bull = df_short[short_bull_cond].copy()
-            df_short_bear = df_short[short_bear_cond].copy()
-            df_short_cons = df_short[short_cons_cond].copy()
+                # 1. 💰 短線停利 / 減碼警戒區：觸發 MA5/MA10 破線或高檔回落鎖利，且尚未嚴重跌破月線破底
+                short_pt_cond = (has_pt_flag | has_pt_tag) & (~is_severe_bear)
+                
+                # 2. 🚀 短線攻擊 / 續抱區：未觸發停利與破位，且具備 MA5/MA10 多頭動能或 (多方 >= 2 且 空方 == 0)
+                short_bull_cond = (~short_pt_cond) & (~is_severe_bear) & (has_ma5_bull | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0)))
+                
+                # 3. 🩸 短線破位 / 停損區：嚴重破位（三線空頭/破月線/破底），或 (空方 >= 2 且 空方 > 多方 且非單純短線停利)
+                short_bear_cond = (~short_pt_cond) & (is_severe_bear | ((df_short['bear_score'] >= 2) & (df_short['bear_score'] > df_short['bull_score'])))
+                
+                # 4. ⚖️ 窄幅壓縮 / 伏擊區：未觸發上述三區，且處於 20日窄幅盤整
+                short_cons_cond = (~short_bull_cond) & (~short_pt_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
 
-            df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
-            df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
-            
-            df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
-            df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+                df_short_bull = df_short[short_bull_cond].copy()
+                df_short_pt = df_short[short_pt_cond].copy()
+                df_short_bear = df_short[short_bear_cond].copy()
+                df_short_cons = df_short[short_cons_cond].copy()
 
+                df_short_bull['sort_score'] = df_short_bull['bull_score'] - df_short_bull['bear_score']
+                df_short_pt['sort_score'] = df_short_pt['bear_score'] - df_short_pt['bull_score']
+                df_short_bear['sort_score'] = df_short_bear['bear_score'] - df_short_bear['bull_score']
+                
+                df_short_bull = df_short_bull.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+                df_short_pt = df_short_pt.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+                df_short_bear = df_short_bear.sort_values(by=['sort_score', '_raw_pe'], ascending=[False, True]).head(10)
+                df_short_cons = df_short_cons.sort_values(by=['_raw_pe'], ascending=[True]).head(10)
+
+            # ==========================================================
+            # 📈 波段與長期投資專區 (Top 10)
+            # ==========================================================
             long_bull_cond = df_normal['tags_str'].str.contains('創52週收盤高', regex=True) | ((df_normal['bull_score'] >= 3) & df_normal['tags_str'].str.contains('週KD低檔金叉|週MACD零下金叉', regex=True)) | ((df_normal['bull_score'] >= 3) & (df_normal['bear_score'] == 0))
             long_bear_cond = df_normal['tags_str'].str.contains('破52週收盤低', regex=True) | ((df_normal['bear_score'] >= 3) & df_normal['tags_str'].str.contains('週KD高檔死叉|週MACD零上死叉', regex=True)) | ((df_normal['bear_score'] >= 3) & (df_normal['bull_score'] == 0))
             long_base_cond = (~long_bull_cond) & (~long_bear_cond) & (~df_normal['tags_str'].str.contains('創52週|破52週', regex=True)) & (df_normal['pos_52w_val'] <= 30) & (abs(df_normal['bull_score'] - df_normal['bear_score']) <= 1)
@@ -896,16 +924,17 @@ with tab2:
             st.markdown("### 📊 技術亮點與警示摘要 (Top 10)") 
             st.caption("篩選邏輯：由後端每日自動運算，依多空評分嚴格分級，同級別低本益比 (PE) 者優先顯示。")
 
-            st.markdown("#### ⚡ 短線進出專區 (依據 20日/50日 創高破底與動能)")
+            st.markdown("#### ⚡ 短線進出專區 (依據 MA5 / MA10 敏感均線、高點回落鎖利與動能)")
             if not df_short.empty:
                 col_s1, col_s2 = st.columns(2)
                 with col_s1:
-                    st.success(f"**[🚀 偏多 / 創高動能]**\n\n{format_strict_items(df_short_bull)}")
+                    st.success(f"**[🚀 短線攻擊 / 續抱區 (站穩 MA5/MA10)]**\n\n{format_strict_items(df_short_bull)}")
+                    st.info(f"**[⚖️ 窄幅壓縮 / 伏擊區]**\n\n{format_strict_items(df_short_cons)}")
                 with col_s2:
-                    st.error(f"**[🩸 偏空 / 破底風險]**\n\n{format_strict_items(df_short_bear)}")
-                st.info(f"**[⚖️ 盤整 / 壓縮區]**\n\n{format_strict_items(df_short_cons)}")
+                    st.warning(f"**[💰 短線停利 / 減碼警戒區 (破 MA5/MA10 或高檔回落鎖利)]**\n\n{format_strict_items(df_short_pt)}")
+                    st.error(f"**[🩸 短線破位 / 停損區 (破月線 / 三線空頭)]**\n\n{format_strict_items(df_short_bear)}")
             else:
-                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』，系統將自動在此區進行 20日/50日 創高破低監控。")
+                st.info("💡 尚無短線標的。請於側邊欄「策略」欄位填寫『短線』，系統將自動在此區進行 MA5 / MA10 敏感均線與移動停利監控。")
 
             st.divider()
 
@@ -919,13 +948,20 @@ with tab2:
 
             st.divider()
             st.markdown("### 📋 完整技術分析清單")
-            with st.expander("💡 狀態警示規則與名詞定義說明", expanded=False):
+            with st.expander("💡 狀態警示規則與 MA5/MA10 實戰邏輯說明", expanded=False):
                 st.markdown("""
-                #### 一、 綜合動作評級 (依多空分數與指標嚴格判定)
+                #### 一、 ⚡ 短線進出專區：MA5 / MA10 敏感動能與移動停利三道防線
+                * **[🚀 短線攻擊 / 續抱區]**：滿足三線多頭排列 (`MA5 > MA10 > MA20`)、短均線金叉 (`MA5 穿越 MA10`)、回後買上漲（站回 `MA5` 且 `MA20` 向上、`K < 50`），且未觸發任何短線停利訊號。
+                * **[💰 短線停利 / 減碼警戒區]**：股價雖仍在月/季線之上，但觸發以下任一敏感轉弱訊號，無視季線保護傘立即提醒鎖利：
+                  1. **第一道防線（跌破 MA5 五日線）**：收盤跌破 `MA5`（且 `MA5` 走平/下彎或高檔 `K > 70`）➔ 建議減碼 1/2 鎖利。
+                  2. **第二道防線（跌破 MA10 十日線）**：收盤跌破短線生命線 `MA10` ➔ 建議短線清倉出場。
+                  3. **第三道防線（10日高點回落鎖利 / KD 鈍化結束）**：自近 10 日最高收盤價回落達 `4.5%` 以上，或日 KD 高檔鈍化結束死叉破 `MA5`。
+                * **[🩸 短線破位 / 停損區]**：均線形成三線空頭 (`MA5 < MA10 < MA20`)、連續 3 日跌破 `MA20` 月線、或跌破 20/50 日收盤低點 ➔ 無條件離場。
+
+                #### 二、 📈 波段與長期投資：大趨勢與鈍化保護傘
+                * **波段高檔鈍化保護傘**：若發生日 KD 或日 MACD 死叉，但收盤價仍穩踩在 `MA10` 與 `MA20` 之上，死叉扣分強制歸零，防範強勢股洗盤。
                 * **[🚀 強勢買進]**：多方分數 ≥ 3 **且** 具備「週KD低檔金叉(K<30)」或「週MACD零下金叉」。
-                * **[📈 短多轉折]**：多方分數 > 0 (未達強勢買進標準者)。
-                * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」。
-                * **[⚠️ 弱勢減碼]**：空方分數 > 0 (未達強制賣出標準者)。
+                * **[🛑 強制賣出]**：空方分數 ≥ 3 **且** 具備「週KD高檔死叉(K>70)」或「週MACD零上死叉」，或連 3 日破月線 / 三線空頭排列。
                 """)
 
             display_cols = ["市場", "顯示名稱", "策略", "狀態警示", "均線位階", "52週位置", "Beta", "P/E", "日KD", "週KD", "日MACD", "週MACD"]
@@ -952,7 +988,7 @@ with tab2:
             st.error(f"渲染資料表時發生未預期錯誤，請確保資料庫格式正確：\n{e}")
 
         st.divider()
-        st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA / KD / MACD)")
+        st.subheader("📈 個股/ETF 詳細技術線圖 (含 MA5 / MA10 / MA20 / 季線 / KD / MACD)")
         
         col_select_stock, col_select_period = st.columns([2, 1])
         with col_select_stock:
@@ -974,11 +1010,14 @@ with tab2:
                         fig_tech.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name='K線', increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
                     else:
                         fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['Close'], mode='lines', name='收盤價'), row=1, col=1)
-                        
-                    fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='yellow', width=1.5), name='MA10'), row=1, col=1)
-                    fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='blue', width=1.5), name='MA20'), row=1, col=1)
+                    
+                    # 🚀 繪製紫色 MA5 五日線與 MA10, MA20, 季線
+                    if 'MA5' in df_plot.columns:
+                        fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA5'], line=dict(color='#9b59b6', width=1.5), name='MA5 (五日)'), row=1, col=1)
+                    fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA10'], line=dict(color='#f1c40f', width=1.5), name='MA10 (十日)'), row=1, col=1)
+                    fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['MA20'], line=dict(color='#3498db', width=1.5), name='MA20 (月線)'), row=1, col=1)
                     if '季線' in df_plot.columns:
-                        fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='orange', width=1.5), name="季線"), row=1, col=1)
+                        fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['季線'], line=dict(color='#e67e22', width=1.5), name="季線"), row=1, col=1)
                     
                     if 'K_d' in df_plot.columns:
                         fig_tech.add_trace(go.Scatter(x=df_plot.index, y=df_plot['K_d'], line=dict(color='blue', width=1.5), name='K值'), row=2, col=1)
