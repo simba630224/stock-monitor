@@ -205,7 +205,8 @@ def get_basic_data(ticker):
             if not hist.empty:
                 price = float(hist['Close'].dropna().iloc[-1])
                 
-                one_yr_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
+                # 統一以當下日期往回推算 365 天（標準化至當日 00:00:00 確保兩邊完全一致）
+                one_yr_ago = (pd.Timestamp.now().normalize() - pd.Timedelta(days=365))
                 
                 div_2026 = 0.0
                 div_1y = 0.0
@@ -214,18 +215,22 @@ def get_basic_data(ticker):
                 if 'Dividends' in hist.columns:
                     divs = hist['Dividends'][hist['Dividends'] > 0]
                     for dt, val in divs.items():
-                        dt_naive = dt.tz_localize(None) if dt.tz is not None else dt
+                        dt_naive = (dt.tz_localize(None) if dt.tz is not None else dt).normalize()
                         v = float(val)
+                        is_in_1y = bool(dt_naive >= one_yr_ago)
+                        
                         if dt_naive.year == 2026:
                             div_2026 += v
-                        if dt_naive >= one_yr_ago:
+                        if is_in_1y:
                             div_1y += v
+                            
                         div_events.append({
                             'date': dt_naive.strftime('%Y-%m-%d'),
                             'year': dt_naive.year,
                             'month': dt_naive.month,
                             'year_month': dt_naive.strftime('%Y-%m'),
-                            'div_per_share': v
+                            'div_per_share': v,
+                            'in_rolling_1y': is_in_1y
                         })
                 return price, div_2026, div_1y, div_events
         except:
@@ -333,11 +338,14 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
 
                 div_records = []
                 tot_div = 0.0
+                one_yr_ago = (pd.Timestamp.now().normalize() - pd.Timedelta(days=365))
                 if 'Dividends' in hist.columns:
                     divs = hist['Dividends'][hist['Dividends'] > 0]
                     for date, val in divs.sort_index(ascending=False).items():
-                        div_records.append(f"{date.strftime('%Y-%m-%d')}: ${val:.2f}")
-                        tot_div += float(val)
+                        dt_naive = (date.tz_localize(None) if date.tz is not None else date).normalize()
+                        if dt_naive >= one_yr_ago:
+                            div_records.append(f"{dt_naive.strftime('%Y-%m-%d')}: ${val:.2f}")
+                            tot_div += float(val)
 
                 div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
                 yield_1y = (tot_div / curr_p) * 100 if curr_p > 0 and tot_div > 0 else 0.0
@@ -397,7 +405,7 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 預先同步資產市值與每月配息資料（供 TAB 1 與每月股息分頁共用，不重複抓取）
+# 預先同步資產市值與每月配息資料（供 TAB 1 與每月股息分頁共用，確保計算基準 100% 同步）
 with st.spinner("正在同步即時資產市值與配息紀錄..."):
     usdtwd = get_usdtwd()
     total_market_value, total_dividends_2026, total_dividends_1y = 0, 0, 0
@@ -450,7 +458,8 @@ with st.spinner("正在同步即時資產市值與配息紀錄..."):
                         '持股數': total_shares,
                         '持股顯示': disp_qty,
                         '每股配息(原幣)': ev['div_per_share'],
-                        '股息金額(TWD)': ev['div_per_share'] * total_shares
+                        '股息金額(TWD)': ev['div_per_share'] * total_shares,
+                        'in_rolling_1y': ev['in_rolling_1y']
                     })
 
     for item in PORTFOLIO_US:
@@ -497,7 +506,8 @@ with st.spinner("正在同步即時資產市值與配息紀錄..."):
                         '持股數': total_shares,
                         '持股顯示': disp_qty,
                         '每股配息(原幣)': ev['div_per_share'],
-                        '股息金額(TWD)': ev['div_per_share'] * total_shares * usdtwd
+                        '股息金額(TWD)': ev['div_per_share'] * total_shares * usdtwd,
+                        'in_rolling_1y': ev['in_rolling_1y']
                     })
 
 tab1, tab_div, tab2, tab_comp, tab3, tab_etf, tab_report, tab4 = st.tabs([
@@ -617,7 +627,7 @@ with tab1:
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2 (新增獨立分頁): 每月股息現金流
+# TAB 2 (獨立分頁): 每月股息現金流
 # ------------------------------------------
 with tab_div:
     st.subheader("📅 每月股息現金流與配息明細")
@@ -628,16 +638,21 @@ with tab_div:
         
         div_period_mode = st.radio(
             "📆 選擇統計區間：",
-            ["近 12 個月 (滾動一年)", "2026 年度 (1~12月)", "2025 年度 (1~12月)"],
+            ["近一年 (滾動 365 天，與總覽同步)", "2026 年度 (1~12月)", "2025 年度 (1~12月)"],
             horizontal=True,
             key="div_period_radio"
         )
 
-        now_dt = pd.Timestamp.now()
-        if div_period_mode == "近 12 個月 (滾動一年)":
-            cutoff_date = (now_dt - pd.DateOffset(months=11)).replace(day=1).strftime('%Y-%m-%d')
-            df_div_filtered = df_div_all[df_div_all['除息日'] >= cutoff_date].copy()
-            month_axis = pd.date_range(end=now_dt, periods=12, freq='MS').strftime('%Y-%m').tolist()
+        now_dt = pd.Timestamp.now().normalize()
+        one_yr_ago_dt = now_dt - pd.Timedelta(days=365)
+
+        if div_period_mode == "近一年 (滾動 365 天，與總覽同步)":
+            # 🚀 採用與 TAB 1「近一年累計股息」100% 相同的篩選條件，確保總額完全一致！
+            df_div_filtered = df_div_all[df_div_all['in_rolling_1y'] == True].copy()
+            base_months = pd.date_range(end=now_dt, periods=12, freq='MS').strftime('%Y-%m').tolist()
+            data_months = sorted(df_div_filtered['年月'].unique().tolist()) if not df_div_filtered.empty else []
+            month_axis = sorted(list(set(base_months + data_months)))
+            st.caption(f"💡 統計範圍：`{one_yr_ago_dt.strftime('%Y-%m-%d')}` 至 `{now_dt.strftime('%Y-%m-%d')}`（滿 365 天，與投資組合總覽之「近一年累計股息」完全對齊）。")
         elif div_period_mode == "2026 年度 (1~12月)":
             df_div_filtered = df_div_all[df_div_all['年份'] == 2026].copy()
             month_axis = [f"2026-{m:02d}" for m in range(1, 13)]
