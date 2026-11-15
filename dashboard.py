@@ -41,18 +41,6 @@ def format_display_name(name_raw, sym_raw):
     if name and not sym: return name
     return "未知標的"
 
-def classify_security_type(ticker_str, category_str, name_str):
-    """自動判斷標的為 ETF 或 個股"""
-    t = str(ticker_str).strip().upper().split('.')[0]
-    cat = str(category_str).strip().upper()
-    nm = str(name_str).strip().upper()
-    if 'ETF' in cat or '債' in cat or 'ETF' in nm or t.startswith('00'):
-        return 'ETF'
-    us_etfs = ['VOO', 'VT', 'VXUS', 'QQQ', 'SCHD', 'TLT', 'IEF', 'BND', 'VWRA', 'SGOV', 'BOXX', 'SMH', 'SOXX', 'SPY', 'IVV', 'VTI']
-    if t in us_etfs:
-        return 'ETF'
-    return '個股'
-
 # ==========================================
 # 1. 資料庫連線與安全快取模組
 # ==========================================
@@ -217,7 +205,6 @@ def get_basic_data(ticker):
             if not hist.empty:
                 price = float(hist['Close'].dropna().iloc[-1])
                 
-                idx_tz_naive = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
                 one_yr_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
                 
                 div_2026 = 0.0
@@ -398,7 +385,7 @@ def get_single_stock_chart_data(sym):
     return None
 
 # ==========================================
-# 3. 網頁 UI 渲染
+# 3. 網頁 UI 渲染與共用資料計算
 # ==========================================
 st.title("📊 個人投資組合與技術分析儀表板")
 
@@ -410,8 +397,111 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-tab1, tab2, tab_comp, tab3, tab_etf, tab_report, tab4 = st.tabs([
-    "💰 投資組合總覽", "📈 技術分析掃描", "🆚 標的比較", 
+# 預先同步資產市值與每月配息資料（供 TAB 1 與每月股息分頁共用，不重複抓取）
+with st.spinner("正在同步即時資產市值與配息紀錄..."):
+    usdtwd = get_usdtwd()
+    total_market_value, total_dividends_2026, total_dividends_1y = 0, 0, 0
+    asset_allocation = {}
+    individual_holdings = [] 
+    monthly_dividend_records = []
+
+    for item in PORTFOLIO_TW:
+        if pd.notna(item.get('Ticker')):
+            ticker_str = str(item['Ticker']).strip()
+            if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
+            ticker = get_yf_ticker_tw(ticker_str)
+            asset_type = str(item.get('類別', '台股')).strip()
+            if not asset_type or asset_type.lower() == 'nan': asset_type = '台股未分類'
+            
+            price, div_2026, div_1y, div_events = get_basic_data(ticker)
+            shares_own = safe_float(item.get('Shares'))
+            shares_lent = safe_float(item.get('出借'))
+            total_shares = shares_own + shares_lent
+            
+            if price > 0 and total_shares > 0:
+                val = price * total_shares
+                div_tot_2026 = div_2026 * total_shares
+                div_tot_1y = div_1y * total_shares
+                total_market_value += val
+                asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                total_dividends_2026 += div_tot_2026
+                total_dividends_1y += div_tot_1y
+                
+                disp_qty = f"{int(total_shares/1000)}張" if total_shares >= 1000 and total_shares % 1000 == 0 else f"{total_shares:g}股"
+                display_name = format_display_name(item.get('名稱'), ticker_str)
+                
+                individual_holdings.append({
+                    '標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", 
+                    '總市值': val, '股息': div_tot_2026, '類別': asset_type, 
+                    '總股數': total_shares
+                })
+                
+                for ev in div_events:
+                    monthly_dividend_records.append({
+                        '除息日': ev['date'],
+                        '年份': ev['year'],
+                        '月份': ev['month'],
+                        '年月': ev['year_month'],
+                        '市場': '台股',
+                        '代號': ticker_str,
+                        '標的': display_name,
+                        '標的與股數': f"{display_name} ({disp_qty})",
+                        '資產類別': asset_type,
+                        '持股數': total_shares,
+                        '持股顯示': disp_qty,
+                        '每股配息(原幣)': ev['div_per_share'],
+                        '股息金額(TWD)': ev['div_per_share'] * total_shares
+                    })
+
+    for item in PORTFOLIO_US:
+        if pd.notna(item.get('Ticker')):
+            ticker_str = str(item['Ticker']).strip()
+            if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
+            asset_type = str(item.get('類別', '美股')).strip()
+            if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
+            
+            price, div_2026, div_1y, div_events = get_basic_data(ticker_str)
+            shares_own = safe_float(item.get('Shares'))
+            shares_sub = safe_float(item.get('複委託'))
+            total_shares = shares_own + shares_sub
+            
+            if price > 0 and total_shares > 0:
+                val = price * total_shares * usdtwd
+                div_tot_2026 = div_2026 * total_shares * usdtwd
+                div_tot_1y = div_1y * total_shares * usdtwd
+                total_market_value += val
+                asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
+                total_dividends_2026 += div_tot_2026
+                total_dividends_1y += div_tot_1y
+                
+                disp_qty = f"{total_shares:g}股"
+                display_name = format_display_name(item.get('名稱'), ticker_str)
+                
+                individual_holdings.append({
+                    '標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", 
+                    '總市值': val, '股息': div_tot_2026, '類別': asset_type, 
+                    '總股數': total_shares
+                })
+                
+                for ev in div_events:
+                    monthly_dividend_records.append({
+                        '除息日': ev['date'],
+                        '年份': ev['year'],
+                        '月份': ev['month'],
+                        '年月': ev['year_month'],
+                        '市場': '美股',
+                        '代號': ticker_str,
+                        '標的': display_name,
+                        '標的與股數': f"{display_name} ({disp_qty})",
+                        '資產類別': asset_type,
+                        '持股數': total_shares,
+                        '持股顯示': disp_qty,
+                        '每股配息(原幣)': ev['div_per_share'],
+                        '股息金額(TWD)': ev['div_per_share'] * total_shares * usdtwd
+                    })
+
+tab1, tab_div, tab2, tab_comp, tab3, tab_etf, tab_report, tab4 = st.tabs([
+    "💰 投資組合總覽", "📅 每月股息現金流", "📈 技術分析掃描", "🆚 標的比較", 
     "🏆 績效與觀察總覽", "🧩 ETF持股", "📰 每日快報", "📖 每日看盤心得"
 ])
 
@@ -419,112 +509,6 @@ tab1, tab2, tab_comp, tab3, tab_etf, tab_report, tab4 = st.tabs([
 # TAB 1: 投資組合總覽
 # ------------------------------------------
 with tab1:
-    with st.spinner("正在同步即時資產市值與配息紀錄..."):
-        usdtwd = get_usdtwd()
-        total_market_value, total_dividends_2026, total_dividends_1y = 0, 0, 0
-        asset_allocation = {}
-        individual_holdings = [] 
-        monthly_dividend_records = []
-
-        for item in PORTFOLIO_TW:
-            if pd.notna(item.get('Ticker')):
-                ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
-                ticker = get_yf_ticker_tw(ticker_str)
-                asset_type = str(item.get('類別', '台股')).strip()
-                if not asset_type or asset_type.lower() == 'nan': asset_type = '台股未分類'
-                
-                price, div_2026, div_1y, div_events = get_basic_data(ticker)
-                shares_own = safe_float(item.get('Shares'))
-                shares_lent = safe_float(item.get('出借'))
-                total_shares = shares_own + shares_lent
-                
-                if price > 0 and total_shares > 0:
-                    val = price * total_shares
-                    div_tot_2026 = div_2026 * total_shares
-                    div_tot_1y = div_1y * total_shares
-                    total_market_value += val
-                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                    total_dividends_2026 += div_tot_2026
-                    total_dividends_1y += div_tot_1y
-                    
-                    disp_qty = f"{int(total_shares/1000)}張" if total_shares >= 1000 and total_shares % 1000 == 0 else f"{total_shares:g}股"
-                    display_name = format_display_name(item.get('名稱'), ticker_str)
-                    sec_type = classify_security_type(ticker_str, asset_type, item.get('名稱', ''))
-                    
-                    individual_holdings.append({
-                        '標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", 
-                        '總市值': val, '股息': div_tot_2026, '類別': asset_type, 
-                        '總股數': total_shares, '標的屬性': sec_type
-                    })
-                    
-                    for ev in div_events:
-                        monthly_dividend_records.append({
-                            '除息日': ev['date'],
-                            '年份': ev['year'],
-                            '月份': ev['month'],
-                            '年月': ev['year_month'],
-                            '市場': '台股',
-                            '代號': ticker_str,
-                            '標的': display_name,
-                            '標的與股數': f"{display_name} ({disp_qty})",
-                            '標的屬性': sec_type,
-                            '資產類別': asset_type,
-                            '持股數': total_shares,
-                            '持股顯示': disp_qty,
-                            '每股配息(原幣)': ev['div_per_share'],
-                            '股息金額(TWD)': ev['div_per_share'] * total_shares
-                        })
-
-        for item in PORTFOLIO_US:
-            if pd.notna(item.get('Ticker')):
-                ticker_str = str(item['Ticker']).strip()
-                if not ticker_str or ticker_str.lower() in ['nan', 'none', '']: continue
-                asset_type = str(item.get('類別', '美股')).strip()
-                if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
-                
-                price, div_2026, div_1y, div_events = get_basic_data(ticker_str)
-                shares_own = safe_float(item.get('Shares'))
-                shares_sub = safe_float(item.get('複委託'))
-                total_shares = shares_own + shares_sub
-                
-                if price > 0 and total_shares > 0:
-                    val = price * total_shares * usdtwd
-                    div_tot_2026 = div_2026 * total_shares * usdtwd
-                    div_tot_1y = div_1y * total_shares * usdtwd
-                    total_market_value += val
-                    asset_allocation[asset_type] = asset_allocation.get(asset_type, 0) + val
-                    total_dividends_2026 += div_tot_2026
-                    total_dividends_1y += div_tot_1y
-                    
-                    disp_qty = f"{total_shares:g}股"
-                    display_name = format_display_name(item.get('名稱'), ticker_str)
-                    sec_type = classify_security_type(ticker_str, asset_type, item.get('名稱', ''))
-                    
-                    individual_holdings.append({
-                        '標的': display_name, '標的與股數': f"{display_name} ({disp_qty})", 
-                        '總市值': val, '股息': div_tot_2026, '類別': asset_type, 
-                        '總股數': total_shares, '標的屬性': sec_type
-                    })
-                    
-                    for ev in div_events:
-                        monthly_dividend_records.append({
-                            '除息日': ev['date'],
-                            '年份': ev['year'],
-                            '月份': ev['month'],
-                            '年月': ev['year_month'],
-                            '市場': '美股',
-                            '代號': ticker_str,
-                            '標的': display_name,
-                            '標的與股數': f"{display_name} ({disp_qty})",
-                            '標的屬性': sec_type,
-                            '資產類別': asset_type,
-                            '持股數': total_shares,
-                            '持股顯示': disp_qty,
-                            '每股配息(原幣)': ev['div_per_share'],
-                            '股息金額(TWD)': ev['div_per_share'] * total_shares * usdtwd
-                        })
-
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
     col2.metric("2026 累計股息 (TWD)", f"${total_dividends_2026:,.0f}")
@@ -632,31 +616,22 @@ with tab1:
             fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
-    # ==========================================
-    # 🌟 新增功能：每月股息現金流與個股/ETF配息明細
-    # ==========================================
-    st.divider()
-    st.subheader("📅 每月股息現金流與個股/ETF配息明細")
-    st.caption("依據您目前的持有股數，自動統計各月份實際除息之現金流，並清楚區分個股與 ETF 貢獻。")
+# ------------------------------------------
+# TAB 2 (新增獨立分頁): 每月股息現金流
+# ------------------------------------------
+with tab_div:
+    st.subheader("📅 每月股息現金流與配息明細")
+    st.caption("依據您目前的持有股數，自動統計各月份實際除息之現金流，一眼掌握每月有哪些標的配息、持股數與實領金額。")
 
     if monthly_dividend_records:
         df_div_all = pd.DataFrame(monthly_dividend_records)
         
-        col_f_period, col_f_type = st.columns([1.5, 1.5])
-        with col_f_period:
-            div_period_mode = st.radio(
-                "📆 選擇統計區間：",
-                ["近 12 個月 (滾動一年)", "2026 年度 (1~12月)", "2025 年度 (1~12月)"],
-                horizontal=True,
-                key="div_period_radio"
-            )
-        with col_f_type:
-            div_type_filter = st.multiselect(
-                "🏷️ 篩選標的屬性 (個股 / ETF)：",
-                options=["ETF", "個股"],
-                default=["ETF", "個股"],
-                key="div_type_ms"
-            )
+        div_period_mode = st.radio(
+            "📆 選擇統計區間：",
+            ["近 12 個月 (滾動一年)", "2026 年度 (1~12月)", "2025 年度 (1~12月)"],
+            horizontal=True,
+            key="div_period_radio"
+        )
 
         now_dt = pd.Timestamp.now()
         if div_period_mode == "近 12 個月 (滾動一年)":
@@ -670,93 +645,79 @@ with tab1:
             df_div_filtered = df_div_all[df_div_all['年份'] == 2025].copy()
             month_axis = [f"2025-{m:02d}" for m in range(1, 13)]
 
-        if div_type_filter:
-            df_div_filtered = df_div_filtered[df_div_filtered['標的屬性'].isin(div_type_filter)]
-        else:
-            df_div_filtered = df_div_filtered.iloc[0:0]
-
         if not df_div_filtered.empty:
-            tot_period_div = df_div_filtered['股息金額(TWD)'].sum()
-            avg_monthly_div = tot_period_div / 12.0
-            etf_div_sum = df_div_filtered[df_div_filtered['標的屬性'] == 'ETF']['股息金額(TWD)'].sum()
-            stock_div_sum = df_div_filtered[df_div_filtered['標的屬性'] == '個股']['股息金額(TWD)'].sum()
-
-            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-            m_col1.metric("區間總領股息 (TWD)", f"${tot_period_div:,.0f}")
-            m_col2.metric("平均每月加薪 (TWD)", f"${avg_monthly_div:,.0f}")
-            m_col3.metric("ETF 股息貢獻", f"${etf_div_sum:,.0f}", f"佔比 {(etf_div_sum/tot_period_div*100):.1f}%" if tot_period_div > 0 else "0%")
-            m_col4.metric("個股 股息貢獻", f"${stock_div_sum:,.0f}", f"佔比 {(stock_div_sum/tot_period_div*100):.1f}%" if tot_period_div > 0 else "0%")
-
             # 彙整每月、每檔標的之股息
             df_monthly_grouped = df_div_filtered.groupby(
-                ['年月', '標的與股數', '標的', '標的屬性', '持股顯示', '市場'], as_index=False
+                ['年月', '標的與股數', '標的', '持股顯示', '市場'], as_index=False
             ).agg({
                 '股息金額(TWD)': 'sum',
                 '每股配息(原幣)': 'sum'
             })
 
-            # 計算每個月的總金額（供柱頂顯示總和）
+            # 計算每個月的總金額
             df_month_totals = df_monthly_grouped.groupby('年月', as_index=False)['股息金額(TWD)'].sum()
 
-            col_m_bar, col_m_pie = st.columns([2.2, 1])
-            with col_m_bar:
-                fig_m_div = px.bar(
-                    df_monthly_grouped,
-                    x='年月',
-                    y='股息金額(TWD)',
-                    color='標的與股數',
-                    title='📊 每月領取股息堆疊圖 (依個股/ETF與持股數拆解)',
-                    hover_data={
-                        '年月': True,
-                        '標的與股數': False,
-                        '標的': True,
-                        '標的屬性': True,
-                        '持股顯示': True,
-                        '每股配息(原幣)': ':.3f',
-                        '股息金額(TWD)': ':,.0f'
-                    },
-                    color_discrete_sequence=px.colors.qualitative.Prism + px.colors.qualitative.Safe
-                )
-                # 加上每月總金額標籤在柱頂
-                fig_m_div.add_trace(go.Scatter(
-                    x=df_month_totals['年月'],
-                    y=df_month_totals['股息金額(TWD)'],
-                    text=df_month_totals['股息金額(TWD)'].apply(lambda v: f"${v:,.0f}" if v > 0 else ""),
-                    mode='text',
-                    textposition='top center',
-                    textfont=dict(size=12, weight='bold'),
-                    showlegend=False,
-                    hoverinfo='skip'
-                ))
-                fig_m_div.update_xaxes(type='category', categoryorder='array', categoryarray=month_axis, title='配息年月')
-                max_y = df_month_totals['股息金額(TWD)'].max() if not df_month_totals.empty else 1000
-                fig_m_div.update_yaxes(title='股息金額 (TWD)', range=[0, max_y * 1.18])
-                fig_m_div.update_layout(
-                    barmode='stack',
-                    height=460,
-                    margin=dict(l=10, r=10, t=40, b=10),
-                    legend=dict(title="標的 (持有股數)", orientation="v")
-                )
-                st.plotly_chart(fig_m_div, use_container_width=True)
+            tot_period_div = df_div_filtered['股息金額(TWD)'].sum()
+            avg_monthly_div = tot_period_div / 12.0
+            if not df_month_totals.empty:
+                max_row = df_month_totals.loc[df_month_totals['股息金額(TWD)'].idxmax()]
+                peak_month_str = f"{max_row['年月']} (${max_row['股息金額(TWD)']:,.0f})"
+            else:
+                peak_month_str = "無"
 
-            with col_m_pie:
-                fig_type_sun = px.sunburst(
-                    df_monthly_grouped,
-                    path=['標的屬性', '標的'],
-                    values='股息金額(TWD)',
-                    title='🍩 個股 vs. ETF 股息來源結構',
-                    color='標的屬性',
-                    color_discrete_map={'ETF': '#2ecc71', '個股': '#3498db'}
-                )
-                fig_type_sun.update_traces(textinfo='label+percent parent')
-                fig_type_sun.update_layout(height=460, margin=dict(l=10, r=10, t=40, b=10))
-                st.plotly_chart(fig_type_sun, use_container_width=True)
+            m_col1, m_col2, m_col3 = st.columns(3)
+            m_col1.metric("區間累計總股息 (TWD)", f"${tot_period_div:,.0f}")
+            m_col2.metric("平均每月領息 (TWD)", f"${avg_monthly_div:,.0f}")
+            m_col3.metric("最高配息月份", peak_month_str)
 
-            # 展開式交叉矩陣表與完整明細表
-            tab_m_pivot, tab_m_detail = st.tabs(["📋 個股/ETF × 月份 股息矩陣表", "🧾 逐筆除息入帳明細表"])
+            # 繪製全寬度每月股息堆疊長條圖
+            fig_m_div = px.bar(
+                df_monthly_grouped,
+                x='年月',
+                y='股息金額(TWD)',
+                color='標的與股數',
+                title='📊 每月領取股息堆疊圖 (依標的、持有股數與股息金額拆解)',
+                hover_data={
+                    '年月': True,
+                    '標的與股數': False,
+                    '標的': True,
+                    '持股顯示': True,
+                    '每股配息(原幣)': ':.3f',
+                    '股息金額(TWD)': ':,.0f'
+                },
+                color_discrete_sequence=px.colors.qualitative.Prism + px.colors.qualitative.Safe + px.colors.qualitative.Vivid
+            )
+            
+            # 柱頂標註當月總金額
+            fig_m_div.add_trace(go.Scatter(
+                x=df_month_totals['年月'],
+                y=df_month_totals['股息金額(TWD)'],
+                text=df_month_totals['股息金額(TWD)'].apply(lambda v: f"${v:,.0f}" if v > 0 else ""),
+                mode='text',
+                textposition='top center',
+                textfont=dict(size=13, weight='bold'),
+                showlegend=False,
+                hoverinfo='skip'
+            ))
+            
+            fig_m_div.update_xaxes(type='category', categoryorder='array', categoryarray=month_axis, title='配息年月')
+            max_y = df_month_totals['股息金額(TWD)'].max() if not df_month_totals.empty else 1000
+            fig_m_div.update_yaxes(title='股息金額 (TWD)', range=[0, max_y * 1.18])
+            fig_m_div.update_layout(
+                barmode='stack',
+                height=520,
+                margin=dict(l=10, r=10, t=45, b=10),
+                legend=dict(title="標的 (持有股數)", orientation="v")
+            )
+            st.plotly_chart(fig_m_div, use_container_width=True)
+
+            st.divider()
+
+            # 矩陣表與逐筆明細表
+            tab_m_pivot, tab_m_detail = st.tabs(["📋 各標的 × 月份 股息矩陣總表", "🧾 逐筆除息入帳明細表"])
             with tab_m_pivot:
                 pivot_df = df_div_filtered.pivot_table(
-                    index=['標的屬性', '標的', '持股顯示'],
+                    index=['標的', '持股顯示'],
                     columns='年月',
                     values='股息金額(TWD)',
                     aggfunc='sum',
@@ -767,25 +728,24 @@ with tab1:
                     if m_col not in pivot_df.columns:
                         pivot_df[m_col] = 0.0
                 
-                ordered_pivot_cols = ['標的屬性', '標的', '持股顯示'] + [m for m in month_axis if m in pivot_df.columns]
+                ordered_pivot_cols = ['標的', '持股顯示'] + [m for m in month_axis if m in pivot_df.columns]
                 pivot_df = pivot_df[ordered_pivot_cols]
                 pivot_df['區間總計(TWD)'] = pivot_df[[m for m in month_axis if m in pivot_df.columns]].sum(axis=1)
                 pivot_df = pivot_df.sort_values(by='區間總計(TWD)', ascending=False)
 
                 col_cfg = {
-                    '標的屬性': st.column_config.TextColumn("屬性", width="small"),
-                    '標的': st.column_config.TextColumn("個股 / ETF", width="medium"),
+                    '標的': st.column_config.TextColumn("標的名稱 (代號)", width="medium"),
                     '持股顯示': st.column_config.TextColumn("目前持股數", width="small"),
                     '區間總計(TWD)': st.column_config.NumberColumn("區間總計 (TWD)", format="$%d")
                 }
                 for m_col in month_axis:
                     col_cfg[m_col] = st.column_config.NumberColumn(m_col, format="$%d")
 
-                st.dataframe(pivot_df, use_container_width=True, hide_index=True, column_config=col_cfg)
+                st.dataframe(pivot_df, use_container_width=True, hide_index=True, column_config=col_cfg, height=500)
 
             with tab_m_detail:
                 df_detail_show = df_div_filtered.sort_values(by=['除息日', '股息金額(TWD)'], ascending=[False, False])[
-                    ['除息日', '年月', '標的屬性', '市場', '標的', '持股顯示', '每股配息(原幣)', '股息金額(TWD)']
+                    ['除息日', '年月', '市場', '標的', '持股顯示', '每股配息(原幣)', '股息金額(TWD)']
                 ].copy()
                 st.dataframe(
                     df_detail_show,
@@ -794,22 +754,21 @@ with tab1:
                     column_config={
                         '除息日': st.column_config.TextColumn("除息日期"),
                         '年月': st.column_config.TextColumn("所屬年月"),
-                        '標的屬性': st.column_config.TextColumn("屬性 (個股/ETF)"),
                         '市場': st.column_config.TextColumn("市場"),
                         '標的': st.column_config.TextColumn("標的名稱 (代號)"),
                         '持股顯示': st.column_config.TextColumn("持有股數"),
                         '每股配息(原幣)': st.column_config.NumberColumn("每股配息 (原幣)", format="%.3f"),
                         '股息金額(TWD)': st.column_config.NumberColumn("實領股息 (TWD)", format="$%,.0f")
                     },
-                    height=400
+                    height=500
                 )
         else:
-            st.info("ℹ️ 所選區間與篩選條件下尚無配息紀錄。")
+            st.info("ℹ️ 所選區間下尚無配息紀錄。")
     else:
         st.info("ℹ️ 目前持股清單中尚無歷史配息資料。")
 
 # ------------------------------------------
-# TAB 2: 技術分析掃描 
+# TAB 3: 技術分析掃描 
 # ------------------------------------------
 with tab2:
     with st.spinner("載入技術分析資料庫中..."):
@@ -1023,7 +982,7 @@ with tab2:
                     st.plotly_chart(fig_tech, use_container_width=True)
 
 # ------------------------------------------
-# TAB 3: 標的比較
+# TAB 4: 標的比較
 # ------------------------------------------
 with tab_comp:
     st.subheader("🆚 多檔標的走勢比較")
@@ -1135,7 +1094,7 @@ with tab_comp:
     else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 
 # ------------------------------------------
-# TAB 4: 績效與觀察總覽
+# TAB 5: 績效與觀察總覽
 # ------------------------------------------
 with tab3:
     st.markdown("一覽所有持股與觀察清單的 **當日漲跌** 、 **短中長線含息報酬率** 與 **財報配息** 。")
@@ -1187,7 +1146,7 @@ with tab3:
                 st.info("尚無可顯示的績效資料。")
 
 # ------------------------------------------
-# TAB 5: ETF 持股
+# TAB 6: ETF 持股
 # ------------------------------------------
 with tab_etf:
     st.subheader("🧩 ETF Top 10 持股分析")
@@ -1256,7 +1215,7 @@ with tab_etf:
                         st.warning(f"圖表繪製發生錯誤：{ex}")
 
 # ------------------------------------------
-# TAB 6: 每日快報
+# TAB 7: 每日快報
 # ------------------------------------------
 with tab_report:
     st.subheader("📰 每日 Top 10 台美股投資快報")
@@ -1314,7 +1273,7 @@ with tab_report:
             st.warning("無法載入每日快報資料，請確認網址正確或共用權限已設為「知道連結的任何人皆可檢視」。")
 
 # ------------------------------------------
-# TAB 7: 每日看盤心得
+# TAB 8: 每日看盤心得
 # ------------------------------------------
 with tab4:
     st.subheader("📖 每日看盤心得紀錄")
