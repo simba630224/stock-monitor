@@ -201,9 +201,18 @@ def get_basic_data(ticker):
     for _ in range(3):
         try:
             time.sleep(0.2)
-            hist = yf.Ticker(ticker).history(period="2y")
+            tk = yf.Ticker(ticker)
+            # 抓取未還原歷史資料以取得真實股價與真實除息金額
+            hist = tk.history(period="2y", auto_adjust=False)
             if not hist.empty:
                 price = float(hist['Close'].dropna().iloc[-1])
+                # 嘗試透過 fast_info 取得盤中最新即時成交價
+                try:
+                    rt_p = tk.fast_info.get('last_price')
+                    if rt_p and float(rt_p) > 0:
+                        price = float(rt_p)
+                except:
+                    pass
                 
                 # 統一以當下日期往回推算 365 天（標準化至當日 00:00:00 確保兩邊完全一致）
                 one_yr_ago = (pd.Timestamp.now().normalize() - pd.Timedelta(days=365))
@@ -286,8 +295,13 @@ def get_fundamental_info(sym):
         }
     except: return {}
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
 def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
+    """
+    雙軌精準計算：
+    1. 收盤價 & 日漲跌(%)：採用未還原真實股價 (auto_adjust=False) 搭配 fast_info 即時報價，與看盤 App 100% 對齊。
+    2. 短中長線含息報酬率：採用還原權息股價 (auto_adjust=True)，精準反映股息再投入之總報酬。
+    """
     result = {
         "市場": market, "代號": display_ticker, "顯示名稱": display_name, "收盤價": 0.0,
         "日漲跌(%)": 0.0, "近一個月含息報酬": 0.0, "近一季含息報酬": 0.0, "近半年含息報酬": 0.0, "近一年含息報酬": 0.0,
@@ -296,36 +310,57 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
     }
     for _ in range(3):
         try:
-            time.sleep(0.3)
+            time.sleep(0.25)
             tk = yf.Ticker(sym)
-            hist = tk.history(period="2y", auto_adjust=True) 
-            if not hist.empty and len(hist['Close'].dropna()) > 0:
-                valid_hist = hist['Close'].dropna()
-                curr_p = float(valid_hist.iloc[-1])
+            
+            # 軌道 A：抓取未還原價格 (auto_adjust=False) 用於真實收盤價、真實日漲跌與真實配息紀錄
+            hist_raw = tk.history(period="2y", auto_adjust=False)
+            # 軌道 B：抓取還原權息價格 (auto_adjust=True) 用於計算近一月/一季/半年/一年含息總報酬率
+            hist_adj = tk.history(period="2y", auto_adjust=True)
+            
+            if not hist_raw.empty and len(hist_raw['Close'].dropna()) > 0:
+                valid_raw = hist_raw['Close'].dropna()
+                curr_p = float(valid_raw.iloc[-1])
                 
+                # 優先以未還原日 K 線的倒數兩根計算真實日漲跌（與股市 App 一致）
                 ret_1d = 0.0
-                if len(valid_hist) > 1:
-                    prev_p = float(valid_hist.iloc[-2])
+                if len(valid_raw) > 1:
+                    prev_p = float(valid_raw.iloc[-2])
                     if prev_p > 0:
                         ret_1d = ((curr_p - prev_p) / prev_p) * 100
                 
+                # 若盤中或剛收盤，嘗試讀取 fast_info 最新即時成交價與昨收平盤價進行校準
+                try:
+                    fi = tk.fast_info
+                    rt_last = fi.get('last_price')
+                    rt_prev = fi.get('previous_close')
+                    if rt_last and float(rt_last) > 0:
+                        rt_last_f = float(rt_last)
+                        # 如果 fast_info 最新價與日K最後一筆不同（代表盤中跳動或日K尚未更新當日Bar）
+                        if abs(rt_last_f - curr_p) > 1e-4:
+                            curr_p = rt_last_f
+                            if rt_prev and float(rt_prev) > 0:
+                                ret_1d = ((curr_p - float(rt_prev)) / float(rt_prev)) * 100
+                except:
+                    pass
+
+                # 使用還原權息序列 (valid_adj) 計算各期含息報酬率
+                valid_adj = hist_adj['Close'].dropna() if (not hist_adj.empty and 'Close' in hist_adj.columns) else valid_raw
+                curr_adj = float(valid_adj.iloc[-1])
+                
                 def calc_ret(days_back):
-                    if len(valid_hist) > days_back:
-                        past_p = float(valid_hist.iloc[-days_back])
-                        return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else 0.0
-                    elif len(valid_hist) > 0:
-                        past_p = float(valid_hist.iloc[0])
-                        return ((curr_p - past_p) / past_p) * 100 if past_p > 0 else 0.0
+                    if len(valid_adj) > days_back:
+                        past_p = float(valid_adj.iloc[-(days_back + 1)])
+                        return ((curr_adj - past_p) / past_p) * 100 if past_p > 0 else 0.0
+                    elif len(valid_adj) > 0:
+                        past_p = float(valid_adj.iloc[0])
+                        return ((curr_adj - past_p) / past_p) * 100 if past_p > 0 else 0.0
                     return 0.0
 
                 ret_1m = calc_ret(21)
                 ret_1q = calc_ret(63)
                 ret_6m = calc_ret(126)
-                
-                if len(valid_hist) > 252:
-                    ret_1y = ((curr_p - float(valid_hist.iloc[-252])) / float(valid_hist.iloc[-252])) * 100
-                else:
-                    ret_1y = ((curr_p - float(valid_hist.iloc[0])) / float(valid_hist.iloc[0])) * 100
+                ret_1y = calc_ret(252)
 
                 bench_ret = bench_returns.get(market, 0.0)
                 rel_val = ret_1y - bench_ret
@@ -339,8 +374,8 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                 div_records = []
                 tot_div = 0.0
                 one_yr_ago = (pd.Timestamp.now().normalize() - pd.Timedelta(days=365))
-                if 'Dividends' in hist.columns:
-                    divs = hist['Dividends'][hist['Dividends'] > 0]
+                if 'Dividends' in hist_raw.columns:
+                    divs = hist_raw['Dividends'][hist_raw['Dividends'] > 0]
                     for date, val in divs.sort_index(ascending=False).items():
                         dt_naive = (date.tz_localize(None) if date.tz is not None else date).normalize()
                         if dt_naive >= one_yr_ago:
@@ -357,7 +392,8 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                     "總配息金額": float(tot_div), "近一年配息明細": div_history_str, "ROE": roe_val
                 })
                 return result
-        except: time.sleep(1)
+        except:
+            time.sleep(0.8)
     return result
 
 @st.cache_data(ttl=300)
@@ -864,29 +900,19 @@ with tab2:
             # ⚡ 短線進出專區：全面採用 MA5 / MA10 敏感判定與移動停利四大區塊
             # ==========================================================
             if not df_short.empty:
-                # 判斷是否觸發短線停利/轉弱訊號（支援後端 short_profit_take 旗標與前端 tags 關鍵字雙重識別）
                 profit_take_kw = '破5日線|破MA5|破10日線|破MA10|10日高點回落|高檔回落|高檔鈍化結束|高檔破MA5|高檔破五日線|短線減碼|短線停利|短線出場|鎖利'
                 has_pt_flag = df_short['short_profit_take'].astype(str).str.lower().isin(['true', '1', 'yes'])
                 has_pt_tag = df_short['tags_str'].str.contains(profit_take_kw, regex=True)
                 
-                # 判斷是否已經嚴重破位（跌破月線 MA20 / 三線空頭排列 / 破收盤低點）
                 severe_bear_kw = '三線空頭|連3日破月線|實體跌破月線|跌破月季線|破20日收盤低|破50日收盤低|破20日低|破50日低'
                 is_severe_bear = df_short['tags_str'].str.contains(severe_bear_kw, regex=True)
                 
-                # 判斷是否具備 MA5 / MA10 短線多頭攻擊訊號
                 ma5_bull_kw = '三線多頭|MA5>MA10|短均金叉|五日十日金叉|站回MA5|站上MA5|回後買上漲|剛站上月線|創20日收盤高|創50日收盤高|創20日高|創50日高'
                 has_ma5_bull = df_short['tags_str'].str.contains(ma5_bull_kw, regex=True)
 
-                # 1. 💰 短線停利 / 減碼警戒區：觸發 MA5/MA10 破線或高檔回落鎖利，且尚未嚴重跌破月線破底
                 short_pt_cond = (has_pt_flag | has_pt_tag) & (~is_severe_bear)
-                
-                # 2. 🚀 短線攻擊 / 續抱區：未觸發停利與破位，且具備 MA5/MA10 多頭動能或 (多方 >= 2 且 空方 == 0)
                 short_bull_cond = (~short_pt_cond) & (~is_severe_bear) & (has_ma5_bull | ((df_short['bull_score'] >= 2) & (df_short['bear_score'] == 0)))
-                
-                # 3. 🩸 短線破位 / 停損區：嚴重破位（三線空頭/破月線/破底），或 (空方 >= 2 且 空方 > 多方 且非單純短線停利)
                 short_bear_cond = (~short_pt_cond) & (is_severe_bear | ((df_short['bear_score'] >= 2) & (df_short['bear_score'] > df_short['bull_score'])))
-                
-                # 4. ⚖️ 窄幅壓縮 / 伏擊區：未觸發上述三區，且處於 20日窄幅盤整
                 short_cons_cond = (~short_bull_cond) & (~short_pt_cond) & (~short_bear_cond) & df_short['tags_str'].str.contains('20日窄幅盤整')
 
                 df_short_bull = df_short[short_bull_cond].copy()
@@ -1151,8 +1177,8 @@ with tab_comp:
 # TAB 5: 績效與觀察總覽
 # ------------------------------------------
 with tab3:
-    st.markdown("一覽所有持股與觀察清單的 **當日漲跌** 、 **短中長線含息報酬率** 與 **財報配息** 。")
-    with st.spinner("正在計算各標的績效與配息資料..."):
+    st.markdown("一覽所有持股與觀察清單的 **當日真實漲跌** 、 **短中長線含息報酬率** 與 **財報配息** 。")
+    with st.spinner("正在計算各標的即時漲跌、含息績效與配息資料..."):
         bench_returns = get_benchmark_returns()
         perf_results = []
         scan_list = []
