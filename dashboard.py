@@ -188,7 +188,7 @@ def load_daily_report():
         return pd.DataFrame()
 
 # ==========================================
-# 2. 輕量即時行情與線圖抓取
+# 2. 輕量即時行情與線圖抓取 (含證交所官方 API 與 Yahoo 即時雙重校準)
 # ==========================================
 def get_yf_ticker_tw(ticker):
     ticker = str(ticker).strip().upper()
@@ -196,23 +196,141 @@ def get_yf_ticker_tw(ticker):
     if ticker.endswith('B') or ticker.endswith('C') or ticker == '009815': return f"{ticker}.TWO"
     return f"{ticker}.TW"
 
+@st.cache_data(ttl=180)
+def get_twse_realtime_quotes(tickers_tuple):
+    """
+    🚀 直接向台灣證交所 (TWSE / TPEx) 官方 MIS 系統批次抓取最新成交價與除息後精準平盤參考價，
+    確保 006208、00692 等所有台股標的與手機看盤 App 100% 絕對同步！
+    """
+    quotes = {}
+    if not tickers_tuple:
+        return quotes
+        
+    ex_ch_list = []
+    for t in tickers_tuple:
+        clean_t = str(t).strip().upper().replace('.TWO', '').replace('.TW', '')
+        if not clean_t: continue
+        if str(t).upper().endswith('.TWO') or clean_t.endswith('B') or clean_t.endswith('C') or clean_t == '009815':
+            ex_ch_list.append(f"otc_{clean_t}.tw")
+        else:
+            ex_ch_list.append(f"tse_{clean_t}.tw")
+            
+    # 分批查詢避免 URL 過長
+    chunk_size = 25
+    for i in range(0, len(ex_ch_list), chunk_size):
+        chunk = ex_ch_list[i:i+chunk_size]
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join(chunk)}&json=1&delay=0"
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                for msg in data.get('msgArray', []):
+                    code = str(msg.get('c', '')).strip()
+                    if not code: continue
+                    
+                    # y 為官方昨日收盤價（若當日除權息，證交所會自動改放「除權息參考價」！）
+                    y_str = str(msg.get('y', '-')).strip()
+                    prev_close = float(y_str) if y_str not in ['-', '', 'null', 'None'] else 0.0
+                    
+                    # z 為最新成交價；若盤中/收盤某瞬間為 '-'，則從買賣五檔最佳一檔推算或退回開盤/昨收
+                    z_str = str(msg.get('z', '-')).strip()
+                    curr_price = 0.0
+                    if z_str not in ['-', '', 'null', 'None']:
+                        try: curr_price = float(z_str)
+                        except: curr_price = 0.0
+                        
+                    if curr_price <= 0:
+                        # 嘗試從當日收盤後揭示之最佳委買 b 與委賣 a 取得
+                        b_first = str(msg.get('b', '')).split('_')[0].strip()
+                        a_first = str(msg.get('a', '')).split('_')[0].strip()
+                        if b_first and b_first not in ['-', '']:
+                            try: curr_price = float(b_first)
+                            except: pass
+                        elif a_first and a_first not in ['-', '']:
+                            try: curr_price = float(a_first)
+                            except: pass
+                            
+                    if curr_price > 0 and prev_close > 0:
+                        ret_1d = ((curr_price - prev_close) / prev_close) * 100.0
+                        quotes[code] = {
+                            'price': curr_price,
+                            'prev_close': prev_close,
+                            'ret_1d': ret_1d
+                        }
+        except Exception:
+            pass
+    return quotes
+
+def extract_accurate_price_and_daily_ret(tk, hist_raw, twse_quote=None):
+    """
+    三層精準防禦計算【最新收盤價】與【日漲跌(%)】：
+    1. 若有證交所官方即時報價 (twse_quote)，第一優先採用（與台股 App 100% 一致）。
+    2. 針對日 K 線 (hist_raw) 強制依「日期 (YYYY-MM-DD)」去重，解決 yfinance 盤後出現兩筆同日 K 棒導致漲跌變 0% 的問題；
+       並自動檢測最後一日是否為除息日，若是則自動從昨收扣除配息作為除息參考價。
+    3. 結合 yfinance fast_info / info 的 regularMarketPrice 與 regularMarketPreviousClose 處理日 K 尚未更新今日 K 棒之情況。
+    """
+    # 第一層：若有證交所官方即時數據，直接採用
+    if twse_quote and twse_quote.get('price', 0) > 0 and twse_quote.get('prev_close', 0) > 0:
+        return float(twse_quote['price']), float(twse_quote['ret_1d'])
+
+    curr_p = 0.0
+    ret_1d = 0.0
+    last_bar_date = None
+
+    # 第二層：清洗未還原日 K 線（強制消除同一天重複出現的 K 棒！）
+    if hist_raw is not None and not hist_raw.empty and 'Close' in hist_raw.columns:
+        df_clean = hist_raw.dropna(subset=['Close']).copy()
+        if not df_clean.empty:
+            df_clean.index = pd.to_datetime(df_clean.index).tz_localize(None).normalize()
+            df_clean = df_clean[~df_clean.index.duplicated(keep='last')].sort_index()
+            
+            curr_p = float(df_clean['Close'].iloc[-1])
+            last_bar_date = df_clean.index[-1]
+            
+            if len(df_clean) >= 2:
+                prev_p = float(df_clean['Close'].iloc[-2])
+                # 若最後一根 K 棒當天有除息，平盤參考價必須扣除當日配息
+                div_last_day = float(df_clean['Dividends'].iloc[-1]) if 'Dividends' in df_clean.columns else 0.0
+                ref_prev_p = (prev_p - div_last_day) if (div_last_day > 0 and prev_p > div_last_day) else prev_p
+                if ref_prev_p > 0:
+                    ret_1d = ((curr_p - ref_prev_p) / ref_prev_p) * 100.0
+
+    # 第三層：讀取 yfinance fast_info 屬性（注意：fast_info 需用屬性或 ['key'] 讀取，不可只靠 .get()）
+    try:
+        fi = tk.fast_info
+        fi_last = None
+        fi_prev = None
+        try: fi_last = float(fi['last_price'])
+        except:
+            try: fi_last = float(fi.last_price)
+            except: pass
+        try: fi_prev = float(fi['previous_close'])
+        except:
+            try: fi_prev = float(fi.previous_close)
+            except: pass
+            
+        if fi_last and fi_last > 0:
+            # 若日 K 線還沒更新到最新價格（價差超過 0.001），或日 K 只有 1 筆時，使用 fast_info
+            if abs(fi_last - curr_p) > 1e-3 and fi_prev and fi_prev > 0 and abs(fi_prev - fi_last) > 1e-5:
+                curr_p = fi_last
+                ret_1d = ((fi_last - fi_prev) / fi_prev) * 100.0
+    except Exception:
+        pass
+
+    return curr_p, ret_1d
+
 @st.cache_data(ttl=300)
-def get_basic_data(ticker):
+def get_basic_data(ticker, twse_price=0.0):
     for _ in range(3):
         try:
             time.sleep(0.2)
             tk = yf.Ticker(ticker)
-            # 抓取未還原歷史資料以取得真實股價與真實除息金額
             hist = tk.history(period="2y", auto_adjust=False)
             if not hist.empty:
-                price = float(hist['Close'].dropna().iloc[-1])
-                # 嘗試透過 fast_info 取得盤中最新即時成交價
-                try:
-                    rt_p = tk.fast_info.get('last_price')
-                    if rt_p and float(rt_p) > 0:
-                        price = float(rt_p)
-                except:
-                    pass
+                price, _ = extract_accurate_price_and_daily_ret(
+                    tk, hist, {'price': twse_price, 'prev_close': twse_price, 'ret_1d': 0.0} if twse_price > 0 else None
+                )
                 
                 # 統一以當下日期往回推算 365 天（標準化至當日 00:00:00 確保兩邊完全一致）
                 one_yr_ago = (pd.Timestamp.now().normalize() - pd.Timedelta(days=365))
@@ -222,9 +340,13 @@ def get_basic_data(ticker):
                 div_events = []
                 
                 if 'Dividends' in hist.columns:
-                    divs = hist['Dividends'][hist['Dividends'] > 0]
-                    for dt, val in divs.items():
-                        dt_naive = (dt.tz_localize(None) if dt.tz is not None else dt).normalize()
+                    # 確保除息序列也排除重複日期
+                    divs_series = hist['Dividends'].copy()
+                    divs_series.index = pd.to_datetime(divs_series.index).tz_localize(None).normalize()
+                    divs_series = divs_series[~divs_series.index.duplicated(keep='last')]
+                    divs = divs_series[divs_series > 0]
+                    
+                    for dt_naive, val in divs.items():
                         v = float(val)
                         is_in_1y = bool(dt_naive >= one_yr_ago)
                         
@@ -244,7 +366,7 @@ def get_basic_data(ticker):
                 return price, div_2026, div_1y, div_events
         except:
             time.sleep(0.5)
-    return 0.0, 0.0, 0.0, []
+    return (twse_price if twse_price > 0 else 0.0), 0.0, 0.0, []
 
 @st.cache_data(ttl=300)
 def get_usdtwd():
@@ -272,13 +394,19 @@ def get_benchmark_returns():
     benchmarks = {'台股': 0.0, '美股': 0.0}
     try:
         tw_hist = yf.Ticker("^TWII").history(period="1y", auto_adjust=True).dropna(subset=['Close'])
-        if len(tw_hist) > 252: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[-252]) / tw_hist['Close'].iloc[-252]) * 100
-        elif not tw_hist.empty: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
+        if not tw_hist.empty:
+            tw_hist.index = pd.to_datetime(tw_hist.index).tz_localize(None).normalize()
+            tw_hist = tw_hist[~tw_hist.index.duplicated(keep='last')]
+            if len(tw_hist) > 252: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[-252]) / tw_hist['Close'].iloc[-252]) * 100
+            else: benchmarks['台股'] = ((tw_hist['Close'].iloc[-1] - tw_hist['Close'].iloc[0]) / tw_hist['Close'].iloc[0]) * 100
     except: pass
     try:
         us_hist = yf.Ticker("^GSPC").history(period="1y", auto_adjust=True).dropna(subset=['Close'])
-        if len(us_hist) > 252: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[-252]) / us_hist['Close'].iloc[-252]) * 100
-        elif not us_hist.empty: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
+        if not us_hist.empty:
+            us_hist.index = pd.to_datetime(us_hist.index).tz_localize(None).normalize()
+            us_hist = us_hist[~us_hist.index.duplicated(keep='last')]
+            if len(us_hist) > 252: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[-252]) / us_hist['Close'].iloc[-252]) * 100
+            else: benchmarks['美股'] = ((us_hist['Close'].iloc[-1] - us_hist['Close'].iloc[0]) / us_hist['Close'].iloc[0]) * 100
     except: pass
     return benchmarks
 
@@ -291,16 +419,20 @@ def get_fundamental_info(sym):
             'quoteType': info.get('quoteType'),
             'beta': info.get('beta'),
             'returnOnEquity': info.get('returnOnEquity'),
-            'trailingPE': info.get('trailingPE')
+            'trailingPE': info.get('trailingPE'),
+            'regularMarketPrice': info.get('regularMarketPrice') or info.get('currentPrice'),
+            'regularMarketPreviousClose': info.get('regularMarketPreviousClose') or info.get('previousClose'),
+            'regularMarketChangePercent': info.get('regularMarketChangePercent')
         }
     except: return {}
 
 @st.cache_data(ttl=300)
-def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
+def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name, twse_quote=None):
     """
-    雙軌精準計算：
-    1. 收盤價 & 日漲跌(%)：採用未還原真實股價 (auto_adjust=False) 搭配 fast_info 即時報價，與看盤 App 100% 對齊。
-    2. 短中長線含息報酬率：採用還原權息股價 (auto_adjust=True)，精準反映股息再投入之總報酬。
+    🚀 終極精準版績效與日漲跌計算引擎：
+    1. 台股優先使用台灣證交所 (TWSE/TPEx) 官方即時 API 報價與除息平盤參考價，確保 006208、00692 等標的與看盤 App 100% 同步。
+    2. 日 K 線強制依日期去重 (~duplicated)，杜絕 yfinance 盤後重複兩筆當日 K 棒導致日漲跌歸零或錯位。
+    3. 含息報酬率嚴格基於去重後的還原權息收盤價 (auto_adjust=True) 計算。
     """
     result = {
         "市場": market, "代號": display_ticker, "顯示名稱": display_name, "收盤價": 0.0,
@@ -313,39 +445,32 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
             time.sleep(0.25)
             tk = yf.Ticker(sym)
             
-            # 軌道 A：抓取未還原價格 (auto_adjust=False) 用於真實收盤價、真實日漲跌與真實配息紀錄
             hist_raw = tk.history(period="2y", auto_adjust=False)
-            # 軌道 B：抓取還原權息價格 (auto_adjust=True) 用於計算近一月/一季/半年/一年含息總報酬率
             hist_adj = tk.history(period="2y", auto_adjust=True)
             
             if not hist_raw.empty and len(hist_raw['Close'].dropna()) > 0:
-                valid_raw = hist_raw['Close'].dropna()
-                curr_p = float(valid_raw.iloc[-1])
+                # 取得精準收盤價與日漲跌(%)
+                curr_p, ret_1d = extract_accurate_price_and_daily_ret(tk, hist_raw, twse_quote)
                 
-                # 優先以未還原日 K 線的倒數兩根計算真實日漲跌（與股市 App 一致）
-                ret_1d = 0.0
-                if len(valid_raw) > 1:
-                    prev_p = float(valid_raw.iloc[-2])
-                    if prev_p > 0:
-                        ret_1d = ((curr_p - prev_p) / prev_p) * 100
-                
-                # 若盤中或剛收盤，嘗試讀取 fast_info 最新即時成交價與昨收平盤價進行校準
-                try:
-                    fi = tk.fast_info
-                    rt_last = fi.get('last_price')
-                    rt_prev = fi.get('previous_close')
-                    if rt_last and float(rt_last) > 0:
-                        rt_last_f = float(rt_last)
-                        # 如果 fast_info 最新價與日K最後一筆不同（代表盤中跳動或日K尚未更新當日Bar）
-                        if abs(rt_last_f - curr_p) > 1e-4:
-                            curr_p = rt_last_f
-                            if rt_prev and float(rt_prev) > 0:
-                                ret_1d = ((curr_p - float(rt_prev)) / float(rt_prev)) * 100
-                except:
-                    pass
+                f_info = get_fundamental_info(sym)
+                # 若為美股且沒有 twse_quote，可用 Yahoo Quote Summary 的官方漲跌幅做最終確認
+                if not twse_quote:
+                    info_p = f_info.get('regularMarketPrice')
+                    info_prev = f_info.get('regularMarketPreviousClose')
+                    if info_p and info_prev and float(info_p) > 0 and float(info_prev) > 0:
+                        if abs(float(info_p) - curr_p) > 1e-3 or abs(ret_1d) < 1e-6:
+                            curr_p = float(info_p)
+                            ret_1d = ((curr_p - float(info_prev)) / float(info_prev)) * 100.0
 
-                # 使用還原權息序列 (valid_adj) 計算各期含息報酬率
-                valid_adj = hist_adj['Close'].dropna() if (not hist_adj.empty and 'Close' in hist_adj.columns) else valid_raw
+                # 清洗並去重還原權息序列 (valid_adj) 以計算各期含息報酬率
+                if not hist_adj.empty and 'Close' in hist_adj.columns:
+                    df_adj_clean = hist_adj.dropna(subset=['Close']).copy()
+                    df_adj_clean.index = pd.to_datetime(df_adj_clean.index).tz_localize(None).normalize()
+                    df_adj_clean = df_adj_clean[~df_adj_clean.index.duplicated(keep='last')].sort_index()
+                    valid_adj = df_adj_clean['Close']
+                else:
+                    valid_adj = hist_raw['Close'].dropna()
+                    
                 curr_adj = float(valid_adj.iloc[-1])
                 
                 def calc_ret(days_back):
@@ -365,7 +490,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                 bench_ret = bench_returns.get(market, 0.0)
                 rel_val = ret_1y - bench_ret
 
-                f_info = get_fundamental_info(sym)
                 is_etf = 'ETF' in str(f_info.get('quoteType', '')).upper() or 'MUTUALFUND' in str(f_info.get('quoteType', '')).upper()
                 
                 roe_raw = f_info.get('returnOnEquity')
@@ -375,9 +499,11 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name):
                 tot_div = 0.0
                 one_yr_ago = (pd.Timestamp.now().normalize() - pd.Timedelta(days=365))
                 if 'Dividends' in hist_raw.columns:
-                    divs = hist_raw['Dividends'][hist_raw['Dividends'] > 0]
-                    for date, val in divs.sort_index(ascending=False).items():
-                        dt_naive = (date.tz_localize(None) if date.tz is not None else date).normalize()
+                    divs_series = hist_raw['Dividends'].copy()
+                    divs_series.index = pd.to_datetime(divs_series.index).tz_localize(None).normalize()
+                    divs_series = divs_series[~divs_series.index.duplicated(keep='last')]
+                    divs = divs_series[divs_series > 0]
+                    for dt_naive, val in divs.sort_index(ascending=False).items():
                         if dt_naive >= one_yr_ago:
                             div_records.append(f"{dt_naive.strftime('%Y-%m-%d')}: ${val:.2f}")
                             tot_div += float(val)
@@ -403,6 +529,9 @@ def get_single_stock_chart_data(sym):
         if not df.empty and len(df) >= 2:
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None: df.index = df.index.tz_convert(None)
+            df.index = pd.to_datetime(df.index).normalize()
+            df = df[~df.index.duplicated(keep='last')].sort_index()
+            
             available_cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
             df = df[available_cols].astype(float).dropna(subset=['Close'])
             if df.empty or len(df) < 2: return None
@@ -443,9 +572,18 @@ with col_btn:
 with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 預先同步資產市值與每月配息資料（供 TAB 1 與每月股息分頁共用，確保計算基準 100% 同步）
-with st.spinner("正在同步即時資產市值與配息紀錄..."):
+# 預先同步證交所即時報價、資產市值與每月配息資料
+with st.spinner("正在同步證交所即時報價、資產市值與配息紀錄..."):
     usdtwd = get_usdtwd()
+    
+    # 批次取得台股證交所官方即時報價與除息平盤價
+    tw_ticker_list = tuple(
+        str(item.get('Ticker', '')).strip() 
+        for item in PORTFOLIO_TW 
+        if pd.notna(item.get('Ticker')) and str(item.get('Ticker', '')).strip().lower() not in ['nan', 'none', '']
+    )
+    twse_quotes_map = get_twse_realtime_quotes(tw_ticker_list)
+    
     total_market_value, total_dividends_2026, total_dividends_1y = 0, 0, 0
     asset_allocation = {}
     individual_holdings = [] 
@@ -459,7 +597,10 @@ with st.spinner("正在同步即時資產市值與配息紀錄..."):
             asset_type = str(item.get('類別', '台股')).strip()
             if not asset_type or asset_type.lower() == 'nan': asset_type = '台股未分類'
             
-            price, div_2026, div_1y, div_events = get_basic_data(ticker)
+            clean_code = ticker_str.upper().replace('.TWO', '').replace('.TW', '')
+            twse_p = twse_quotes_map.get(clean_code, {}).get('price', 0.0)
+            
+            price, div_2026, div_1y, div_events = get_basic_data(ticker, twse_p)
             shares_own = safe_float(item.get('Shares'))
             shares_lent = safe_float(item.get('出借'))
             total_shares = shares_own + shares_lent
@@ -507,7 +648,7 @@ with st.spinner("正在同步即時資產市值與配息紀錄..."):
             asset_type = str(item.get('類別', '美股')).strip()
             if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
             
-            price, div_2026, div_1y, div_events = get_basic_data(ticker_str)
+            price, div_2026, div_1y, div_events = get_basic_data(ticker_str, 0.0)
             shares_own = safe_float(item.get('Shares'))
             shares_sub = safe_float(item.get('複委託'))
             total_shares = shares_own + shares_sub
@@ -1104,7 +1245,7 @@ with tab_comp:
                         if not hist.empty and 'Close' in hist.columns:
                             s = hist['Close'].dropna()
                             if len(s) > 0:
-                                s.index = pd.to_datetime(s.index).normalize()
+                                s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
                                 s = s[~s.index.duplicated(keep='last')]
                                 first_p = float(s.iloc[0])
                                 if first_p > 0:
@@ -1174,10 +1315,10 @@ with tab_comp:
     else: st.info("您的側邊欄清單中尚未加入任何有效標的。")
 
 # ------------------------------------------
-# TAB 5: 績效與觀察總覽
+# TAB 5: 績效與觀察總覽 (🚀 結合證交所官方即時報價與除息平盤校準)
 # ------------------------------------------
 with tab3:
-    st.markdown("一覽所有持股與觀察清單的 **當日真實漲跌** 、 **短中長線含息報酬率** 與 **財報配息** 。")
+    st.markdown("一覽所有持股與觀察清單的 **當日真實漲跌 (同步證交所官方平盤基準)** 、 **短中長線含息報酬率** 與 **財報配息** 。")
     with st.spinner("正在計算各標的即時漲跌、含息績效與配息資料..."):
         bench_returns = get_benchmark_returns()
         perf_results = []
@@ -1195,7 +1336,10 @@ with tab3:
                 
         for sym, display_ticker, market, raw_name in scan_list:
             disp_name = format_display_name(raw_name, display_ticker)
-            res = get_perf_div_data(sym, display_ticker, market, bench_returns, disp_name)
+            clean_code = display_ticker.upper().replace('.TWO', '').replace('.TW', '')
+            twse_q = twse_quotes_map.get(clean_code) if market == '台股' else None
+            
+            res = get_perf_div_data(sym, display_ticker, market, bench_returns, disp_name, twse_q)
             if res: perf_results.append(res)
                 
         if perf_results:
