@@ -41,6 +41,45 @@ def format_display_name(name_raw, sym_raw):
     if name and not sym: return name
     return "未知標的"
 
+def estimate_payment_date(ticker_str, market, ex_date_ts, official_pay_ts=None):
+    """
+    🚀 智慧推算與校準「現金股利發放日 (Payment Date)」：
+    1. 若 yfinance 官方 info 具有匹配的近期發放日 (dividendDate)，優先採用官方發放日。
+    2. 針對歷史各筆除息紀錄，依據台股投信 ETF / 台股個股 / 美股 ETF 實務保管銀行撥款週期推算，
+       若遇週六、週日則自動順延至下一個營業日（週一）。
+    """
+    if official_pay_ts is not None:
+        try:
+            diff_days = (official_pay_ts - ex_date_ts).days
+            if 1 <= diff_days <= 65:
+                return official_pay_ts
+        except:
+            pass
+
+    clean_t = str(ticker_str).strip().upper().replace('.TWO', '').replace('.TW', '')
+    
+    if market == '美股':
+        # 美股債券/股票 ETF (如 BND, IEF, VOO, VT 等) 通常於除息後 4~7 天內快速發放
+        bond_etfs_us = ['BND', 'BNDW', 'IEF', 'TLT', 'SGOV', 'SHY', 'AGG', 'LQD']
+        offset_days = 5 if clean_t in bond_etfs_us else 7
+    else:
+        # 台股 ETF (00 開頭)：投信實務上約在除息日後 26~28 個日曆天 (約 18~20 個營業日) 發放
+        if clean_t.startswith('00'):
+            offset_days = 26
+        elif clean_t == '2330':
+            offset_days = 26
+        else:
+            offset_days = 28
+
+    pay_dt = ex_date_ts + pd.Timedelta(days=offset_days)
+    # 若推算日落在週六(5)或週日(6)，順延至週一營業日
+    if pay_dt.weekday() == 5:
+        pay_dt += pd.Timedelta(days=2)
+    elif pay_dt.weekday() == 6:
+        pay_dt += pd.Timedelta(days=1)
+        
+    return pay_dt.normalize()
+
 # ==========================================
 # 1. 資料庫連線與安全快取模組
 # ==========================================
@@ -215,7 +254,6 @@ def get_twse_realtime_quotes(tickers_tuple):
         else:
             ex_ch_list.append(f"tse_{clean_t}.tw")
             
-    # 分批查詢避免 URL 過長
     chunk_size = 25
     for i in range(0, len(ex_ch_list), chunk_size):
         chunk = ex_ch_list[i:i+chunk_size]
@@ -229,11 +267,9 @@ def get_twse_realtime_quotes(tickers_tuple):
                     code = str(msg.get('c', '')).strip()
                     if not code: continue
                     
-                    # y 為官方昨日收盤價（若當日除權息，證交所會自動改放「除權息參考價」！）
                     y_str = str(msg.get('y', '-')).strip()
                     prev_close = float(y_str) if y_str not in ['-', '', 'null', 'None'] else 0.0
                     
-                    # z 為最新成交價；若盤中/收盤某瞬間為 '-'，則從買賣五檔最佳一檔推算或退回開盤/昨收
                     z_str = str(msg.get('z', '-')).strip()
                     curr_price = 0.0
                     if z_str not in ['-', '', 'null', 'None']:
@@ -241,7 +277,6 @@ def get_twse_realtime_quotes(tickers_tuple):
                         except: curr_price = 0.0
                         
                     if curr_price <= 0:
-                        # 嘗試從當日收盤後揭示之最佳委買 b 與委賣 a 取得
                         b_first = str(msg.get('b', '')).split('_')[0].strip()
                         a_first = str(msg.get('a', '')).split('_')[0].strip()
                         if b_first and b_first not in ['-', '']:
@@ -263,22 +298,13 @@ def get_twse_realtime_quotes(tickers_tuple):
     return quotes
 
 def extract_accurate_price_and_daily_ret(tk, hist_raw, twse_quote=None):
-    """
-    三層精準防禦計算【最新收盤價】與【日漲跌(%)】：
-    1. 若有證交所官方即時報價 (twse_quote)，第一優先採用（與台股 App 100% 一致）。
-    2. 針對日 K 線 (hist_raw) 強制依「日期 (YYYY-MM-DD)」去重，解決 yfinance 盤後出現兩筆同日 K 棒導致漲跌變 0% 的問題；
-       並自動檢測最後一日是否為除息日，若是則自動從昨收扣除配息作為除息參考價。
-    3. 結合 yfinance fast_info / info 的 regularMarketPrice 與 regularMarketPreviousClose 處理日 K 尚未更新今日 K 棒之情況。
-    """
-    # 第一層：若有證交所官方即時數據，直接採用
+    """三層精準防禦計算【最新收盤價】與【日漲跌(%)】"""
     if twse_quote and twse_quote.get('price', 0) > 0 and twse_quote.get('prev_close', 0) > 0:
         return float(twse_quote['price']), float(twse_quote['ret_1d'])
 
     curr_p = 0.0
     ret_1d = 0.0
-    last_bar_date = None
 
-    # 第二層：清洗未還原日 K 線（強制消除同一天重複出現的 K 棒！）
     if hist_raw is not None and not hist_raw.empty and 'Close' in hist_raw.columns:
         df_clean = hist_raw.dropna(subset=['Close']).copy()
         if not df_clean.empty:
@@ -286,17 +312,14 @@ def extract_accurate_price_and_daily_ret(tk, hist_raw, twse_quote=None):
             df_clean = df_clean[~df_clean.index.duplicated(keep='last')].sort_index()
             
             curr_p = float(df_clean['Close'].iloc[-1])
-            last_bar_date = df_clean.index[-1]
             
             if len(df_clean) >= 2:
                 prev_p = float(df_clean['Close'].iloc[-2])
-                # 若最後一根 K 棒當天有除息，平盤參考價必須扣除當日配息
                 div_last_day = float(df_clean['Dividends'].iloc[-1]) if 'Dividends' in df_clean.columns else 0.0
                 ref_prev_p = (prev_p - div_last_day) if (div_last_day > 0 and prev_p > div_last_day) else prev_p
                 if ref_prev_p > 0:
                     ret_1d = ((curr_p - ref_prev_p) / ref_prev_p) * 100.0
 
-    # 第三層：讀取 yfinance fast_info 屬性（注意：fast_info 需用屬性或 ['key'] 讀取，不可只靠 .get()）
     try:
         fi = tk.fast_info
         fi_last = None
@@ -311,7 +334,6 @@ def extract_accurate_price_and_daily_ret(tk, hist_raw, twse_quote=None):
             except: pass
             
         if fi_last and fi_last > 0:
-            # 若日 K 線還沒更新到最新價格（價差超過 0.001），或日 K 只有 1 筆時，使用 fast_info
             if abs(fi_last - curr_p) > 1e-3 and fi_prev and fi_prev > 0 and abs(fi_prev - fi_last) > 1e-5:
                 curr_p = fi_last
                 ret_1d = ((fi_last - fi_prev) / fi_prev) * 100.0
@@ -321,7 +343,12 @@ def extract_accurate_price_and_daily_ret(tk, hist_raw, twse_quote=None):
     return curr_p, ret_1d
 
 @st.cache_data(ttl=300)
-def get_basic_data(ticker, twse_price=0.0):
+def get_basic_data(ticker, market="台股", twse_price=0.0):
+    """
+    🚀 升級版基本資料與配息抓取：
+    同步解析「除息日 (ex_date)」與「現金股利發放日 (pay_date)」，
+    並以【現金股利發放日】作為 2026 年度與近一年 (滾動 365 天) 股息計算基準！
+    """
     for _ in range(3):
         try:
             time.sleep(0.2)
@@ -332,34 +359,48 @@ def get_basic_data(ticker, twse_price=0.0):
                     tk, hist, {'price': twse_price, 'prev_close': twse_price, 'ret_1d': 0.0} if twse_price > 0 else None
                 )
                 
-                # 統一以當下日期往回推算 365 天（標準化至當日 00:00:00 確保兩邊完全一致）
-                one_yr_ago = (pd.Timestamp.now().normalize() - pd.Timedelta(days=365))
+                # 嘗試從 yfinance calendar 或 info 取得最新官方宣告之現金股利發放日 (dividendDate)
+                official_pay_ts = None
+                try:
+                    cal = tk.calendar
+                    if isinstance(cal, dict) and 'Dividend Date' in cal and cal['Dividend Date'] is not None:
+                        official_pay_ts = pd.to_datetime(cal['Dividend Date']).tz_localize(None).normalize()
+                except:
+                    pass
+                
+                now_norm = pd.Timestamp.now().normalize()
+                one_yr_ago = now_norm - pd.Timedelta(days=365)
                 
                 div_2026 = 0.0
                 div_1y = 0.0
                 div_events = []
                 
                 if 'Dividends' in hist.columns:
-                    # 確保除息序列也排除重複日期
                     divs_series = hist['Dividends'].copy()
                     divs_series.index = pd.to_datetime(divs_series.index).tz_localize(None).normalize()
                     divs_series = divs_series[~divs_series.index.duplicated(keep='last')]
                     divs = divs_series[divs_series > 0]
                     
-                    for dt_naive, val in divs.items():
+                    for ex_dt_naive, val in divs.items():
                         v = float(val)
-                        is_in_1y = bool(dt_naive >= one_yr_ago)
+                        # 計算或匹配該筆配息的「現金股利發放日」
+                        pay_dt_naive = estimate_payment_date(ticker, market, ex_dt_naive, official_pay_ts)
                         
-                        if dt_naive.year == 2026:
+                        # 🚀 全面改以「現金股利發放日 (pay_dt_naive)」為標準計算是否落入 2026 年與近一年區間
+                        # 只要發放日落在過去 365 天內（或已除息且發放日即將到來之當期配息），皆精準納入統計
+                        is_in_1y = bool((pay_dt_naive >= one_yr_ago) and (ex_dt_naive <= now_norm))
+                        
+                        if pay_dt_naive.year == 2026:
                             div_2026 += v
                         if is_in_1y:
                             div_1y += v
                             
                         div_events.append({
-                            'date': dt_naive.strftime('%Y-%m-%d'),
-                            'year': dt_naive.year,
-                            'month': dt_naive.month,
-                            'year_month': dt_naive.strftime('%Y-%m'),
+                            'ex_date': ex_dt_naive.strftime('%Y-%m-%d'),
+                            'pay_date': pay_dt_naive.strftime('%Y-%m-%d'),
+                            'year': pay_dt_naive.year,
+                            'month': pay_dt_naive.month,
+                            'year_month': pay_dt_naive.strftime('%Y-%m'),
                             'div_per_share': v,
                             'in_rolling_1y': is_in_1y
                         })
@@ -422,7 +463,8 @@ def get_fundamental_info(sym):
             'trailingPE': info.get('trailingPE'),
             'regularMarketPrice': info.get('regularMarketPrice') or info.get('currentPrice'),
             'regularMarketPreviousClose': info.get('regularMarketPreviousClose') or info.get('previousClose'),
-            'regularMarketChangePercent': info.get('regularMarketChangePercent')
+            'regularMarketChangePercent': info.get('regularMarketChangePercent'),
+            'dividendDate': info.get('dividendDate')
         }
     except: return {}
 
@@ -449,11 +491,9 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name, 
             hist_adj = tk.history(period="2y", auto_adjust=True)
             
             if not hist_raw.empty and len(hist_raw['Close'].dropna()) > 0:
-                # 取得精準收盤價與日漲跌(%)
                 curr_p, ret_1d = extract_accurate_price_and_daily_ret(tk, hist_raw, twse_quote)
                 
                 f_info = get_fundamental_info(sym)
-                # 若為美股且沒有 twse_quote，可用 Yahoo Quote Summary 的官方漲跌幅做最終確認
                 if not twse_quote:
                     info_p = f_info.get('regularMarketPrice')
                     info_prev = f_info.get('regularMarketPreviousClose')
@@ -462,7 +502,6 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name, 
                             curr_p = float(info_p)
                             ret_1d = ((curr_p - float(info_prev)) / float(info_prev)) * 100.0
 
-                # 清洗並去重還原權息序列 (valid_adj) 以計算各期含息報酬率
                 if not hist_adj.empty and 'Close' in hist_adj.columns:
                     df_adj_clean = hist_adj.dropna(subset=['Close']).copy()
                     df_adj_clean.index = pd.to_datetime(df_adj_clean.index).tz_localize(None).normalize()
@@ -504,8 +543,9 @@ def get_perf_div_data(sym, display_ticker, market, bench_returns, display_name, 
                     divs_series = divs_series[~divs_series.index.duplicated(keep='last')]
                     divs = divs_series[divs_series > 0]
                     for dt_naive, val in divs.sort_index(ascending=False).items():
-                        if dt_naive >= one_yr_ago:
-                            div_records.append(f"{dt_naive.strftime('%Y-%m-%d')}: ${val:.2f}")
+                        pay_dt = estimate_payment_date(display_ticker, market, dt_naive)
+                        if pay_dt >= one_yr_ago:
+                            div_records.append(f"發放{pay_dt.strftime('%Y-%m-%d')}(除息{dt_naive.strftime('%m/%d')}): ${val:.2f}")
                             tot_div += float(val)
 
                 div_history_str = " / ".join(div_records) if div_records else "無配息紀錄"
@@ -573,10 +613,9 @@ with col_time:
     st.caption(f"數據最後更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # 預先同步證交所即時報價、資產市值與每月配息資料
-with st.spinner("正在同步證交所即時報價、資產市值與配息紀錄..."):
+with st.spinner("正在同步證交所即時報價、資產市值與現金股利發放紀錄..."):
     usdtwd = get_usdtwd()
     
-    # 批次取得台股證交所官方即時報價與除息平盤價
     tw_ticker_list = tuple(
         str(item.get('Ticker', '')).strip() 
         for item in PORTFOLIO_TW 
@@ -600,7 +639,7 @@ with st.spinner("正在同步證交所即時報價、資產市值與配息紀錄
             clean_code = ticker_str.upper().replace('.TWO', '').replace('.TW', '')
             twse_p = twse_quotes_map.get(clean_code, {}).get('price', 0.0)
             
-            price, div_2026, div_1y, div_events = get_basic_data(ticker, twse_p)
+            price, div_2026, div_1y, div_events = get_basic_data(ticker, "台股", twse_p)
             shares_own = safe_float(item.get('Shares'))
             shares_lent = safe_float(item.get('出借'))
             total_shares = shares_own + shares_lent
@@ -625,7 +664,8 @@ with st.spinner("正在同步證交所即時報價、資產市值與配息紀錄
                 
                 for ev in div_events:
                     monthly_dividend_records.append({
-                        '除息日': ev['date'],
+                        '發放日': ev['pay_date'],
+                        '除息日': ev['ex_date'],
                         '年份': ev['year'],
                         '月份': ev['month'],
                         '年月': ev['year_month'],
@@ -648,7 +688,7 @@ with st.spinner("正在同步證交所即時報價、資產市值與配息紀錄
             asset_type = str(item.get('類別', '美股')).strip()
             if not asset_type or asset_type.lower() == 'nan': asset_type = '美股未分類'
             
-            price, div_2026, div_1y, div_events = get_basic_data(ticker_str, 0.0)
+            price, div_2026, div_1y, div_events = get_basic_data(ticker_str, "美股", 0.0)
             shares_own = safe_float(item.get('Shares'))
             shares_sub = safe_float(item.get('複委託'))
             total_shares = shares_own + shares_sub
@@ -673,7 +713,8 @@ with st.spinner("正在同步證交所即時報價、資產市值與配息紀錄
                 
                 for ev in div_events:
                     monthly_dividend_records.append({
-                        '除息日': ev['date'],
+                        '發放日': ev['pay_date'],
+                        '除息日': ev['ex_date'],
                         '年份': ev['year'],
                         '月份': ev['month'],
                         '年月': ev['year_month'],
@@ -695,19 +736,22 @@ tab1, tab_div, tab2, tab_comp, tab3, tab_etf, tab_report, tab4 = st.tabs([
 ])
 
 # ------------------------------------------
-# TAB 1: 投資組合總覽
+# TAB 1: 投資組合總覽 (含總市值與總股息雙每日變化趨勢)
 # ------------------------------------------
 with tab1:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
-    col2.metric("2026 累計股息 (TWD)", f"${total_dividends_2026:,.0f}")
-    col3.metric("近一年累計股息 (TWD)", f"${total_dividends_1y:,.0f}")
+    col2.metric("2026 累計發放股息 (TWD)", f"${total_dividends_2026:,.0f}")
+    col3.metric("近一年累計發放股息 (TWD)", f"${total_dividends_1y:,.0f}")
     col4.metric("目前匯率 (USD/TWD)", f"{usdtwd:.3f}")
 
     df_history = load_value_history()
     df_history_to_display = pd.DataFrame()
     history_error = False
     
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    now_time = datetime.now().strftime('%H:%M:%S')
+
     if not df_history.empty:
         df_history.columns = [str(c).strip().replace(' ', '_') for c in df_history.columns]
         df_history = df_history.loc[:, ~df_history.columns.duplicated()]
@@ -717,46 +761,114 @@ with tab1:
             df_history = df_history.dropna(subset=['Date'])
             df_history['Total_Value'] = pd.to_numeric(df_history['Total_Value'].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce').fillna(0)
             
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            now_time = datetime.now().strftime('%H:%M:%S')
+            # 🚀 自動無縫擴充 Total_Dividend_1Y 與 Total_Dividend_2026 欄位（免手動建表）
+            if 'Total_Dividend_1Y' not in df_history.columns:
+                df_history['Total_Dividend_1Y'] = np.nan
+            else:
+                df_history['Total_Dividend_1Y'] = pd.to_numeric(df_history['Total_Dividend_1Y'].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
+                
+            if 'Total_Dividend_2026' not in df_history.columns:
+                df_history['Total_Dividend_2026'] = np.nan
+            else:
+                df_history['Total_Dividend_2026'] = pd.to_numeric(df_history['Total_Dividend_2026'].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
             
             if len(df_history) >= 1:
                 if today_str in df_history['Date'].values:
                     idx = df_history.index[df_history['Date'] == today_str].tolist()[0]
                     existing_val = safe_float(df_history.at[idx, 'Total_Value'])
-                    if abs(existing_val - total_market_value) > 1:
-                        df_history.at[idx, 'Total_Value'] = total_market_value
+                    existing_div_1y = safe_float(df_history.at[idx, 'Total_Dividend_1Y'])
+                    existing_div_2026 = safe_float(df_history.at[idx, 'Total_Dividend_2026'])
+                    
+                    # 若總市值、近一年股息或 2026 股息有任一項變動超過 $1（如加減碼持股或新配息入帳），即自動更新寫入
+                    if (abs(existing_val - total_market_value) > 1 or 
+                        abs(existing_div_1y - total_dividends_1y) > 1 or 
+                        abs(existing_div_2026 - total_dividends_2026) > 1):
+                        df_history.at[idx, 'Total_Value'] = round(total_market_value, 0)
+                        df_history.at[idx, 'Total_Dividend_1Y'] = round(total_dividends_1y, 0)
+                        df_history.at[idx, 'Total_Dividend_2026'] = round(total_dividends_2026, 0)
                         df_history.at[idx, 'Last_Updated'] = now_time
                         try:
-                            df_history = df_history.fillna("") 
-                            conn.update(worksheet="Value_History", data=df_history)
+                            df_to_save = df_history.fillna("")
+                            conn.update(worksheet="Value_History", data=df_to_save)
                             st.cache_data.clear() 
                         except: pass
                 else:
-                    new_row = pd.DataFrame([{'Date': today_str, 'Total_Value': total_market_value, 'Last_Updated': now_time}])
+                    new_row = pd.DataFrame([{
+                        'Date': today_str, 
+                        'Total_Value': round(total_market_value, 0), 
+                        'Total_Dividend_1Y': round(total_dividends_1y, 0),
+                        'Total_Dividend_2026': round(total_dividends_2026, 0),
+                        'Last_Updated': now_time
+                    }])
                     df_history = pd.concat([df_history, new_row], ignore_index=True)
                     try:
-                        df_history = df_history.fillna("")
-                        conn.update(worksheet="Value_History", data=df_history)
+                        df_to_save = df_history.fillna("")
+                        conn.update(worksheet="Value_History", data=df_to_save)
                         st.cache_data.clear()
                     except: pass
-                df_history_to_display = df_history
+                df_history_to_display = df_history.copy()
             else: history_error = True
         else: history_error = True
     else: history_error = True
 
     if history_error or df_history_to_display.empty or 'Total_Value' not in df_history_to_display.columns:
-        df_history_to_display = pd.DataFrame([{'Date': datetime.now().strftime('%Y-%m-%d'), 'Total_Value': total_market_value, 'Last_Updated': datetime.now().strftime('%H:%M:%S')}])
+        df_history_to_display = pd.DataFrame([{
+            'Date': today_str, 
+            'Total_Value': round(total_market_value, 0), 
+            'Total_Dividend_1Y': round(total_dividends_1y, 0),
+            'Total_Dividend_2026': round(total_dividends_2026, 0),
+            'Last_Updated': now_time
+        }])
 
     st.divider()
 
-    if not df_history_to_display.empty and len(df_history_to_display) > 1:
+    # 1. 總市值每日變化趨勢
+    if not df_history_to_display.empty and len(df_history_to_display) >= 1:
         st.subheader("📈 總市值每日變化趨勢")
         df_history_to_display['Total_Value'] = pd.to_numeric(df_history_to_display['Total_Value'], errors='coerce').fillna(0)
         fig_hist = px.line(df_history_to_display, x='Date', y='Total_Value', text='Total_Value', markers=True)
-        fig_hist.update_traces(textposition="top center", texttemplate='%{text:,.0f}')
-        fig_hist.update_layout(yaxis_title="總市值 (TWD)", xaxis_title="日期", margin=dict(t=30, b=0, l=0, r=0), height=350)
+        fig_hist.update_traces(textposition="top center", texttemplate='%{text:,.0f}', line_color='#3498db')
+        fig_hist.update_layout(yaxis_title="總市值 (TWD)", xaxis_title="日期", margin=dict(t=30, b=0, l=0, r=0), height=340)
         st.plotly_chart(fig_hist, use_container_width=True)
+
+    st.divider()
+
+    # 2. 🌟 新增：總股息每日變化趨勢 (隨持股增減與配息推進自動記錄)
+    if not df_history_to_display.empty:
+        col_div_title, col_div_opt = st.columns([2, 1.5])
+        with col_div_title:
+            st.subheader("💰 總股息每日變化趨勢")
+            st.caption("隨您加減碼持股數、匯率波動與最新股息發放，每日自動記錄被動收入成長軌跡。")
+        with col_div_opt:
+            div_trend_metric = st.radio(
+                "選擇股息追蹤指標：",
+                ["近一年累計股息 (Total_Dividend_1Y)", "2026 累計股息 (Total_Dividend_2026)"],
+                horizontal=True,
+                key="div_trend_radio"
+            )
+            
+        target_div_col = 'Total_Dividend_1Y' if "近一年" in div_trend_metric else 'Total_Dividend_2026'
+        current_fallback_val = total_dividends_1y if target_div_col == 'Total_Dividend_1Y' else total_dividends_2026
+        
+        df_div_hist_plot = df_history_to_display.copy()
+        df_div_hist_plot[target_div_col] = pd.to_numeric(df_div_hist_plot[target_div_col], errors='coerce')
+        # 針對今日尚未有值的列填入當前計算值，並過濾掉早期尚未記錄股息的空白日期
+        df_div_hist_plot.loc[df_div_hist_plot['Date'] == today_str, target_div_col] = round(current_fallback_val, 0)
+        df_div_valid = df_div_hist_plot.dropna(subset=[target_div_col])
+        df_div_valid = df_div_valid[df_div_valid[target_div_col] > 0]
+        
+        if not df_div_valid.empty:
+            fig_div_hist = px.line(df_div_valid, x='Date', y=target_div_col, text=target_div_col, markers=True)
+            fig_div_hist.update_traces(textposition="top center", texttemplate='%{text:,.0f}', line_color='#2ecc71', marker=dict(size=8))
+            fig_div_hist.update_layout(
+                yaxis_title="累計總股息 (TWD)", 
+                xaxis_title="記錄日期", 
+                margin=dict(t=30, b=0, l=0, r=0), 
+                height=340
+            )
+            st.plotly_chart(fig_div_hist, use_container_width=True)
+            if len(df_div_valid) == 1:
+                st.caption("💡 已建立今日第一筆「總股息」歷史基準點！往後每日開啟儀表板或增減持股時，折線圖將自動延伸。")
 
     st.divider()
     
@@ -801,23 +913,23 @@ with tab1:
             
         with col_bar2:
             df_div_sorted = df_ind.sort_values(by='股息', ascending=True)
-            fig_div_bar = px.bar(df_div_sorted, x='股息', y='標的與股數', orientation='h', title='各標的 2026 累計股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
+            fig_div_bar = px.bar(df_div_sorted, x='股息', y='標的與股數', orientation='h', title='各標的 2026 累計發放股息 (TWD)', color='類別', text_auto='.2s', hover_data=['標的', '總股數'], color_discrete_map=category_color_map)
             fig_div_bar.update_layout(height=800, margin=dict(l=0, r=0, t=30, b=0), showlegend=False, yaxis={'categoryorder':'array', 'categoryarray': df_div_sorted['標的與股數']})
             st.plotly_chart(fig_div_bar, use_container_width=True)
 
 # ------------------------------------------
-# TAB 2 (獨立分頁): 每月股息現金流
+# TAB 2 (獨立分頁): 每月股息現金流 (🚀 全面以「現金股利發放日」為計算與歸屬標準)
 # ------------------------------------------
 with tab_div:
-    st.subheader("📅 每月股息現金流與配息明細")
-    st.caption("依據您目前的持有股數，自動統計各月份實際除息之現金流，一眼掌握每月有哪些標的配息、持股數與實領金額。")
+    st.subheader("📅 每月股息現金流與配息明細 (依現金股利發放日統計)")
+    st.caption("依據您目前的持有股數與各標的之「現金股利發放日 (Payment Date)」，精準統計每個月實際入帳之現金流。")
 
     if monthly_dividend_records:
         df_div_all = pd.DataFrame(monthly_dividend_records)
         
         div_period_mode = st.radio(
-            "📆 選擇統計區間：",
-            ["近一年 (滾動 365 天，與總覽同步)", "2026 年度 (1~12月)", "2025 年度 (1~12月)"],
+            "📆 選擇發放日統計區間：",
+            ["近一年 (依發放日滾動 365 天，與總覽同步)", "2026 年度發放 (1~12月)", "2025 年度發放 (1~12月)"],
             horizontal=True,
             key="div_period_radio"
         )
@@ -825,13 +937,13 @@ with tab_div:
         now_dt = pd.Timestamp.now().normalize()
         one_yr_ago_dt = now_dt - pd.Timedelta(days=365)
 
-        if div_period_mode == "近一年 (滾動 365 天，與總覽同步)":
+        if "近一年" in div_period_mode:
             df_div_filtered = df_div_all[df_div_all['in_rolling_1y'] == True].copy()
             base_months = pd.date_range(end=now_dt, periods=12, freq='MS').strftime('%Y-%m').tolist()
             data_months = sorted(df_div_filtered['年月'].unique().tolist()) if not df_div_filtered.empty else []
             month_axis = sorted(list(set(base_months + data_months)))
-            st.caption(f"💡 統計範圍：`{one_yr_ago_dt.strftime('%Y-%m-%d')}` 至 `{now_dt.strftime('%Y-%m-%d')}`（滿 365 天，與投資組合總覽之「近一年累計股息」完全對齊）。")
-        elif div_period_mode == "2026 年度 (1~12月)":
+            st.caption(f"💡 統計基準：現金股利發放日自 `{one_yr_ago_dt.strftime('%Y-%m-%d')}` 起算之近一年配息（與投資組合總覽之「近一年累計發放股息」完全對齊）。")
+        elif "2026" in div_period_mode:
             df_div_filtered = df_div_all[df_div_all['年份'] == 2026].copy()
             month_axis = [f"2026-{m:02d}" for m in range(1, 13)]
         else:
@@ -843,7 +955,9 @@ with tab_div:
                 ['年月', '標的與股數', '標的', '持股顯示', '市場'], as_index=False
             ).agg({
                 '股息金額(TWD)': 'sum',
-                '每股配息(原幣)': 'sum'
+                '每股配息(原幣)': 'sum',
+                '發放日': 'max',
+                '除息日': 'max'
             })
 
             df_month_totals = df_monthly_grouped.groupby('年月', as_index=False)['股息金額(TWD)'].sum()
@@ -857,21 +971,23 @@ with tab_div:
                 peak_month_str = "無"
 
             m_col1, m_col2, m_col3 = st.columns(3)
-            m_col1.metric("區間累計總股息 (TWD)", f"${tot_period_div:,.0f}")
-            m_col2.metric("平均每月領息 (TWD)", f"${avg_monthly_div:,.0f}")
-            m_col3.metric("最高配息月份", peak_month_str)
+            m_col1.metric("區間累計發放總股息 (TWD)", f"${tot_period_div:,.0f}")
+            m_col2.metric("平均每月實領股息 (TWD)", f"${avg_monthly_div:,.0f}")
+            m_col3.metric("最高入帳月份 (依發放日)", peak_month_str)
 
             fig_m_div = px.bar(
                 df_monthly_grouped,
                 x='年月',
                 y='股息金額(TWD)',
                 color='標的與股數',
-                title='📊 每月領取股息堆疊圖 (依標的、持有股數與股息金額拆解)',
+                title='📊 每月實際領取股息堆疊圖 (依「現金股利發放日」月份歸屬拆解)',
                 hover_data={
                     '年月': True,
                     '標的與股數': False,
                     '標的': True,
                     '持股顯示': True,
+                    '發放日': True,
+                    '除息日': True,
                     '每股配息(原幣)': ':.3f',
                     '股息金額(TWD)': ':,.0f'
                 },
@@ -889,9 +1005,9 @@ with tab_div:
                 hoverinfo='skip'
             ))
             
-            fig_m_div.update_xaxes(type='category', categoryorder='array', categoryarray=month_axis, title='配息年月')
+            fig_m_div.update_xaxes(type='category', categoryorder='array', categoryarray=month_axis, title='現金股利發放年月')
             max_y = df_month_totals['股息金額(TWD)'].max() if not df_month_totals.empty else 1000
-            fig_m_div.update_yaxes(title='股息金額 (TWD)', range=[0, max_y * 1.18])
+            fig_m_div.update_yaxes(title='發放股息金額 (TWD)', range=[0, max_y * 1.18])
             fig_m_div.update_layout(
                 barmode='stack',
                 height=520,
@@ -902,7 +1018,7 @@ with tab_div:
 
             st.divider()
 
-            tab_m_pivot, tab_m_detail = st.tabs(["📋 各標的 × 月份 股息矩陣總表", "🧾 逐筆除息入帳明細表"])
+            tab_m_pivot, tab_m_detail = st.tabs(["📋 各標的 × 發放月份 股息矩陣總表", "🧾 逐筆現金股利發放與除息明細表"])
             with tab_m_pivot:
                 pivot_df = df_div_filtered.pivot_table(
                     index=['標的', '持股顯示'],
@@ -924,7 +1040,7 @@ with tab_div:
                 col_cfg = {
                     '標的': st.column_config.TextColumn("標的名稱 (代號)", width="medium"),
                     '持股顯示': st.column_config.TextColumn("目前持股數", width="small"),
-                    '區間總計(TWD)': st.column_config.NumberColumn("區間總計 (TWD)", format="$%d")
+                    '區間總計(TWD)': st.column_config.NumberColumn("區間發放總計 (TWD)", format="$%d")
                 }
                 for m_col in month_axis:
                     col_cfg[m_col] = st.column_config.NumberColumn(m_col, format="$%d")
@@ -932,16 +1048,17 @@ with tab_div:
                 st.dataframe(pivot_df, use_container_width=True, hide_index=True, column_config=col_cfg, height=500)
 
             with tab_m_detail:
-                df_detail_show = df_div_filtered.sort_values(by=['除息日', '股息金額(TWD)'], ascending=[False, False])[
-                    ['除息日', '年月', '市場', '標的', '持股顯示', '每股配息(原幣)', '股息金額(TWD)']
+                df_detail_show = df_div_filtered.sort_values(by=['發放日', '股息金額(TWD)'], ascending=[False, False])[
+                    ['發放日', '除息日', '年月', '市場', '標的', '持股顯示', '每股配息(原幣)', '股息金額(TWD)']
                 ].copy()
                 st.dataframe(
                     df_detail_show,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        '除息日': st.column_config.TextColumn("除息日期"),
-                        '年月': st.column_config.TextColumn("所屬年月"),
+                        '發放日': st.column_config.TextColumn("💰 現金股利發放日"),
+                        '除息日': st.column_config.TextColumn("📅 除息日期"),
+                        '年月': st.column_config.TextColumn("發放所屬年月"),
                         '市場': st.column_config.TextColumn("市場"),
                         '標的': st.column_config.TextColumn("標的名稱 (代號)"),
                         '持股顯示': st.column_config.TextColumn("持有股數"),
@@ -951,7 +1068,7 @@ with tab_div:
                     height=500
                 )
         else:
-            st.info("ℹ️ 所選區間下尚無配息紀錄。")
+            st.info("ℹ️ 所選區間下尚無配息發放紀錄。")
     else:
         st.info("ℹ️ 目前持股清單中尚無歷史配息資料。")
 
